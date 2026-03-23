@@ -107,7 +107,7 @@ def build_client(credentials_path: str, project: str, location: str):
     return genai.Client(vertexai=True, project=project, location=location)
 
 
-def call_gemini(client, system: str, user: str, model: str) -> dict:
+def call_gemini(client, system: str, user: str, model: str, thinking_budget: int = 3000) -> dict:
     """
     调用 Gemini，开启 include_thoughts=True，分离 thinking 链和最终答案。
 
@@ -126,7 +126,10 @@ def call_gemini(client, system: str, user: str, model: str) -> dict:
         contents=user,
         config=types.GenerateContentConfig(
             system_instruction=system if system else None,
-            thinking_config=types.ThinkingConfig(include_thoughts=True),
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True,
+                thinking_budget=None if thinking_budget < 0 else thinking_budget,
+            ),
             temperature=1.0,
         ),
     )
@@ -211,6 +214,8 @@ def main():
                         help="基础随机种子（每个 n 会在此基础上偏移）")
     parser.add_argument("--output",      type=str,  default="data/chains.jsonl",
                         help="输出 JSONL 文件路径（默认 data/chains.jsonl）")
+    parser.add_argument("--thinking_budget", type=int, default=3000,
+                        help="Gemini thinking 最大 token 数（默认 3000，设为 -1 表示不限制）")
     parser.add_argument("--sleep",       type=float, default=2.0,
                         help="每次 API 调用后的等待秒数，避免限速（默认 2s）")
     parser.add_argument("--stats_only",  action="store_true",
@@ -279,7 +284,7 @@ def main():
                     print(f"    #{i+1:>2}/{args.num_samples} {sample_id} ... ", end="", flush=True)
                     t0 = time.time()
                     try:
-                        result = call_gemini(client, system, user, args.model)
+                        result = call_gemini(client, system, user, args.model, args.thinking_budget)
                     except Exception as e:
                         print(f"ERROR: {e}")
                         time.sleep(args.sleep * 5)
