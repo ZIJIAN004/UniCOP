@@ -26,9 +26,10 @@ generate_chains.py
   }
 
 运行示例：
-  python generate_chains.py --api_key YOUR_KEY
-  python generate_chains.py --api_key YOUR_KEY --problems tsp tsptw --sizes 5 10 20
-  GEMINI_API_KEY=YOUR_KEY python generate_chains.py --num_samples 50
+  python generate_chains.py --credentials /path/to/key.json --project my-gcp-project
+  python generate_chains.py --credentials /path/to/key.json --project my-gcp-project \
+      --problems tsp tsptw --sizes 5 10 20
+  python generate_chains.py --stats_only
 """
 
 import argparse
@@ -110,6 +111,15 @@ def load_existing_ids(output_path: str) -> set:
 # Gemini 调用
 # ─────────────────────────────────────────────────────────────────────────────
 
+def build_client(credentials_path: str, project: str, location: str):
+    """
+    使用 GCP 服务账号 JSON key 文件构造 Vertex AI 客户端。
+    与 Evolve_VLM_DPO 保持相同认证方式。
+    """
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath(credentials_path)
+    return genai.Client(vertexai=True, project=project, location=location)
+
+
 def call_gemini(client, system: str, user: str, model: str) -> dict:
     """
     调用 Gemini，开启 include_thoughts=True，分离 thinking 链和最终答案。
@@ -188,9 +198,14 @@ def print_stats(output_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description="用 Gemini 2.5 Pro 生成 COP 推理链蒸馏数据")
-    parser.add_argument("--api_key",     type=str,
-                        default=os.environ.get("GEMINI_API_KEY", ""),
-                        help="Gemini API Key（也可通过环境变量 GEMINI_API_KEY 设置）")
+    parser.add_argument("--credentials",  type=str,
+                        default=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", ""),
+                        help="GCP 服务账号 JSON key 文件路径（也可通过环境变量 GOOGLE_APPLICATION_CREDENTIALS 设置）")
+    parser.add_argument("--project",     type=str,
+                        default=os.environ.get("GCP_PROJECT", ""),
+                        help="GCP 项目 ID，如 keen-oasis-489308-m8")
+    parser.add_argument("--location",    type=str,  default="us-central1",
+                        help="Vertex AI 区域（默认 us-central1）")
     parser.add_argument("--model",       type=str,  default=GEMINI_MODEL,
                         help=f"Gemini 模型名称（默认 {GEMINI_MODEL}）")
     parser.add_argument("--unicop_path", type=str,  default=_DEFAULT_UNICOP_PATH,
@@ -217,11 +232,16 @@ def main():
         print_stats(args.output)
         return
 
-    # ── 检查 API Key ──────────────────────────────────────────────────────────
-    if not args.api_key:
+    # ── 检查 Vertex AI 认证参数 ───────────────────────────────────────────────
+    if not args.credentials:
         raise ValueError(
-            "请通过 --api_key 或环境变量 GEMINI_API_KEY 提供 API Key\n"
-            "  export GEMINI_API_KEY=your_key_here"
+            "请通过 --credentials 或环境变量 GOOGLE_APPLICATION_CREDENTIALS 指定 GCP JSON key 文件路径"
+        )
+    if not os.path.isfile(args.credentials):
+        raise FileNotFoundError(f"找不到 credentials 文件：{args.credentials}")
+    if not args.project:
+        raise ValueError(
+            "请通过 --project 或环境变量 GCP_PROJECT 指定 GCP 项目 ID"
         )
 
     # ── 加载 problems ─────────────────────────────────────────────────────────
@@ -230,7 +250,7 @@ def main():
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
-    client       = genai.Client(api_key=args.api_key)
+    client       = build_client(args.credentials, args.project, args.location)
     existing_ids = load_existing_ids(args.output)
 
     total    = len(args.problems) * len(args.sizes) * args.num_samples
@@ -239,6 +259,7 @@ def main():
     print(f"\n{'='*60}")
     print(f"  Gemini COP 推理链数据生成")
     print(f"  模型:    {args.model}")
+    print(f"  项目:    {args.project}  ({args.location})")
     print(f"  计划:    {total} 条  |  已有: {n_done} 条  |  剩余: {n_remain} 条")
     print(f"  输出:    {args.output}")
     print(f"{'='*60}\n")
