@@ -78,19 +78,6 @@ def extract_system_user(prompt: list[dict]) -> tuple[str, str]:
     return system, user
 
 
-def instance_to_serializable(instance: dict) -> dict:
-    """将 instance 中 numpy 数组转为 list，使其可被 json.dumps 序列化。"""
-    out = {}
-    for k, v in instance.items():
-        if isinstance(v, np.ndarray):
-            out[k] = v.tolist()
-        elif isinstance(v, (np.integer, np.floating)):
-            out[k] = v.item()
-        else:
-            out[k] = v
-    return out
-
-
 def load_existing_ids(output_path: str) -> set:
     """读取已有 JSONL，返回已完成的 sample id 集合（支持断点续跑）。"""
     ids = set()
@@ -169,6 +156,9 @@ def call_gemini(client, system: str, user: str, model: str) -> dict:
 
 def print_stats(output_path: str):
     """读取 JSONL，按 (problem_type, n) 打印 thinking token 统计。"""
+    if not os.path.exists(output_path):
+        print(f"文件不存在：{output_path}")
+        return
     stats = defaultdict(list)
     with open(output_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -272,7 +262,8 @@ def main():
             problem = get_problem(pt)
             for n in args.sizes:
                 combo_idx += 1
-                rng = np.random.default_rng(seed=args.seed + n)
+                pt_offset = sum(ord(c) for c in pt)  # 用问题名称字符的 ASCII 和做偏移，保证不同问题类型不重复
+                rng = np.random.default_rng(seed=args.seed + n + pt_offset)
                 print(f"[{combo_idx}/{combo_total}] {pt}  n={n}")
 
                 for i in range(args.num_samples):
