@@ -1,34 +1,36 @@
 """
 generate_chains.py
-调用 Gemini 2.5 Pro 为 COP 问题生成思维链蒸馏数据。
+后验推理蒸馏数据生成脚本：先用 LKH 求近最优解，再让 Gemini 给出简短推理链。
 
-功能：
-  - 对每个 (problem_type, n) 组合生成 num_samples 条样本
-  - 提取 Gemini 的 thinking 链和最终 answer，分别保存
-  - 统计 thinking/answer/prompt 的 token 数
-  - 支持断点续跑（已生成的 sample 自动跳过）
-  - 输出 JSONL，每行一条样本，便于后续 SFT 使用
+Pipeline：
+  1. 生成 COP 实例
+  2. LKH 求解 → 近最优答案
+  3. 构建后验推理 prompt：告知 Gemini 答案，要求简短解释推理
+  4. Gemini 输出 <think>...</think> + 答案
+  5. 保存数据
 
-输出格式（每行）：
+输出格式（JSONL，每行一条）：
   {
-    "id":              "tsp_n5_s42_i0",
+    "id":              "tsp_n20_s42_i0",
     "problem_type":    "tsp",
-    "n":               5,
+    "n":               20,
     "sample_idx":      0,
-    "prompt":          {"system": "...", "user": "..."},
-    "thinking":        "...",        <- Gemini 推理链原文
-    "answer":          "...",        <- Gemini 最终答案
+    "prompt":          {"system": "...", "user": "..."},   <- 发给 Gemini 的后验推理 prompt
+    "lkh_answer":      "Route: 0 -> 3 -> ...",             <- LKH 给出的答案
+    "thinking":        "...",                               <- Gemini 推理链（用于 SFT）
+    "answer":          "...",                               <- Gemini 复述的答案（应与 lkh_answer 一致）
     "thinking_tokens": 312,
     "answer_tokens":   48,
     "prompt_tokens":   195,
     "total_tokens":    555,
-    "timestamp":       "2026-03-23T10:00:00"
+    "timestamp":       "2026-03-25T10:00:00"
   }
 
 运行示例：
-  python generate_chains.py --credentials /path/to/key.json --project my-gcp-project
-  python generate_chains.py --credentials /path/to/key.json --project my-gcp-project \
-      --problems tsp tsptw --sizes 5 10 20
+  python generate_chains.py \
+      --credentials /path/to/key.json --project my-gcp-project \
+      --lkh_bin /path/to/LKH --lkh3_bin /path/to/LKH3
+  python generate_chains.py ... --problems tsp --sizes 5 10 --num_samples 5
   python generate_chains.py --stats_only
 """
 
@@ -44,8 +46,9 @@ import numpy as np
 from google import genai
 from google.genai import types
 
+from lkh_solver import solve as lkh_solve, LKH_BIN, LKH3_BIN
+
 # ── UniCOP-Reason 的 problems/ 路径 ───────────────────────────────────────────
-# 默认假设两个项目同级：../UniCOP-Reason
 _DEFAULT_UNICOP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "UniCOP-Reason")
 
 # ── 默认测试矩阵 ──────────────────────────────────────────────────────────────
@@ -53,13 +56,22 @@ PROBLEM_TYPES = ["tsp", "tsptw", "tspdl", "cvrp", "vrptw", "cvrptw"]
 NODE_SIZES    = [5, 10, 20, 50]
 GEMINI_MODEL  = "gemini-2.5-pro"
 
+# ── 后验推理的 system prompt 后缀（追加到各问题原有 system prompt 之后）────────
+_POSTHOC_SUFFIX = (
+    "\n\nIMPORTANT: You are given the near-optimal solution below. "
+    "Do NOT search for a new solution. Instead, think briefly in <think>...</think> "
+    "about the key properties that make this solution good "
+    "(e.g., spatial clustering, constraint satisfaction order, route efficiency). "
+    "Keep your reasoning concise and focused. "
+    "Then output the solution exactly as given in the required format."
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 工具函数
 # ─────────────────────────────────────────────────────────────────────────────
 
 def setup_problems_path(unicop_path: str):
-    """把 UniCOP-Reason 加入 sys.path，使 problems/ 可以 import。"""
     path = os.path.abspath(unicop_path)
     if not os.path.isdir(os.path.join(path, "problems")):
         raise FileNotFoundError(f"找不到 problems/ 目录：{path}\n请通过 --unicop_path 指定正确路径")
@@ -67,19 +79,44 @@ def setup_problems_path(unicop_path: str):
         sys.path.insert(0, path)
 
 
-def extract_system_user(prompt: list[dict]) -> tuple[str, str]:
-    """从 build_prompt() 返回的消息列表中提取 system / user 内容。"""
+def build_posthoc_prompt(instance: dict, problem_type: str,
+                         lkh_answer: str, orig_prompt: list[dict]) -> dict:
+    """
+    构建后验推理 prompt。
+    - system：原始规则 + 后验推理指令
+    - user：原始问题描述 + LKH 答案
+    返回 {"system": str, "user": str}
+    """
     system, user = "", ""
-    for msg in prompt:
+    for msg in orig_prompt:
         if msg["role"] == "system":
             system = msg["content"]
         elif msg["role"] == "user":
             user = msg["content"]
-    return system, user
+
+    system_posthoc = system + _POSTHOC_SUFFIX
+
+    user_posthoc = (
+        user
+        + f"\n\nThe near-optimal solution is:\n{lkh_answer}"
+        + "\n\nNow think briefly about why this solution is good, "
+          "then output it in the required format."
+    )
+
+    return {"system": system_posthoc, "user": user_posthoc}
+
+
+def _answer_has_content(answer: str, problem_type: str) -> bool:
+    """粗校验：答案中是否包含期望的关键词。"""
+    if not answer or not answer.strip():
+        return False
+    if problem_type in ("tsp", "tsptw", "tspdl"):
+        return "route:" in answer.lower() or "0 ->" in answer
+    else:
+        return "route" in answer.lower() and "0 ->" in answer
 
 
 def load_existing_ids(output_path: str) -> set:
-    """读取已有 JSONL，返回已完成的 sample id 集合（支持断点续跑）。"""
     ids = set()
     if not os.path.exists(output_path):
         return ids
@@ -95,47 +132,35 @@ def load_existing_ids(output_path: str) -> set:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Gemini 调用
+# Vertex AI 客户端 & Gemini 调用
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_client(credentials_path: str, project: str, location: str):
-    """
-    使用 GCP 服务账号 JSON key 文件构造 Vertex AI 客户端。
-    与 Evolve_VLM_DPO 保持相同认证方式。
-    """
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath(credentials_path)
     return genai.Client(vertexai=True, project=project, location=location)
 
 
-def call_gemini(client, system: str, user: str, model: str, thinking_budget: int = 3000) -> dict:
+def call_gemini(client, system: str, user: str, model: str,
+                thinking_budget: int = -1) -> dict:
     """
     调用 Gemini，开启 include_thoughts=True，分离 thinking 链和最终答案。
-
-    返回：
-      {
-        "thinking":        str,   # <think> 推理链原文
-        "answer":          str,   # 最终答案
-        "thinking_tokens": int | None,
-        "answer_tokens":   int | None,
-        "prompt_tokens":   int | None,
-        "total_tokens":    int | None,
-      }
+    thinking_budget=-1 表示不限制。
     """
+    thinking_cfg = types.ThinkingConfig(
+        include_thoughts=True,
+        thinking_budget=None if thinking_budget < 0 else thinking_budget,
+    )
     response = client.models.generate_content(
         model=model,
         contents=user,
         config=types.GenerateContentConfig(
             system_instruction=system if system else None,
-            thinking_config=types.ThinkingConfig(
-                include_thoughts=True,
-                thinking_budget=None if thinking_budget < 0 else thinking_budget,
-            ),
+            thinking_config=thinking_cfg,
             temperature=1.0,
         ),
     )
 
-    thinking_parts = []
-    answer_parts   = []
+    thinking_parts, answer_parts = [], []
     for part in response.candidates[0].content.parts:
         if getattr(part, "thought", False):
             thinking_parts.append(part.text)
@@ -146,10 +171,10 @@ def call_gemini(client, system: str, user: str, model: str, thinking_budget: int
     return {
         "thinking":        "\n".join(thinking_parts),
         "answer":          "\n".join(answer_parts),
-        "thinking_tokens": getattr(usage, "thoughts_token_count",    None),
-        "answer_tokens":   getattr(usage, "candidates_token_count",  None),
-        "prompt_tokens":   getattr(usage, "prompt_token_count",      None),
-        "total_tokens":    getattr(usage, "total_token_count",       None),
+        "thinking_tokens": getattr(usage, "thoughts_token_count",   None),
+        "answer_tokens":   getattr(usage, "candidates_token_count", None),
+        "prompt_tokens":   getattr(usage, "prompt_token_count",     None),
+        "total_tokens":    getattr(usage, "total_token_count",      None),
     }
 
 
@@ -158,30 +183,36 @@ def call_gemini(client, system: str, user: str, model: str, thinking_budget: int
 # ─────────────────────────────────────────────────────────────────────────────
 
 def print_stats(output_path: str):
-    """读取 JSONL，按 (problem_type, n) 打印 thinking token 统计。"""
     if not os.path.exists(output_path):
         print(f"文件不存在：{output_path}")
         return
+
     stats = defaultdict(list)
+    lkh_fail = defaultdict(int)
     with open(output_path, "r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             r = json.loads(line)
+            key = (r["problem_type"], r["n"])
             if r.get("thinking_tokens") is not None:
-                stats[(r["problem_type"], r["n"])].append(r["thinking_tokens"])
+                stats[key].append(r["thinking_tokens"])
+            if not r.get("lkh_answer"):
+                lkh_fail[key] += 1
 
     if not stats:
         print("（暂无数据）")
         return
 
     col = 14
-    print(f"\n{'Problem':<10} {'n':>5}  {'count':>6}  {'mean_think':>{col}}  {'max_think':>{col}}  {'min_think':>{col}}")
-    print("-" * (10 + 5 + 6 + col * 3 + 10))
+    print(f"\n{'Problem':<10} {'n':>5}  {'count':>6}  {'mean_think':>{col}}  "
+          f"{'max_think':>{col}}  {'lkh_fail':>8}")
+    print("-" * 60)
     for (pt, n), toks in sorted(stats.items()):
         arr = np.array(toks)
-        print(f"{pt:<10} {n:>5}  {len(toks):>6}  {arr.mean():>{col}.0f}  {arr.max():>{col}.0f}  {arr.min():>{col}.0f}")
+        print(f"{pt:<10} {n:>5}  {len(toks):>6}  {arr.mean():>{col}.0f}  "
+              f"{arr.max():>{col}.0f}  {lkh_fail[(pt,n)]:>8}")
     print()
 
 
@@ -190,72 +221,73 @@ def print_stats(output_path: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="用 Gemini 2.5 Pro 生成 COP 推理链蒸馏数据")
-    parser.add_argument("--credentials",  type=str,
+    parser = argparse.ArgumentParser(description="后验推理蒸馏数据生成（LKH求解 + Gemini解释）")
+
+    # Vertex AI 认证
+    parser.add_argument("--credentials", type=str,
                         default=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", ""),
-                        help="GCP 服务账号 JSON key 文件路径（也可通过环境变量 GOOGLE_APPLICATION_CREDENTIALS 设置）")
+                        help="GCP 服务账号 JSON key 文件路径")
     parser.add_argument("--project",     type=str,
                         default=os.environ.get("GCP_PROJECT", ""),
                         help="GCP 项目 ID，如 keen-oasis-489308-m8")
-    parser.add_argument("--location",    type=str,  default="us-central1",
-                        help="Vertex AI 区域（默认 us-central1）")
-    parser.add_argument("--model",       type=str,  default=GEMINI_MODEL,
-                        help=f"Gemini 模型名称（默认 {GEMINI_MODEL}）")
-    parser.add_argument("--unicop_path", type=str,  default=_DEFAULT_UNICOP_PATH,
-                        help="UniCOP-Reason 项目路径（默认 ../UniCOP-Reason）")
+    parser.add_argument("--location",    type=str, default="us-central1")
+
+    # LKH
+    parser.add_argument("--lkh_bin",  type=str, default=os.environ.get("LKH_BIN",  LKH_BIN),
+                        help="LKH-2 二进制路径（处理 TSP / TSPTW）")
+    parser.add_argument("--lkh3_bin", type=str, default=os.environ.get("LKH3_BIN", LKH3_BIN),
+                        help="LKH-3 二进制路径（处理 CVRP / VRPTW / CVRPTW）")
+    parser.add_argument("--lkh_runs",    type=int,   default=1,
+                        help="LKH 每个实例的运行次数（默认 1，越大质量越高但越慢）")
+    parser.add_argument("--lkh_timeout", type=int,   default=60,
+                        help="LKH 单次求解超时秒数（默认 60）")
+
+    # Gemini
+    parser.add_argument("--model",          type=str,  default=GEMINI_MODEL)
+    parser.add_argument("--thinking_budget", type=int,  default=-1,
+                        help="Gemini thinking 最大 token 数（默认 -1 不限制；后验推理 Gemini 已知答案，thinking 自然较短）")
+
+    # 数据生成
+    parser.add_argument("--unicop_path", type=str,  default=_DEFAULT_UNICOP_PATH)
     parser.add_argument("--problems",    type=str,  nargs="+", default=PROBLEM_TYPES,
-                        choices=PROBLEM_TYPES,
-                        help="要生成的问题类型（默认全部）")
-    parser.add_argument("--sizes",       type=int,  nargs="+", default=NODE_SIZES,
-                        help="节点规模列表（默认 5 10 20 50）")
-    parser.add_argument("--num_samples", type=int,  default=20,
-                        help="每个 (problem, n) 组合的样本数（默认 20）")
-    parser.add_argument("--seed",        type=int,  default=42,
-                        help="基础随机种子（每个 n 会在此基础上偏移）")
-    parser.add_argument("--output",      type=str,  default="data/chains.jsonl",
-                        help="输出 JSONL 文件路径（默认 data/chains.jsonl）")
-    parser.add_argument("--thinking_budget", type=int, default=-1,
-                        help="Gemini thinking 最大 token 数（默认 -1 即不限制，让 Gemini 自由思考；后续用压缩脚本缩短）")
+                        choices=PROBLEM_TYPES)
+    parser.add_argument("--sizes",       type=int,  nargs="+", default=NODE_SIZES)
+    parser.add_argument("--num_samples", type=int,  default=50,
+                        help="每个 (problem, n) 组合的样本数（默认 50）")
+    parser.add_argument("--seed",        type=int,  default=42)
+    parser.add_argument("--output",      type=str,  default="data/chains.jsonl")
     parser.add_argument("--sleep",       type=float, default=2.0,
-                        help="每次 API 调用后的等待秒数，避免限速（默认 2s）")
+                        help="每次 Gemini API 调用后的等待秒数（防限速）")
     parser.add_argument("--stats_only",  action="store_true",
-                        help="只打印已有数据的统计，不发起新 API 调用")
+                        help="只打印已有数据的统计，不发起新请求")
     args = parser.parse_args()
 
-    # ── 仅统计模式 ────────────────────────────────────────────────────────────
     if args.stats_only:
         print_stats(args.output)
         return
 
-    # ── 检查 Vertex AI 认证参数 ───────────────────────────────────────────────
+    # 参数检查
     if not args.credentials:
-        raise ValueError(
-            "请通过 --credentials 或环境变量 GOOGLE_APPLICATION_CREDENTIALS 指定 GCP JSON key 文件路径"
-        )
+        raise ValueError("请通过 --credentials 或 GOOGLE_APPLICATION_CREDENTIALS 指定 GCP JSON key 路径")
     if not os.path.isfile(args.credentials):
         raise FileNotFoundError(f"找不到 credentials 文件：{args.credentials}")
     if not args.project:
-        raise ValueError(
-            "请通过 --project 或环境变量 GCP_PROJECT 指定 GCP 项目 ID"
-        )
+        raise ValueError("请通过 --project 或 GCP_PROJECT 指定 GCP 项目 ID")
 
-    # ── 加载 problems ─────────────────────────────────────────────────────────
     setup_problems_path(args.unicop_path)
-    from problems import get_problem  # noqa: E402（延迟 import）
+    from problems import get_problem  # noqa: E402
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-
     client       = build_client(args.credentials, args.project, args.location)
     existing_ids = load_existing_ids(args.output)
 
     total    = len(args.problems) * len(args.sizes) * args.num_samples
     n_done   = len(existing_ids)
-    n_remain = total - n_done
     print(f"\n{'='*60}")
-    print(f"  Gemini COP 推理链数据生成")
+    print(f"  后验推理蒸馏数据生成（LKH + Gemini）")
     print(f"  模型:    {args.model}")
     print(f"  项目:    {args.project}  ({args.location})")
-    print(f"  计划:    {total} 条  |  已有: {n_done} 条  |  剩余: {n_remain} 条")
+    print(f"  计划:    {total} 条  |  已有: {n_done} 条  |  剩余: {total - n_done} 条")
     print(f"  输出:    {args.output}")
     print(f"{'='*60}\n")
 
@@ -267,7 +299,7 @@ def main():
             problem = get_problem(pt)
             for n in args.sizes:
                 combo_idx += 1
-                pt_offset = sum(ord(c) for c in pt)  # 用问题名称字符的 ASCII 和做偏移，保证不同问题类型不重复
+                pt_offset = sum(ord(c) for c in pt)
                 rng = np.random.default_rng(seed=args.seed + n + pt_offset)
                 print(f"[{combo_idx}/{combo_total}] {pt}  n={n}")
 
@@ -277,32 +309,61 @@ def main():
                         print(f"    [skip] {sample_id}")
                         continue
 
-                    instance        = problem.generate_instance(n, rng)
-                    prompt          = problem.build_prompt(instance)
-                    system, user    = extract_system_user(prompt)
+                    # ── Step 1: 生成实例 ──────────────────────────────────
+                    instance = problem.generate_instance(n, rng)
 
-                    print(f"    #{i+1:>2}/{args.num_samples} {sample_id} ... ", end="", flush=True)
+                    # ── Step 2: LKH 求解 ──────────────────────────────────
+                    print(f"    #{i+1:>2}/{args.num_samples} {sample_id}  LKH...", end=" ", flush=True)
+                    lkh_answer = lkh_solve(
+                        pt, instance,
+                        lkh_bin=args.lkh_bin, lkh3_bin=args.lkh3_bin,
+                        runs=args.lkh_runs, seed=args.seed, timeout=args.lkh_timeout
+                    )
+                    if lkh_answer is None:
+                        print("LKH FAILED, skip")
+                        continue
+                    print("ok →", end=" ", flush=True)
+
+                    # ── Step 3: 构建后验推理 prompt ───────────────────────
+                    orig_prompt = problem.build_prompt(instance)
+                    prompt_dict = build_posthoc_prompt(instance, pt, lkh_answer, orig_prompt)
+
+                    # ── Step 4: Gemini 生成推理链 ─────────────────────────
                     t0 = time.time()
                     try:
-                        result = call_gemini(client, system, user, args.model, args.thinking_budget)
+                        result = call_gemini(
+                            client,
+                            prompt_dict["system"],
+                            prompt_dict["user"],
+                            args.model,
+                            args.thinking_budget,
+                        )
                     except Exception as e:
-                        print(f"ERROR: {e}")
+                        print(f"Gemini ERROR: {e}")
                         time.sleep(args.sleep * 5)
                         continue
                     elapsed = time.time() - t0
 
+                    # ── Step 5: 校验答案 ──────────────────────────────────
+                    answer_ok = _answer_has_content(result["answer"], pt)
+                    status = "ok" if answer_ok else "NO_ANSWER"
                     print(
                         f"think={result['thinking_tokens']} tok  "
                         f"ans={result['answer_tokens']} tok  "
-                        f"({elapsed:.1f}s)"
+                        f"[{status}]  ({elapsed:.1f}s)"
                     )
+                    if not answer_ok:
+                        time.sleep(args.sleep)
+                        continue
 
+                    # ── Step 6: 保存 ──────────────────────────────────────
                     record = {
                         "id":              sample_id,
                         "problem_type":    pt,
                         "n":               n,
                         "sample_idx":      i,
-                        "prompt":          {"system": system, "user": user},
+                        "prompt":          prompt_dict,       # 后验推理 prompt（含 LKH 答案）
+                        "lkh_answer":      lkh_answer,        # LKH 原始答案
                         "thinking":        result["thinking"],
                         "answer":          result["answer"],
                         "thinking_tokens": result["thinking_tokens"],
@@ -313,7 +374,6 @@ def main():
                     }
                     fout.write(json.dumps(record, ensure_ascii=False) + "\n")
                     fout.flush()
-
                     time.sleep(args.sleep)
 
                 print()
