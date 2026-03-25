@@ -58,12 +58,12 @@ GEMINI_MODEL  = "gemini-2.5-pro"
 
 # ── 后验推理的 system prompt 后缀（追加到各问题原有 system prompt 之后）────────
 _POSTHOC_SUFFIX = (
-    "\n\nIMPORTANT: You are given the near-optimal solution below. "
-    "Do NOT search for a new solution. Instead, think briefly in <think>...</think> "
-    "about the key properties that make this solution good "
-    "(e.g., spatial clustering, constraint satisfaction order, route efficiency). "
-    "Keep your reasoning concise and focused. "
-    "Then output the solution exactly as given in the required format."
+    "\n\nYou are given the near-optimal solution. "
+    "Do NOT search for a new solution. "
+    "First write a brief reasoning in <think>...</think> explaining the key properties "
+    "that make this solution good (spatial structure, constraint order, route efficiency, etc.). "
+    "Keep the <think> block concise (a few hundred words at most). "
+    "Then copy the solution exactly in the required output format."
 )
 
 
@@ -140,39 +140,27 @@ def build_client(credentials_path: str, project: str, location: str):
     return genai.Client(vertexai=True, project=project, location=location)
 
 
-def call_gemini(client, system: str, user: str, model: str,
-                thinking_budget: int = -1) -> dict:
+def call_gemini(client, system: str, user: str, model: str) -> dict:
     """
-    调用 Gemini，开启 include_thoughts=True，分离 thinking 链和最终答案。
-    thinking_budget=-1 表示不限制。
+    调用 Gemini（不开启 thinking mode）。
+    Gemini 的完整可见输出即为 SFT 训练目标：
+      <think>...</think>
+      [answer in required format]
     """
-    thinking_cfg = types.ThinkingConfig(
-        include_thoughts=True,
-        thinking_budget=None if thinking_budget < 0 else thinking_budget,
-    )
     response = client.models.generate_content(
         model=model,
         contents=user,
         config=types.GenerateContentConfig(
             system_instruction=system if system else None,
-            thinking_config=thinking_cfg,
             temperature=1.0,
         ),
     )
 
-    thinking_parts, answer_parts = [], []
-    for part in response.candidates[0].content.parts:
-        if getattr(part, "thought", False):
-            thinking_parts.append(part.text)
-        else:
-            answer_parts.append(part.text)
-
+    full_output = response.candidates[0].content.parts[0].text
     usage = response.usage_metadata
     return {
-        "thinking":        "\n".join(thinking_parts),
-        "answer":          "\n".join(answer_parts),
-        "thinking_tokens": getattr(usage, "thoughts_token_count",   None),
-        "answer_tokens":   getattr(usage, "candidates_token_count", None),
+        "output":          full_output,                                   # 完整输出，直接用于 SFT
+        "output_tokens":   getattr(usage, "candidates_token_count", None),
         "prompt_tokens":   getattr(usage, "prompt_token_count",     None),
         "total_tokens":    getattr(usage, "total_token_count",      None),
     }
@@ -187,7 +175,7 @@ def print_stats(output_path: str):
         print(f"文件不存在：{output_path}")
         return
 
-    stats = defaultdict(list)
+    stats    = defaultdict(list)
     lkh_fail = defaultdict(int)
     with open(output_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -196,8 +184,8 @@ def print_stats(output_path: str):
                 continue
             r = json.loads(line)
             key = (r["problem_type"], r["n"])
-            if r.get("thinking_tokens") is not None:
-                stats[key].append(r["thinking_tokens"])
+            if r.get("output_tokens") is not None:
+                stats[key].append(r["output_tokens"])
             if not r.get("lkh_answer"):
                 lkh_fail[key] += 1
 
@@ -206,8 +194,8 @@ def print_stats(output_path: str):
         return
 
     col = 14
-    print(f"\n{'Problem':<10} {'n':>5}  {'count':>6}  {'mean_think':>{col}}  "
-          f"{'max_think':>{col}}  {'lkh_fail':>8}")
+    print(f"\n{'Problem':<10} {'n':>5}  {'count':>6}  {'mean_output':>{col}}  "
+          f"{'max_output':>{col}}  {'lkh_fail':>8}")
     print("-" * 60)
     for (pt, n), toks in sorted(stats.items()):
         arr = np.array(toks)
@@ -243,9 +231,7 @@ def main():
                         help="LKH 单次求解超时秒数（默认 60）")
 
     # Gemini
-    parser.add_argument("--model",          type=str,  default=GEMINI_MODEL)
-    parser.add_argument("--thinking_budget", type=int,  default=-1,
-                        help="Gemini thinking 最大 token 数（默认 -1 不限制；后验推理 Gemini 已知答案，thinking 自然较短）")
+    parser.add_argument("--model", type=str, default=GEMINI_MODEL)
 
     # 数据生成
     parser.add_argument("--unicop_path", type=str,  default=_DEFAULT_UNICOP_PATH)
@@ -328,7 +314,7 @@ def main():
                     orig_prompt = problem.build_prompt(instance)
                     prompt_dict = build_posthoc_prompt(instance, pt, lkh_answer, orig_prompt)
 
-                    # ── Step 4: Gemini 生成推理链 ─────────────────────────
+                    # ── Step 4: Gemini 生成后验推理输出 ──────────────────
                     t0 = time.time()
                     try:
                         result = call_gemini(
@@ -336,7 +322,6 @@ def main():
                             prompt_dict["system"],
                             prompt_dict["user"],
                             args.model,
-                            args.thinking_budget,
                         )
                     except Exception as e:
                         print(f"Gemini ERROR: {e}")
@@ -344,12 +329,11 @@ def main():
                         continue
                     elapsed = time.time() - t0
 
-                    # ── Step 5: 校验答案 ──────────────────────────────────
-                    answer_ok = _answer_has_content(result["answer"], pt)
+                    # ── Step 5: 校验输出包含答案 ──────────────────────────
+                    answer_ok = _answer_has_content(result["output"], pt)
                     status = "ok" if answer_ok else "NO_ANSWER"
                     print(
-                        f"think={result['thinking_tokens']} tok  "
-                        f"ans={result['answer_tokens']} tok  "
+                        f"output={result['output_tokens']} tok  "
                         f"[{status}]  ({elapsed:.1f}s)"
                     )
                     if not answer_ok:
@@ -358,19 +342,17 @@ def main():
 
                     # ── Step 6: 保存 ──────────────────────────────────────
                     record = {
-                        "id":              sample_id,
-                        "problem_type":    pt,
-                        "n":               n,
-                        "sample_idx":      i,
-                        "prompt":          prompt_dict,       # 后验推理 prompt（含 LKH 答案）
-                        "lkh_answer":      lkh_answer,        # LKH 原始答案
-                        "thinking":        result["thinking"],
-                        "answer":          result["answer"],
-                        "thinking_tokens": result["thinking_tokens"],
-                        "answer_tokens":   result["answer_tokens"],
-                        "prompt_tokens":   result["prompt_tokens"],
-                        "total_tokens":    result["total_tokens"],
-                        "timestamp":       datetime.now().isoformat(),
+                        "id":            sample_id,
+                        "problem_type":  pt,
+                        "n":             n,
+                        "sample_idx":    i,
+                        "prompt":        prompt_dict,    # 后验推理 prompt（含 LKH 答案）
+                        "lkh_answer":    lkh_answer,     # LKH 原始答案（供参考/校验）
+                        "output":        result["output"],  # <think>...</think>\n[answer]，直接用于 SFT
+                        "output_tokens": result["output_tokens"],
+                        "prompt_tokens": result["prompt_tokens"],
+                        "total_tokens":  result["total_tokens"],
+                        "timestamp":     datetime.now().isoformat(),
                     }
                     fout.write(json.dumps(record, ensure_ascii=False) + "\n")
                     fout.flush()
