@@ -11,19 +11,17 @@ Pipeline：
 
 输出格式（JSONL，每行一条）：
   {
-    "id":              "tsp_n20_s42_i0",
-    "problem_type":    "tsp",
-    "n":               20,
-    "sample_idx":      0,
-    "prompt":          {"system": "...", "user": "..."},   <- 发给 Gemini 的后验推理 prompt
-    "lkh_answer":      "Route: 0 -> 3 -> ...",             <- LKH 给出的答案
-    "thinking":        "...",                               <- Gemini 推理链（用于 SFT）
-    "answer":          "...",                               <- Gemini 复述的答案（应与 lkh_answer 一致）
-    "thinking_tokens": 312,
-    "answer_tokens":   48,
-    "prompt_tokens":   195,
-    "total_tokens":    555,
-    "timestamp":       "2026-03-25T10:00:00"
+    "id":            "tsp_n20_s42_i0",
+    "problem_type":  "tsp",
+    "n":             20,
+    "sample_idx":    0,
+    "prompt":        {"system": "...", "user": "..."},  <- 发给 Gemini 的后验推理 prompt
+    "lkh_answer":    "Route: 0 -> 3 -> ...",            <- LKH 原始答案（参考/校验用）
+    "output":        "<think>...</think>\nRoute: ...",  <- Gemini 完整输出，直接用于 SFT
+    "output_tokens": 360,
+    "prompt_tokens": 195,
+    "total_tokens":  555,
+    "timestamp":     "2026-03-25T10:00:00"
   }
 
 运行示例：
@@ -79,8 +77,7 @@ def setup_problems_path(unicop_path: str):
         sys.path.insert(0, path)
 
 
-def build_posthoc_prompt(instance: dict, problem_type: str,
-                         lkh_answer: str, orig_prompt: list[dict]) -> dict:
+def build_posthoc_prompt(lkh_answer: str, orig_prompt: list[dict]) -> dict:
     """
     构建后验推理 prompt。
     - system：原始规则 + 后验推理指令
@@ -156,7 +153,10 @@ def call_gemini(client, system: str, user: str, model: str) -> dict:
         ),
     )
 
-    full_output = response.candidates[0].content.parts[0].text
+    full_output = "".join(
+        part.text for part in response.candidates[0].content.parts
+        if hasattr(part, "text") and part.text
+    )
     usage = response.usage_metadata
     return {
         "output":          full_output,                                   # 完整输出，直接用于 SFT
@@ -291,12 +291,13 @@ def main():
 
                 for i in range(args.num_samples):
                     sample_id = f"{pt}_n{n}_s{args.seed}_i{i}"
+
+                    # 无论是否跳过都要生成实例，保证 rng 状态与首次运行一致
+                    instance = problem.generate_instance(n, rng)
+
                     if sample_id in existing_ids:
                         print(f"    [skip] {sample_id}")
                         continue
-
-                    # ── Step 1: 生成实例 ──────────────────────────────────
-                    instance = problem.generate_instance(n, rng)
 
                     # ── Step 2: LKH 求解 ──────────────────────────────────
                     print(f"    #{i+1:>2}/{args.num_samples} {sample_id}  LKH...", end=" ", flush=True)
@@ -312,7 +313,7 @@ def main():
 
                     # ── Step 3: 构建后验推理 prompt ───────────────────────
                     orig_prompt = problem.build_prompt(instance)
-                    prompt_dict = build_posthoc_prompt(instance, pt, lkh_answer, orig_prompt)
+                    prompt_dict = build_posthoc_prompt(lkh_answer, orig_prompt)
 
                     # ── Step 4: Gemini 生成后验推理输出 ──────────────────
                     t0 = time.time()
