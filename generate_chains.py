@@ -214,8 +214,8 @@ def main():
                         help="基础随机种子（每个 n 会在此基础上偏移）")
     parser.add_argument("--output",      type=str,  default="data/chains.jsonl",
                         help="输出 JSONL 文件路径（默认 data/chains.jsonl）")
-    parser.add_argument("--thinking_budget", type=int, default=3000,
-                        help="Gemini thinking 最大 token 数（默认 3000，设为 -1 表示不限制）")
+    parser.add_argument("--thinking_budget", type=int, default=-1,
+                        help="Gemini thinking 最大 token 数（默认 -1 即不限制，让 Gemini 自由思考；后续用压缩脚本缩短）")
     parser.add_argument("--sleep",       type=float, default=2.0,
                         help="每次 API 调用后的等待秒数，避免限速（默认 2s）")
     parser.add_argument("--stats_only",  action="store_true",
