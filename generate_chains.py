@@ -58,8 +58,11 @@ GEMINI_MODEL  = "gemini-2.5-pro"
 _POSTHOC_SUFFIX = (
     "\n\nYou are given the near-optimal solution. "
     "Do NOT search for a new solution. "
-    "First write a brief reasoning in <think>...</think> explaining the key properties "
-    "that make this solution good (spatial structure, constraint order, route efficiency, etc.). "
+    "In <think>...</think>, reconstruct the step-by-step reasoning that would lead "
+    "a solver to this solution: explain which nodes to visit first and why, "
+    "how geographic proximity or constraints guide each selection, "
+    "and what key decisions shape the final route order. "
+    "Write as if you are constructing the solution from scratch, not evaluating it. "
     "Keep the <think> block concise (a few hundred words at most). "
     "Then copy the solution exactly in the required output format."
 )
