@@ -58,6 +58,7 @@ GEMINI_MODEL  = "gemini-2.5-pro"
 _POSTHOC_SUFFIX = (
     "\n\nYou are given the near-optimal solution. "
     "Do NOT search for a new solution. "
+    "Do NOT restate the problem description or copy the solution inside <think>. "
     "In <think>...</think>, reconstruct the step-by-step reasoning that would lead "
     "a solver to this solution: explain which nodes to visit first and why, "
     "how geographic proximity or constraints guide each selection, "
