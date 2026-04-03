@@ -50,7 +50,7 @@ from lkh_solver import solve as lkh_solve, LKH_BIN, LKH3_BIN
 _DEFAULT_UNICOP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "UniCOP-Reason")
 
 # ── 默认测试矩阵 ──────────────────────────────────────────────────────────────
-PROBLEM_TYPES = ["tsp", "tsptw", "tspdl", "cvrp", "vrptw", "cvrptw"]
+PROBLEM_TYPES = ["tsp", "cvrp", "tsptw", "vrptw"]
 NODE_SIZES    = [5, 10, 20, 50]
 GEMINI_MODEL  = "gemini-2.5-pro"
 
