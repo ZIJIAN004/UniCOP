@@ -26,6 +26,8 @@ LKH3_BIN = os.environ.get("LKH3_BIN", "/path/to/LKH3")    # LKH-3 binary
 
 # 坐标缩放系数：LKH/PyVRP 使用整数距离，原始坐标在 [0,1]，放大以保留精度
 _COORD_SCALE = 1_000_000
+# PyVRP 内部使用 32-bit 整数，时间窗上限需限制在安全范围内（2e9 < 2^31-1）
+_MAX_TW_SCALED = 2_000_000_000
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,7 +78,7 @@ def _solve_tsp(instance, lkh_bin, runs=1, seed=42, timeout=60):
                 f.write(f"{i+1} {x} {y}\n")
             f.write("EOF\n")
 
-        _write_par(par_f, tsp_f, tour_f, runs, seed)
+        _write_par(par_f, tsp_f, tour_f, runs, seed, timeout)
         _run_lkh(lkh_bin, par_f, timeout)
 
         tour = _parse_tour(tour_f)
@@ -110,14 +112,14 @@ def _solve_tsptw_pyvrp(instance, timeout=60):
         x=int(coords[0][0] * S),
         y=int(coords[0][1] * S),
         tw_early=int(tw[0][0] * S),
-        tw_late=int(min(tw[0][1], 1e8) * S),
+        tw_late=min(int(tw[0][1] * S), _MAX_TW_SCALED),
     )
     for i in range(1, n + 1):
         m.add_client(
             x=int(coords[i][0] * S),
             y=int(coords[i][1] * S),
             tw_early=int(tw[i][0] * S),
-            tw_late=int(min(tw[i][1], 1e8) * S),
+            tw_late=min(int(tw[i][1] * S), _MAX_TW_SCALED),
             demand=1,
             service_duration=0,
         )
@@ -168,7 +170,7 @@ def _solve_cvrp(instance, lkh3_bin, runs=1, seed=42, timeout=120):
                 f.write(f"{i+1} {int(round(demands[i] * _COORD_SCALE))}\n")
             f.write("DEPOT_SECTION\n1\n-1\nEOF\n")
 
-        _write_par(par_f, vrp_f, tour_f, runs, seed)
+        _write_par(par_f, vrp_f, tour_f, runs, seed, timeout)
         _run_lkh(lkh3_bin, par_f, timeout)
 
         tour = _parse_tour(tour_f)
@@ -202,14 +204,14 @@ def _solve_vrptw_pyvrp(instance, timeout=120):
         x=int(coords[0][0] * S),
         y=int(coords[0][1] * S),
         tw_early=int(tw[0][0] * S),
-        tw_late=int(min(tw[0][1], 1e8) * S),
+        tw_late=min(int(tw[0][1] * S), _MAX_TW_SCALED),
     )
     for i in range(1, n + 1):
         m.add_client(
             x=int(coords[i][0] * S),
             y=int(coords[i][1] * S),
             tw_early=int(tw[i][0] * S),
-            tw_late=int(min(tw[i][1], 1e8) * S),
+            tw_late=min(int(tw[i][1] * S), _MAX_TW_SCALED),
             demand=1,
             service_duration=0,
         )
@@ -237,14 +239,14 @@ def _solve_vrptw_pyvrp(instance, timeout=120):
 # 辅助函数
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _write_par(par_f, prob_f, tour_f, runs, seed):
+def _write_par(par_f, prob_f, tour_f, runs, seed, timeout=60):
     with open(par_f, "w") as f:
         f.write(f"PROBLEM_FILE = {prob_f}\n")
         f.write(f"OUTPUT_TOUR_FILE = {tour_f}\n")
         f.write(f"RUNS = {runs}\n")
         f.write(f"SEED = {seed}\n")
         f.write("TRACE_LEVEL = 0\n")
-        f.write("TIME_LIMIT = 60\n")
+        f.write(f"TIME_LIMIT = {timeout}\n")
 
 
 def _run_lkh(lkh_bin, par_f, timeout):
