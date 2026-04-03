@@ -1,2 +1,3 @@
 google-genai>=1.0.0
 numpy>=1.24.0
+pyvrp>=0.8.0
