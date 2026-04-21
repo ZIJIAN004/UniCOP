@@ -164,7 +164,7 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int) -> Dataset:
                 skipped += 1
                 continue
 
-            # 1. 用 chat_template 只渲染到 <|Assistant|><think>\n 为止
+            # 1. 用 chat_template 只渲染到 <|Assistant|><think>\n 为止 (作为 prompt)
             prompt_text = tokenizer.apply_chat_template(
                 [{"role": "system", "content": orig_system},
                  {"role": "user",   "content": orig_user}],
@@ -181,28 +181,32 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int) -> Dataset:
             if output_stripped.startswith("<think>"):
                 output_stripped = output_stripped[len("<think>"):].lstrip("\n")
 
-            # 4. 手动拼完整 text
-            text = prompt_text + output_stripped + tokenizer.eos_token
+            # 4. completion = thinking + </think> + answer + eos
+            #    (eos_token 显式加, 让模型学会"完整答案结束就停止")
+            completion_text = output_stripped + tokenizer.eos_token
 
+            # 用 prompt-completion 格式替代 language modeling 格式。
+            # TRL SFTTrainer 检测到 "prompt" + "completion" 两列时,默认
+            # completion_only_loss=True, 只在 completion tokens 上做 loss,
+            # prompt tokens 的 label 被 mask 成 -100。
+            # 这避免了"让模型在 prompt 上浪费梯度"的严重问题。
             records.append({
-                "text": text,
+                "prompt":     prompt_text,
+                "completion": completion_text,
                 "problem_type": r.get("problem_type", "unknown"),
                 "n": r.get("n", 0),
             })
 
-    # ── 抽样打印第 1 条的 assistant 段, 人眼验证 <think>...</think> 是否完整保留 ──
+    # ── 抽样打印第 1 条的 prompt 末尾 + completion 开头, 人眼验证结构 ──
     if records:
-        first_text = records[0]["text"]
-        assistant_marker = "<|Assistant|>"  # R1 系列的 assistant 标记
-        idx = first_text.find(assistant_marker)
-        if idx != -1:
-            sample_tail = first_text[idx:idx + 400]
-            has_think_open = "<think>" in sample_tail
-            has_think_close = "</think>" in sample_tail
-            print(f"  [首条样本验证] assistant 段含 <think>: {has_think_open}, 含 </think>: {has_think_close}")
-            if not (has_think_open and has_think_close):
-                print(f"  [FAIL] 首条样本的 <think>...</think> 不完整, 请检查 chat_template 兼容性!")
-                print(f"         assistant 段前 300 字: {sample_tail[:300]!r}")
+        first = records[0]
+        print(f"  [首条样本验证] prompt 末尾 80 字: {first['prompt'][-80:]!r}")
+        print(f"                  completion 开头 120 字: {first['completion'][:120]!r}")
+        has_think_close = "</think>" in first["completion"]
+        has_route = ("Route" in first["completion"]) or ("路径" in first["completion"]) or ("路线" in first["completion"])
+        print(f"                  completion 含 </think>: {has_think_close}, 含 Route 类关键词: {has_route}")
+        if not has_think_close:
+            print(f"  [FAIL] completion 没有 </think>, thinking chain 不完整!")
 
     if skipped:
         print(f"  跳过 {skipped} 条无效记录")
@@ -215,17 +219,18 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int) -> Dataset:
     print(f"  问题类型分布: {dict(sorted(type_counts.items()))}")
     print(f"  规模分布:     {dict(sorted(size_counts.items()))}")
 
-    # 统计超长样本
+    # 统计超长样本 (prompt + completion 合计)
     num_over = 0
     for r in records:
-        token_len = len(tokenizer.encode(r["text"]))
+        token_len = len(tokenizer.encode(r["prompt"])) + len(tokenizer.encode(r["completion"]))
         if token_len > max_length:
             num_over += 1
     if num_over:
         print(f"  WARNING: {num_over}/{len(records)} 条样本超过 max_length={max_length}，训练时将被截断")
 
     return Dataset.from_dict({
-        "text": [r["text"] for r in records],
+        "prompt":     [r["prompt"]     for r in records],
+        "completion": [r["completion"] for r in records],
     })
 
 
@@ -254,8 +259,9 @@ def main():
     parser.add_argument("--seed",         type=int,   default=42,
                         help="全局随机种子（可复现性）")
     parser.add_argument("--epochs",       type=int,   default=3)
-    parser.add_argument("--lr",           type=float, default=2e-5,
-                        help="学习率（SFT 通常比 RL 高一个数量级）")
+    parser.add_argument("--lr",           type=float, default=1e-4,
+                        help="学习率 (LoRA 默认 1e-4, 全参微调 --no_lora 时建议降到 2e-5)。"
+                             "当前默认针对 LoRA 场景;官方 DeepSeek-R1-Distill LoRA SFT 配置 1e-4~2e-4。")
     parser.add_argument("--batch_size",   type=int,   default=1,
                         help="每卡 batch size")
     parser.add_argument("--grad_accum",   type=int,   default=8,
@@ -289,8 +295,36 @@ def main():
     # ── 加载 tokenizer ───────────────────────────────────────────────────
     print("加载 tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token
+
+    # ⚠️ 关键坑: 不能 pad_token = eos_token
+    #    原因: collator 会把所有 pad_token 位置 label 置 -100 (不参与 loss),
+    #    如果 pad_token == eos_token, 则所有 eos 位置也被一起 mask,
+    #    模型永远学不到"何时生成 EOS",训练后会 无限生成 / 不停止。
+    #    正确: R1 系列已自带专用 pad token `<｜▁pad▁｜>`,优先用它。
+    _pad_candidates = ["<｜▁pad▁｜>", "<|▁pad▁|>", "<|PAD_TOKEN|>"]
+    if tokenizer.pad_token_id is not None and tokenizer.pad_token_id != tokenizer.eos_token_id:
+        print(f"  ✓ tokenizer 自带独立 pad_token: {tokenizer.pad_token!r} (id={tokenizer.pad_token_id})")
+    else:
+        _pad_set = False
+        for cand in _pad_candidates:
+            tid = tokenizer.convert_tokens_to_ids(cand)
+            if isinstance(tid, int) and tid >= 0 and tid != tokenizer.eos_token_id:
+                tokenizer.pad_token = cand
+                print(f"  ✓ 设置 pad_token = {cand!r} (id={tid})")
+                _pad_set = True
+                break
+        if not _pad_set:
+            # 最后兜底: 新加一个 pad special token + resize embedding
+            print("  ⚠️ tokenizer 无专用 pad,新建 '<|pad|>' 作 pad_token")
+            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+            print(f"     新 pad_token_id = {tokenizer.pad_token_id}")
+            print("     下游会 resize_token_embeddings(len(tokenizer))")
+        assert tokenizer.pad_token_id != tokenizer.eos_token_id, \
+            "pad_token == eos_token 还是没逃掉! 请检查 tokenizer 配置"
+
     tokenizer.padding_side = "right"
+    print(f"  pad_token_id={tokenizer.pad_token_id}, eos_token_id={tokenizer.eos_token_id}, "
+          f"padding_side={tokenizer.padding_side}")
 
     # ── 加载数据 ─────────────────────────────────────────────────────────
     print("加载训练数据...")
@@ -314,6 +348,12 @@ def main():
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     )
+
+    # 如果 pad_token 阶段我们新加了 token,embedding 必须 resize
+    # (否则 pad_token_id 超出 model embedding 范围,前向 forward 立刻 index error)
+    if len(tokenizer) > model.get_input_embeddings().num_embeddings:
+        print(f"  resize_token_embeddings {model.get_input_embeddings().num_embeddings} → {len(tokenizer)}")
+        model.resize_token_embeddings(len(tokenizer))
 
     # LoRA 配置
     peft_config = None
@@ -348,7 +388,11 @@ def main():
         report_to="wandb" if args.use_wandb else "none",
         deepspeed=ds_config,
         gradient_checkpointing=args.gradient_checkpointing,
-        dataset_text_field="text",
+        # 不再用 dataset_text_field="text" (language modeling 模式,会对 prompt 也做 loss)
+        # 改用 prompt+completion 格式,显式 completion_only_loss=True 只对 completion 做 loss。
+        # 这样 prompt (system/user/<|Assistant|><think>\n) 被 mask 成 -100,
+        # 梯度全部用在 thinking + </think> + Route + <eos> 上, 效率翻倍。
+        completion_only_loss=True,
         eval_strategy="steps" if eval_dataset else "no",
         eval_steps=args.save_steps if eval_dataset else None,
         lr_scheduler_type="cosine",
