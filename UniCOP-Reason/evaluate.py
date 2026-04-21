@@ -562,9 +562,11 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     best_dists       = []
     completion_lens  = []
 
-    # 收集示例：一个可行、一个不可行（用于结果展示）
-    example_feasible   = None   # (instance_idx, completion_text)
-    example_infeasible = None
+    # 收集示例:按 "解析成功 / 解析失败" 各多条备选,最终各挑 3 个,
+    # 不够的一类用另一类补,总计 6 个。便于定位 parse 逻辑是否出问题。
+    MAX_COLLECT_PER_CLASS = 12       # 每类最多收集多少条候选(比最终 3 个多,给挑选留空间)
+    parsed_samples   = []            # list of (instance_idx, completion_text)
+    unparsed_samples = []
 
     # 预生成所有实例和 prompt
     instances = []
@@ -611,8 +613,14 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             completion_lens.append(comp_len)
 
             dist = prob.get_tour_distance(completion, instance)
-            if dist is not None:
+            parsed = dist is not None
+            if parsed:
                 total_parsed += 1
+                if len(parsed_samples) < MAX_COLLECT_PER_CLASS:
+                    parsed_samples.append((i, completion))
+            else:
+                if len(unparsed_samples) < MAX_COLLECT_PER_CLASS:
+                    unparsed_samples.append((i, completion))
 
             feasible = prob.is_feasible(completion, instance)
             if feasible:
@@ -620,13 +628,6 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                 if dist is not None:
                     if instance_best is None or dist < instance_best:
                         instance_best = dist
-                # 收集可行示例
-                if example_feasible is None:
-                    example_feasible = (i, completion)
-            else:
-                # 收集不可行示例
-                if example_infeasible is None:
-                    example_infeasible = (i, completion)
 
         if instance_best is not None:
             instance_has_feas += 1
@@ -653,46 +654,50 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     print(f"  最优距离均值: {avg_best_dist:.4f}  ({len(best_dists)} 个可行实例)")
     print(f"  {'─'*55}")
 
-    # ── 输出示例 ──────────────────────────────────────────────────────
-    # 优先一个可行 + 一个不可行；全可行则 2 个可行，全不可行则 2 个不可行
+    # ── 输出示例: parse 成功 / 失败 各 3 个, 不够用另一边补 ─────────
+    TARGET_EACH = 3
+    TOTAL_TARGET = TARGET_EACH * 2
+
+    n_parsed_pick   = min(TARGET_EACH, len(parsed_samples))
+    n_unparsed_pick = min(TARGET_EACH, len(unparsed_samples))
+    # 差多少从另一边补
+    deficit = TOTAL_TARGET - n_parsed_pick - n_unparsed_pick
+    if deficit > 0:
+        if n_parsed_pick < TARGET_EACH and len(unparsed_samples) > n_unparsed_pick:
+            add = min(deficit, len(unparsed_samples) - n_unparsed_pick)
+            n_unparsed_pick += add
+        elif n_unparsed_pick < TARGET_EACH and len(parsed_samples) > n_parsed_pick:
+            add = min(deficit, len(parsed_samples) - n_parsed_pick)
+            n_parsed_pick += add
+
     examples = []
-    if example_feasible and example_infeasible:
-        examples = [
-            ("FEASIBLE", example_feasible),
-            ("INFEASIBLE", example_infeasible),
-        ]
-    elif example_feasible:
-        second = None
-        for j in range(num_test):
-            if j != example_feasible[0]:
-                for item in all_completions[j]:
-                    comp = item[0] if isinstance(item, tuple) else item
-                    if prob.is_feasible(comp, instances[j]):
-                        second = (j, comp)
-                        break
-            if second:
-                break
-        examples = [("FEASIBLE #1", example_feasible)]
-        if second:
-            examples.append(("FEASIBLE #2", second))
-    elif example_infeasible:
-        second = None
-        for j in range(num_test):
-            if j != example_infeasible[0]:
-                for item in all_completions[j]:
-                    comp = item[0] if isinstance(item, tuple) else item
-                    if not prob.is_feasible(comp, instances[j]):
-                        second = (j, comp)
-                        break
-            if second:
-                break
-        examples = [("INFEASIBLE #1", example_infeasible)]
-        if second:
-            examples.append(("INFEASIBLE #2", second))
+    for k in range(n_parsed_pick):
+        examples.append((f"PARSED #{k + 1}", parsed_samples[k]))
+    for k in range(n_unparsed_pick):
+        examples.append((f"UNPARSED #{k + 1}", unparsed_samples[k]))
+
+    def _focused_preview(comp_text: str, head_max=300, tail_max=1200) -> str:
+        """
+        显示开头 + (</think> 到结尾) 的内容。parse 失败往往因为
+        </think> 之后格式异常,优先完整打印尾部。
+        """
+        think_end_idx = comp_text.rfind("</think>")
+        if think_end_idx == -1:
+            # 完全没 </think>,直接取开头和结尾
+            if len(comp_text) <= head_max + tail_max:
+                return comp_text
+            return comp_text[:head_max] + "\n    ...[middle omitted]...\n" + comp_text[-tail_max:]
+        # 有 </think>: 取开头 + 从 </think> 往后的整段
+        after_think_end = comp_text[think_end_idx:think_end_idx + tail_max]
+        if think_end_idx <= head_max:
+            return comp_text[:think_end_idx + tail_max]
+        return (comp_text[:head_max]
+                + f"\n    ...[think middle omitted, {think_end_idx - head_max} chars]...\n"
+                + after_think_end)
 
     for label, (inst_idx, comp_text) in examples:
-        preview = comp_text[:500] + ("..." if len(comp_text) > 500 else "")
-        print(f"\n  >>> 示例 [{label}]  (实例 #{inst_idx})")
+        preview = _focused_preview(comp_text)
+        print(f"\n  >>> 示例 [{label}]  (实例 #{inst_idx}, 原始长度 {len(comp_text)} chars)")
         print(f"    {preview}")
 
     # 将示例也写入结果 JSON
