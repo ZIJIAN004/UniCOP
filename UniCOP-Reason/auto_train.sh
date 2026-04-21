@@ -37,7 +37,15 @@ VLLM_GPU_MEM_UTIL=0.85   # vLLM 卡显存利用率（防 OOM 保守值）
 VLLM_MAX_MODEL_LEN=5120  # prompt(768) + completion(4096) + 余量;不限会用模型 config 里 131072 → KV 塞不下
 VLLM_DTYPE=bfloat16      # bf16 匹配训练侧精度
 # GRPO 一个 prompt 生成 num_generations=8 条 completion,prefix caching 可大幅加速
+# 注意: trl vllm-serve 的 --enable_prefix_caching 是 store_true flag, 不吃值。
+# 写成 `--enable_prefix_caching True` 会把 "True" 当 positional arg 报错或静默忽略,
+# 下面按开关动态拼 flag (空串 = 关闭)。
 VLLM_ENABLE_PREFIX_CACHING=True
+if [ "$VLLM_ENABLE_PREFIX_CACHING" = "True" ]; then
+    VLLM_PREFIX_CACHE_FLAG="--enable_prefix_caching"
+else
+    VLLM_PREFIX_CACHE_FLAG=""
+fi
 VLLM_STARTUP_TIMEOUT=300 # server 启动最长等待（秒）
 
 # ── 训练资源路径（POMO 路径需要自己填） ─────────────────────────
@@ -188,7 +196,7 @@ start_vllm_server() {
         --gpu_memory_utilization "$VLLM_GPU_MEM_UTIL" \
         --max_model_len "$VLLM_MAX_MODEL_LEN" \
         --dtype "$VLLM_DTYPE" \
-        --enable_prefix_caching "$VLLM_ENABLE_PREFIX_CACHING" \
+        $VLLM_PREFIX_CACHE_FLAG \
         --trust_remote_code True \
         > "$log_file" 2>&1 &
     VLLM_PID=$!

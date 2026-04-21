@@ -355,6 +355,13 @@ def main():
         print(f"  resize_token_embeddings {model.get_input_embeddings().num_embeddings} → {len(tokenizer)}")
         model.resize_token_embeddings(len(tokenizer))
 
+    # ZeRO-3 + LoRA + gradient_checkpointing 三件套必需: 在 PEFT wrap (SFTTrainer 内部)
+    # 之前显式调 enable_input_require_grads,否则 backward 可能报
+    # "element 0 of tensors does not require grad" / "Recomputed values shape [0]"。
+    # 参考 transformers#26334, peft#1142。
+    if args.gradient_checkpointing and hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+
     # LoRA 配置
     peft_config = None
     if not args.no_lora:
@@ -388,6 +395,10 @@ def main():
         report_to="wandb" if args.use_wandb else "none",
         deepspeed=ds_config,
         gradient_checkpointing=args.gradient_checkpointing,
+        # ZeRO-3 + LoRA + gc 组合下,non-reentrant checkpoint 和 ZeRO-3 partition 交互
+        # 会报 "Recomputed values shape [0]"。社区 workaround 是强制 use_reentrant=True
+        # (trl#2514, peft#1142)。与 UniCOP-Reason/train.py 保持一致。
+        gradient_checkpointing_kwargs={"use_reentrant": True},
         # 不再用 dataset_text_field="text" (language modeling 模式,会对 prompt 也做 loss)
         # 改用 prompt+completion 格式,显式 completion_only_loss=True 只对 completion 做 loss。
         # 这样 prompt (system/user/<|Assistant|><think>\n) 被 mask 成 -100,

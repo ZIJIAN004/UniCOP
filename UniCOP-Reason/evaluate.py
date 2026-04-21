@@ -217,7 +217,11 @@ def _load_local_model(model_path: str):
 
     print(f"加载本地模型: {model_path}")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token
+    # 尊重训练阶段的 safe pad 配置 (见 train.py / train_sft.py: pad != eos),
+    # 只在 tokenizer 完全没 pad_token 时才 fallback 到 eos。无条件覆盖会抹掉
+    # SFT/GRPO 训练端特意避开的 "pad==eos 致 EOS 被 mask" 配置。
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"   # 生成任务 padding 在左侧
 
     model = AutoModelForCausalLM.from_pretrained(
