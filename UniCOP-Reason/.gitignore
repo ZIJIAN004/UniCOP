@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 模型 / 数据 / 评估产出
+model/
+output*/
+eval_results*/
+checkpoints/
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.pkl
+
+# 日志
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 实验临时
+wandb/
+runs/
+*.tmp

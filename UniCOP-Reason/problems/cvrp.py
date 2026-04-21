@@ -1,0 +1,94 @@
+"""CVRP：带容量约束的车辆路径问题（多路线）。"""
+
+import numpy as np
+from .base import ProblemBase
+from utils.parse import parse_multi_route
+
+
+def _demand_scaler(n: int) -> int:
+    """按问题规模返回需求归一化系数，使期望路线数约为3~6。"""
+    table = {10: 15, 20: 30, 50: 40, 100: 50}
+    return table.get(n, max(10, round(n * 5 / 3)))
+
+
+class CVRP(ProblemBase):
+    name = "cvrp"
+    multi_route = True
+
+    def generate_instance(self, n: int, rng: np.random.Generator) -> dict:
+        coords  = rng.uniform(0, 1, size=(n + 1, 2))
+        demands = np.zeros(n + 1, dtype=float)
+        scaler  = _demand_scaler(n)
+        demands[1:] = rng.integers(1, 10, size=n) / scaler  # normalized to (0,1)
+        capacity = 1.0
+
+        feasible_routes = _greedy_routes(demands, capacity, n, rng)
+        return {
+            "n": n, "coords": coords,
+            "demands": demands, "capacity": capacity,
+            "feasible_routes": feasible_routes,
+        }
+
+    def build_prompt(self, instance: dict) -> list[dict]:
+        n, coords = instance["n"], instance["coords"]
+        demands, cap = instance["demands"], instance["capacity"]
+        lines = [f"Plan routes for the following CVRP instance ({n} customer nodes, vehicle capacity={cap}):\n"]
+        lines.append("Node information (format: node ID: coordinates(x,y)  demand):")
+        for i in range(n + 1):
+            tag = " (depot)" if i == 0 else ""
+            lines.append(
+                f"  Node {i}{tag}: ({coords[i][0]:.3f}, {coords[i][1]:.3f})  demand={demands[i]:.4f}"
+            )
+        # 约束和输出格式已在 system prompt 中说明，不重复
+        return [
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user",   "content": "\n".join(lines)},
+        ]
+
+    def get_tour_distance(self, completion: str, instance: dict) -> float | None:
+        routes = parse_multi_route(completion, instance["n"])
+        if routes is None:
+            return None
+        return sum(self.total_distance(r, instance["coords"]) for r in routes)
+
+    def is_feasible(self, completion: str, instance: dict) -> bool:
+        n, demands, capacity = instance["n"], instance["demands"], instance["capacity"]
+        routes = parse_multi_route(completion, n)
+        if routes is None:
+            return False
+        # 基础约束：每条路线首尾为 depot，所有客户恰好出现一次
+        all_customers = [v for r in routes for v in r if v != 0]
+        if (not all(r[0] == 0 and r[-1] == 0 for r in routes)
+                or sorted(all_customers) != list(range(1, n + 1))):
+            return False
+        # 核心约束：每条路线容量不超
+        return all(
+            sum(demands[v] for v in r if v != 0) <= capacity + 1e-6
+            for r in routes
+        )
+
+
+def _greedy_routes(demands, capacity, n, rng):
+    """贪心装箱：保证生成合法的可行路线集合。"""
+    nodes = list(rng.permutation(n) + 1)
+    routes, current_route, current_load = [], [0], 0.0
+    for node in nodes:
+        if current_load + demands[node] <= capacity:
+            current_route.append(node)
+            current_load += demands[node]
+        else:
+            current_route.append(0)
+            routes.append(current_route)
+            current_route = [0, node]
+            current_load = float(demands[node])
+    current_route.append(0)
+    routes.append(current_route)
+    return routes
+
+
+_SYSTEM = """You are a logistics route planning expert solving the Capacitated Vehicle Routing Problem (CVRP).
+Rules: Multiple vehicles depart from node 0; each vehicle visits a subset of customers and returns to node 0; total demand per route must not exceed vehicle capacity; each customer is visited exactly once; minimize total distance.
+Before answering, think through the problem in <think>...</think>. Consider how to balance grouping customers into feasible routes against minimizing total travel distance. Clustering or savings-based ideas may be a useful lens.
+After completing your analysis, output in the following format (one route per line, nodes in visit order):
+Route 1: 0 -> node -> ... -> 0
+Route 2: 0 -> node -> ... -> 0"""
