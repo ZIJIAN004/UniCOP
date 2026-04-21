@@ -247,7 +247,7 @@ run_sft() {
         --lora_rank 64 --lora_alpha 128 \
         --epochs 3 --lr 1e-4 \
         --batch_size 1 --grad_accum 8 \
-        --max_length 4096 \
+        --max_length 8192 \
         --zero_stage 3 --gradient_checkpointing \
         --output_dir "$SFT_OUT" \
         2>&1 | tee "$log_file"

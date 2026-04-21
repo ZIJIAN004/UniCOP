@@ -250,8 +250,11 @@ def main():
     # 数据
     parser.add_argument("--data",         type=str, default=DEFAULT_DATA,
                         help="chains.jsonl 文件路径")
-    parser.add_argument("--max_length", type=int, default=4096,
-                        help="最大序列长度（prompt + completion）")
+    parser.add_argument("--max_length", type=int, default=8192,
+                        help="最大序列长度（prompt + completion）。COP 大规模问题"
+                             "(CVRP/VRPTW n=50/100) 的 prompt 就有 2000-3000 token,"
+                             "加 <think> 链后 4096 会砍掉 50%+ 样本尾部的答案, 故默认 8192。"
+                             "tokenizer.model_max_length=16384 还有余量,显存紧可降。")
     parser.add_argument("--val_ratio",    type=float, default=0.05,
                         help="验证集比例（默认 5%%）")
 
