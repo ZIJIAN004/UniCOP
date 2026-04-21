@@ -140,11 +140,11 @@ check_gpus_free() {
 
 wait_for_gpus() {
     local need=$1
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 等待 ${need} 张空闲 GPU..."
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 等待 ${need} 张空闲 GPU (每 15s 轮询一次)..."
     while ! check_gpus_free "$need"; do
-        sleep 30
+        sleep 15
     done
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU $FREE_GPUS 已空闲"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU $FREE_GPUS 已空闲,立即启动"
 }
 
 # ── 拆分 FREE_GPUS：首张给 vLLM，其余给训练 ──────────────────────────
@@ -377,8 +377,8 @@ echo "  Problems:  ${PROBLEMS[@]}"
 echo "  Sizes:     ${SIZES[@]}"
 echo "  ZeRO:      stage $ZERO_STAGE | gradient_checkpointing 已开启"
 echo "  显存:      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
-echo "  GPU:       首轮固定 GPU 4,5,6,7 直接开跑 (不等空闲)"
-echo "             OOM 才等 $INIT_GPUS 张空闲卡重试 / 非 OOM 直接退出 / 评估 $EVAL_GPUS"
+echo "  GPU:       每 15s 轮询,等到 $INIT_GPUS 张空闲卡立即开跑"
+echo "             OOM 重试等 $INIT_GPUS 张空闲 / 非 OOM 直接退出 / 评估 $EVAL_GPUS"
 echo "  生成模式:  vLLM server (--logits-processors NoRepeatNgramAdapterLP)"
 echo ""
 
@@ -394,9 +394,9 @@ for problem in "${PROBLEMS[@]}"; do
         echo ""
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ===== [${DONE_COUNT}/${TOTAL_TASKS}] $problem n=$size ====="
 
-        # ── 阶段 1: 不等空闲卡,直接在 GPU 4,5,6,7 上开跑 ────────
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 直接在 GPU 4,5,6,7 上启动训练 (不等空闲)"
-        run_train "$problem" "$size" 4 "4,5,6,7" "$DONE_COUNT"
+        # ── 阶段 1: 每 15s 轮询,等到 $INIT_GPUS 张空闲卡立即开跑 ─
+        wait_for_gpus "$INIT_GPUS"
+        run_train "$problem" "$size" "$INIT_GPUS" "$FREE_GPUS" "$DONE_COUNT"
         ec=$?
 
         # ── 阶段 2: 只在 OOM 时才等空闲卡重试 ──────────────────
