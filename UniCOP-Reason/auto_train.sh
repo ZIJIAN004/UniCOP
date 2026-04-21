@@ -19,7 +19,7 @@
 #   - --gradient_checkpointing（激活重计算，砍 30~50% 激活内存）
 #   - --zero_stage 3（权重+优化器+梯度跨卡分片）
 
-WORK_DIR="/Data04/yangzhihan/lzj/UniCOP-Reason"
+WORK_DIR="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason"
 LOG_DIR="$WORK_DIR/logs"
 EVAL_RESULT_DIR="$WORK_DIR/eval_results_auto_train"
 mkdir -p "$LOG_DIR" "$EVAL_RESULT_DIR"
@@ -41,7 +41,7 @@ VLLM_ENABLE_PREFIX_CACHING=True
 VLLM_STARTUP_TIMEOUT=300 # server 启动最长等待（秒）
 
 # ── 训练资源路径（POMO 路径需要自己填） ─────────────────────────
-MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP-Distill/output_sft_r1_v2/merged_model"
+MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_r1_v2/merged_model"
 POMO_CKPT_DIR="/Data04/yangzhihan/lzj/POMO-Baseline/result"
 POMO_BASELINE_DIR="/Data04/yangzhihan/lzj/POMO-Baseline"
 # PIP-D (NeurIPS 2024) for TSPTW,和 POMO 目录并存

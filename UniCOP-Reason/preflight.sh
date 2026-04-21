@@ -19,8 +19,8 @@ FAIL=0
 WARN=0
 
 # 复用 auto_train.sh 的路径 (如果你改了路径,先改 auto_train.sh 再跑这个)
-WORK_DIR="/Data04/yangzhihan/lzj/UniCOP-Reason"
-MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP-Distill/output_sft_r1_v2/final_model"
+WORK_DIR="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason"
+MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_r1_v2/final_model"
 POMO_CKPT_DIR="/Data04/yangzhihan/lzj/POMO-Baseline/result"
 POMO_BASELINE_DIR="/Data04/yangzhihan/lzj/POMO-Baseline"
 PIPD_CKPT_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
