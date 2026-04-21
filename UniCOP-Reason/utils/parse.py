@@ -30,7 +30,11 @@ def parse_single_route(text: str, n: int) -> list[int] | None:
         return None
     answer_text = text[think_end:]
 
-    pattern = r'(?:路径|路线\d*|path|route)[：:]\s*([\d\s\->→\-]+)'
+    # 说明: 英文 `route` 和中文 `路线` 都允许可选的空格+数字(如 "Route 1:" / "路线 1:"),
+    #        防止模型泛化到 "Route 1: 0 -> ... -> 0" 这种带编号的单路径写法被 parser 拒绝。
+    #        对 TSP/TSPTW/TSPDL 安全: 单路径问题不会出现真正多条 Route,
+    #        matches[-1] 抓最后一个匹配,语义不变。
+    pattern = r'(?:路径|路线\s*\d*|path|route\s*\d*)[：:]\s*([\d\s\->→\-]+)'
     matches = list(re.finditer(pattern, answer_text, re.IGNORECASE))
     if not matches:
         return None
