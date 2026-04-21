@@ -278,11 +278,18 @@ class POMOPRM:
             instance, problem_type,
         )
 
-        # ── 7. 字符位置映射 ─────────────────────────────────────────
-        cust_positions  = self._find_token_positions(completion, customer_seq)
-        depot_positions = self._find_depot_positions(
-            completion, depot_indices, full_steps, valid_full_length
+        # ── 7. 字符位置映射 (2026-04-21 修复 CVRP/VRPTW depot 错位) ────
+        # 原版两个函数各扫一次文本、且 full_steps(dedup过)和 all_numbers(未 dedup)
+        # 长度不同,导致多路线场景下 depot 字符位置被写到"下一条路线开头 0"。
+        # 新版: 一次性对齐 full_steps[:valid_full_length] 到文本,customer/depot
+        # 直接按 index 取,严格一致。
+        step_positions = self._align_full_steps_to_text(
+            completion, full_steps, valid_full_length
         )
+        cust_positions  = [step_positions[i] for i in customer_indices
+                           if i < valid_full_length]
+        depot_positions = [step_positions[i] for i in depot_indices
+                           if i < valid_full_length]
 
         return StepRewards(
             customer_rewards=customer_rewards,
@@ -722,47 +729,42 @@ class POMOPRM:
                 numbers.append((int(m.group(1)), cstart + m.start()))
         return numbers
 
-    def _find_token_positions(self, completion, nodes):
-        """按顺序定位每个节点数字在 completion 中的字符位置。"""
+    def _align_full_steps_to_text(self, completion, full_steps, valid_full_length):
+        """
+        把 full_steps[:valid_full_length] 对齐到 completion 文本里的字符位置。
+        返回 list[int] 长度 = valid_full_length, positions[k] = full_steps[k]
+        对应的字符位置; 找不到时 = -1。
+
+        核心问题 (2026-04-21 修复):
+          - full_steps 是 dedup 过的序列 (相邻 0 被合并成 1 个)
+          - _content_numbers 从原文抓所有数字, 未 dedup
+            (CVRP/VRPTW 多路线文本里 "...0\\nRoute 2: 0 -> ..." 有连续两个 0)
+          - 两序列长度不同, 若按 num_idx 单调扫就会错位, depot token 位置被
+            写到"下一条路线开头 0", PRM depot reward 写到错 token → 学习信号错位。
+
+        对齐规则:
+          - 非 0 节点: 扫到下一个相同值的数字, 取其字符位置, num_idx 前进 1
+          - 0 节点 (depot): 扫到下一个 0, 取其位置, 然后 *继续 consume 紧挨的
+            连续 0* (补偿 dedup 合并), 直到遇到非 0 或耗尽
+        """
         route_text, route_offset = self._get_route_text(completion)
         all_numbers = self._content_numbers(route_text)
 
-        positions = []
+        positions: list[int] = []
         num_idx = 0
-        for node in nodes:
-            found = False
-            while num_idx < len(all_numbers):
-                num_val, char_pos = all_numbers[num_idx]
+        for node in full_steps[:valid_full_length]:
+            # 扫到下一个相同值
+            while num_idx < len(all_numbers) and all_numbers[num_idx][0] != node:
                 num_idx += 1
-                if num_val == node:
-                    positions.append(route_offset + char_pos)
-                    found = True
-                    break
-            if not found:
+            if num_idx >= len(all_numbers):
                 positions.append(-1)
-        return positions
-
-    def _find_depot_positions(self, completion, depot_indices,
-                              full_steps, valid_full_length):
-        """
-        定位 depot 回访（中间/尾部的 0）在 completion 文本中的字符位置。
-        起始 depot 不在 depot_indices 中（由 _extract_sequences 保证）。
-        """
-        route_text, route_offset = self._get_route_text(completion)
-        all_numbers = self._content_numbers(route_text)
-
-        positions = []
-        valid_depot_indices = set(di for di in depot_indices if di < valid_full_length)
-
-        num_idx = 0
-        for step_i, node in enumerate(full_steps[:valid_full_length]):
-            while num_idx < len(all_numbers):
-                num_val, char_pos = all_numbers[num_idx]
-                num_idx += 1
-                if num_val == node:
-                    if step_i in valid_depot_indices:
-                        positions.append(route_offset + char_pos)
-                    break
+                continue
+            positions.append(route_offset + all_numbers[num_idx][1])
+            num_idx += 1
+            # 若当前 node 是 0, consume 紧挨的连续 0 (dedup 补偿)
+            if node == 0:
+                while num_idx < len(all_numbers) and all_numbers[num_idx][0] == 0:
+                    num_idx += 1
         return positions
 
     def _get_route_text(self, completion):
@@ -785,3 +787,98 @@ class POMOPRM:
             n=n,
             covered=0,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Unit tests for _align_full_steps_to_text (不需 GPU, 不依赖 POMO ckpt)
+#  跑法: python pomo_prm.py
+#  目的: 验证 CVRP/VRPTW 多路线场景下 depot/customer token 位置不再错位。
+# ══════════════════════════════════════════════════════════════════════
+
+if __name__ == "__main__":
+    import sys
+
+    # 轻量 stub POMOPRM,跳过 __init__ 里的 ckpt 加载,只测纯字符串对齐逻辑
+    class _AlignTest:
+        _HEADER_PATTERN = POMOPRM._HEADER_PATTERN
+        _NUMBER_PATTERN = POMOPRM._NUMBER_PATTERN
+        _content_numbers = POMOPRM._content_numbers
+        _get_route_text = POMOPRM._get_route_text
+        _align_full_steps_to_text = POMOPRM._align_full_steps_to_text
+
+    tester = _AlignTest()
+
+    def _check(desc, completion, full_steps, valid_len, expected_nodes_at_positions):
+        """
+        expected_nodes_at_positions: dict{step_idx: expected_node_value_at_char_pos}
+          检查 positions[step_idx] 处的 completion 字符是 expected 对应的数字。
+        """
+        positions = tester._align_full_steps_to_text(completion, full_steps, valid_len)
+        all_ok = True
+        for step_idx, expected_val in expected_nodes_at_positions.items():
+            if step_idx >= len(positions) or positions[step_idx] < 0:
+                print(f"[FAIL] {desc}: step {step_idx} no position")
+                all_ok = False
+                continue
+            pos = positions[step_idx]
+            # 解析 completion[pos:] 开头的数字
+            import re as _re
+            m = _re.match(r"(\d+)", completion[pos:])
+            actual = int(m.group(1)) if m else None
+            if actual != expected_val:
+                print(f"[FAIL] {desc}: step {step_idx} expected node {expected_val}, "
+                      f"but completion[{pos}:]={completion[pos:pos+15]!r} (parsed {actual})")
+                all_ok = False
+        if all_ok:
+            print(f"[PASS] {desc}")
+            return True
+        return False
+
+    all_pass = True
+
+    # ── Test 1: TSP 单路线 (baseline, 不应回归) ──
+    comp = "<think>blah</think>\nRoute: 0 -> 5 -> 3 -> 7 -> 0"
+    # full_steps 对 TSP: route[:-1] 去尾部 0 → [0, 5, 3, 7]
+    fs = [0, 5, 3, 7]
+    all_pass &= _check("TSP 单路线",
+                       comp, fs, 4,
+                       {0: 0, 1: 5, 2: 3, 3: 7})
+
+    # ── Test 2: CVRP 多路线 (核心 bug 场景) ──
+    comp = ("<think>analysis</think>\n"
+            "Route 1: 0 -> 5 -> 3 -> 0\n"
+            "Route 2: 0 -> 7 -> 1 -> 0\n"
+            "Route 3: 0 -> 8 -> 4 -> 0")
+    # 多路线展平去重 (_extract_sequences): [0,5,3,0,7,1,0,8,4,0]
+    fs = [0, 5, 3, 0, 7, 1, 0, 8, 4, 0]
+    all_pass &= _check("CVRP 多路线 全 depot 字符位对齐",
+                       comp, fs, 10,
+                       {0: 0, 1: 5, 2: 3, 3: 0, 4: 7, 5: 1, 6: 0, 7: 8, 8: 4, 9: 0})
+
+    # ── Test 2b: CVRP 验证 depot 位置不是"下一条路线开头 0" ──
+    # 具体定位: step_idx=3 是路线 1 结尾 depot,其 char_pos 应 < 路线 2 的 "Route 2:" 位置
+    positions = tester._align_full_steps_to_text(comp, fs, 10)
+    r2_header_pos = comp.find("Route 2")
+    assert positions[3] < r2_header_pos, \
+        f"step 3 (路线 1 结尾 depot) 字符位 {positions[3]} 应在 'Route 2' ({r2_header_pos}) 之前,不能写到路线 2 开头的 0 上"
+    print(f"[PASS] CVRP depot pos[3]={positions[3]} < 'Route 2'[{r2_header_pos}] (没错位到下条路线开头)")
+
+    # ── Test 3: 无 </think> 的 fallback (modle 偶尔不写标签) ──
+    comp = "Route 1: 0 -> 5 -> 0\nRoute 2: 0 -> 7 -> 0"
+    fs = [0, 5, 0, 7, 0]
+    all_pass &= _check("无 </think> fallback + 多路线",
+                       comp, fs, 5,
+                       {0: 0, 1: 5, 2: 0, 3: 7, 4: 0})
+
+    # ── Test 4: 退化情况 ──
+    # 数字 bytes 不足
+    positions = tester._align_full_steps_to_text("</think>\nRoute: 0 -> 5", [0, 5, 3, 7], 4)
+    assert positions[:2] == positions[:2] and positions[2] == -1 and positions[3] == -1, \
+        f"缺失 node 应为 -1, 实际: {positions}"
+    print(f"[PASS] 缺失 node 返回 -1: {positions}")
+
+    if all_pass:
+        print("\n全部 align 对齐测试通过。")
+    else:
+        print("\n有 FAIL,需要检查。")
+        sys.exit(1)
