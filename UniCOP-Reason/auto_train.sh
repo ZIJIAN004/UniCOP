@@ -376,8 +376,8 @@ echo "  Problems:  ${PROBLEMS[@]}"
 echo "  Sizes:     ${SIZES[@]}"
 echo "  ZeRO:      stage $ZERO_STAGE | gradient_checkpointing 已开启"
 echo "  显存:      PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"
-echo "  GPU:       $INIT_GPUS (1 vLLM + $((INIT_GPUS-1)) 训练)"
-echo "             OOM 升 $OOM_GPUS (1 vLLM + $((OOM_GPUS-1)) 训练) / 评估 $EVAL_GPUS"
+echo "  GPU:       首轮固定 GPU 4,5,6,7 直接开跑 (不等空闲)"
+echo "             OOM 才等 $INIT_GPUS 张空闲卡重试 / 非 OOM 直接退出 / 评估 $EVAL_GPUS"
 echo "  生成模式:  vLLM server (--logits-processors NoRepeatNgramAdapterLP)"
 echo ""
 
@@ -393,17 +393,34 @@ for problem in "${PROBLEMS[@]}"; do
         echo ""
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ===== [${DONE_COUNT}/${TOTAL_TASKS}] $problem n=$size ====="
 
-        # ── 阶段 1：训练（$INIT_GPUS 卡全部训练） ────────────────
-        wait_for_gpus "$INIT_GPUS"
-        run_train "$problem" "$size" "$INIT_GPUS" "$FREE_GPUS" "$DONE_COUNT"
+        # ── 阶段 1: 不等空闲卡,直接在 GPU 4,5,6,7 上开跑 ────────
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 直接在 GPU 4,5,6,7 上启动训练 (不等空闲)"
+        run_train "$problem" "$size" 4 "4,5,6,7" "$DONE_COUNT"
         ec=$?
 
-        # ── 阶段 2：OOM 升级到 $OOM_GPUS 卡 ──────────────────────
+        # ── 阶段 2: 只在 OOM 时才等空闲卡重试 ──────────────────
+        # 非 OOM (ec=1) 直接退出,避免无意义重试浪费资源
+        if [ $ec -eq 1 ]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ 非 OOM 错误 (ec=1),直接退出脚本"
+            notify "❌ UniCOP 非 OOM 错误退出" \
+"任务: $problem n=$size
+exit code: $ec
+时间: $(date '+%Y-%m-%d %H:%M:%S')
+详见: $LOG_DIR/train_*.log"
+            exit 1
+        fi
+
         if [ $ec -eq 99 ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] OOM 升级：等待 ${OOM_GPUS} 张卡重试"
-            wait_for_gpus "$OOM_GPUS"
-            run_train "$problem" "$size" "$OOM_GPUS" "$FREE_GPUS" "$DONE_COUNT"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ OOM,等待 ${INIT_GPUS} 张空闲卡后重试"
+            wait_for_gpus "$INIT_GPUS"
+            run_train "$problem" "$size" "$INIT_GPUS" "$FREE_GPUS" "$DONE_COUNT"
             ec=$?
+
+            # 二次重试若是非 OOM 错误,也直接退出
+            if [ $ec -eq 1 ]; then
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ OOM 重试后遇非 OOM 错误,退出"
+                exit 1
+            fi
         fi
 
         # ── 阶段 3：评估（仅在非 OOM 失败时触发） ────────────────
@@ -412,7 +429,7 @@ for problem in "${PROBLEMS[@]}"; do
             continue
         fi
 
-        # ec == 0 (成功) 或 ec == 1 (非 OOM 错误)：检查模型文件
+        # 到这里只可能 ec == 0 (非 OOM 错误已在上面 exit 1)
         MODEL_OUT="$OUTPUT_DIR_BASE/${problem}_n${size}/final_model"
         if [ ! -d "$MODEL_OUT" ]; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⏭️ 模型文件不存在 $MODEL_OUT，跳过 eval"
