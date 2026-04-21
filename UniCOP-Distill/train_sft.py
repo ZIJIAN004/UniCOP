@@ -4,6 +4,11 @@ SFT 训练脚本：用蒸馏数据（Gemini 推理链）微调 DeepSeek-R1-Disti
 数据来源：generate_chains.py 生成的 chains.jsonl
 训练目标：模型根据原始问题描述，直接生成 <think>...</think> 推理链 + 格式化答案
 
+⚠️ 重要: 数据构造方式在 2026-04-21 后改为"绕开 chat_template 手动拼接",
+    原因是 R1-Distill 的 chat_template 会吃掉 assistant 消息里的 <think>...</think>
+    推理链(多轮对话优化的副作用),直接 apply_chat_template 会让 SFT 实际训练数据
+    丢失全部 thinking 内容,模型学不到推理链。详见技术配置库 LLM训练踩坑.md。
+
 单卡运行：
     python train_sft.py
     python train_sft.py --model /path/to/model --data data/chains.jsonl
@@ -101,13 +106,43 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int) -> Dataset:
     """
     从 chains.jsonl 加载数据，构建 SFT 训练集。
 
-    每条样本：
-      - 还原原始 prompt（剥离 post-hoc 部分）
-      - 用 chat template 拼接 [system, user, assistant(output)]
-      - assistant 内容 = Gemini 生成的 <think>...</think> + 答案
+    ⚠️ 关键踩坑修复 (2026-04-21):
+        R1-Distill 的 chat_template 对 **所有** role='assistant' 的 content
+        自动执行 `content.split('</think>')[-1]`,把 <think>...</think> 推理链
+        整段吃掉。这是 R1 为多轮对话设计的"历史剥离",但在 SFT 场景下会让
+        模型看到的训练 text 里完全没有 <think>thinking</think>, 模型根本学
+        不到推理链,只学到"<Assistant> 后直接跟 Route:"这个空架子。
+        参见技术配置库: LLM 训练踩坑.md § R1 chat_template 吃 think 链。
+
+    正确做法:
+      - 用 apply_chat_template 只渲染 [system, user] 部分 + add_generation_prompt=True,
+        末尾天然得到 "...<|Assistant|><think>\\n" (chat_template 官方行为)
+      - 手动剥去 Gemini output 开头的 <think>\\n (避免和 prompt 末尾重复)
+      - 拼成完整 text + eos_token
+
+    每条样本渲染后的训练 text 结构:
+        <bos>...<|User|>Plan route...<|Assistant|><think>\\n
+        I need to find the shortest route...
+        </think>
+        Route: 0 -> ... -> 0
+        <eos>
     """
     records = []
     skipped = 0
+
+    # ── 探针: 首次渲染时验证 chat_template 是否如预期在末尾加 <think>\n ──
+    # (如果 R1 换代导致 chat_template 行为变化, 早期告警避免静默退化)
+    probe_prompt = tokenizer.apply_chat_template(
+        [{"role": "system", "content": "probe"},
+         {"role": "user",   "content": "probe"}],
+        tokenize=False, add_generation_prompt=True,
+    )
+    probe_ends_with_think = probe_prompt.rstrip().endswith("<think>")
+    if probe_ends_with_think:
+        print("  [OK  ] chat_template 末尾自动加 <think>, 使用绕过 chat_template 的手动拼接方案")
+    else:
+        print("  [WARN] chat_template 末尾没有 <think> 前缀, 将在手动拼接时显式补一个")
+        print(f"         (探针末尾 50 字: {probe_prompt[-50:]!r})")
 
     with open(data_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -129,23 +164,45 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int) -> Dataset:
                 skipped += 1
                 continue
 
-            # 构建 chat 消息
-            messages = [
-                {"role": "system", "content": orig_system},
-                {"role": "user",   "content": orig_user},
-                {"role": "assistant", "content": output},
-            ]
-
-            # 用 chat template 渲染为完整文本
-            text = tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=False
+            # 1. 用 chat_template 只渲染到 <|Assistant|><think>\n 为止
+            prompt_text = tokenizer.apply_chat_template(
+                [{"role": "system", "content": orig_system},
+                 {"role": "user",   "content": orig_user}],
+                tokenize=False, add_generation_prompt=True,
             )
+
+            # 2. 探针兜底: 如果 chat_template 没自动加 <think>,手动补
+            if not probe_ends_with_think:
+                prompt_text = prompt_text.rstrip() + "<think>\n"
+
+            # 3. Gemini output 开头必有 <think> (generate_chains.py 强制),
+            #    和 prompt 末尾的 <think> 重复,剥掉
+            output_stripped = output.lstrip()
+            if output_stripped.startswith("<think>"):
+                output_stripped = output_stripped[len("<think>"):].lstrip("\n")
+
+            # 4. 手动拼完整 text
+            text = prompt_text + output_stripped + tokenizer.eos_token
 
             records.append({
                 "text": text,
                 "problem_type": r.get("problem_type", "unknown"),
                 "n": r.get("n", 0),
             })
+
+    # ── 抽样打印第 1 条的 assistant 段, 人眼验证 <think>...</think> 是否完整保留 ──
+    if records:
+        first_text = records[0]["text"]
+        assistant_marker = "<|Assistant|>"  # R1 系列的 assistant 标记
+        idx = first_text.find(assistant_marker)
+        if idx != -1:
+            sample_tail = first_text[idx:idx + 400]
+            has_think_open = "<think>" in sample_tail
+            has_think_close = "</think>" in sample_tail
+            print(f"  [首条样本验证] assistant 段含 <think>: {has_think_open}, 含 </think>: {has_think_close}")
+            if not (has_think_open and has_think_close):
+                print(f"  [FAIL] 首条样本的 <think>...</think> 不完整, 请检查 chat_template 兼容性!")
+                print(f"         assistant 段前 300 字: {sample_tail[:300]!r}")
 
     if skipped:
         print(f"  跳过 {skipped} 条无效记录")
