@@ -27,9 +27,18 @@ PIPD_CKPT_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
 PIPD_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP"
 CUDA_HOME_PATH="/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux"
 
-# 当前训练矩阵 (需和 auto_train.sh PROBLEMS/SIZES 一致)
-PROBLEMS=("tsp" "vrptw" "tsptw")
-SIZES=(20 50 100)
+# 当前训练矩阵: 自动从 auto_train.sh 读取,避免两边手动对齐
+AUTO_TRAIN_SH="$(dirname "$0")/auto_train.sh"
+if [ -f "$AUTO_TRAIN_SH" ]; then
+    # 用 grep + eval 提取 PROBLEMS=(...) 和 SIZES=(...) 两行
+    eval "$(grep -E '^PROBLEMS=\(' "$AUTO_TRAIN_SH" | head -1)"
+    eval "$(grep -E '^SIZES=\('    "$AUTO_TRAIN_SH" | head -1)"
+    echo "[INFO] 从 auto_train.sh 读取训练矩阵: PROBLEMS=(${PROBLEMS[*]}) SIZES=(${SIZES[*]})"
+else
+    echo "[WARN] $AUTO_TRAIN_SH 不存在,回退 ('tsp' / 20)"
+    PROBLEMS=("tsp")
+    SIZES=(20)
+fi
 
 check_dir() {
     if [ -d "$1" ]; then
@@ -58,11 +67,66 @@ check_file_warn() {
     fi
 }
 
+# MODEL_BASE 这种训练产物在 .gitignore 里被排除,git clone 后不存在是预期的。
+# 自动尝试从 /Data04/.../UniCOP-Distill.bak_*/output_sft_r1_v2 建立软链,
+# 让路径在 monorepo 里一致,不需要手动 ln -s。
+check_sft_product_with_bak() {
+    local target="$1"   # 例: .../UniCOP/UniCOP-Distill/output_sft_r1_v2/final_model
+    local desc="$2"
+
+    if [ -d "$target" ]; then
+        echo "  [OK  ] $desc"
+        return 0
+    fi
+
+    # 推导路径:
+    #   link_point = .../UniCOP/UniCOP-Distill/output_sft_r1_v2  (软链要建在这里)
+    #   jlz_dir    = .../lzj                                      (UniCOP-Distill.bak_* 在这)
+    local link_point
+    link_point=$(dirname "$target")
+    local monorepo_distill
+    monorepo_distill=$(dirname "$link_point")
+    local jlz_dir
+    jlz_dir=$(dirname "$(dirname "$monorepo_distill")")
+
+    local bak_candidate
+    bak_candidate=$(ls -d "${jlz_dir}/UniCOP-Distill.bak_"*/output_sft_r1_v2 2>/dev/null | head -1)
+
+    if [ -z "$bak_candidate" ] || [ ! -d "$bak_candidate" ]; then
+        echo "  [FAIL] $desc 不存在: $target"
+        echo "         (且 ${jlz_dir}/UniCOP-Distill.bak_*/output_sft_r1_v2 也找不到)"
+        FAIL=$((FAIL+1))
+        return 1
+    fi
+
+    # link_point 不存在 → 建软链
+    if [ ! -e "$link_point" ]; then
+        ln -s "$bak_candidate" "$link_point"
+        echo "  [AUTO] 建立软链: $link_point -> $bak_candidate"
+    elif [ -L "$link_point" ]; then
+        # 已是软链但指向有问题
+        echo "  [INFO] $link_point 已是软链但 target 不可达,跳过重建"
+    else
+        # 是真实目录但里面没 target (final_model / merged_model)
+        echo "  [WARN] $link_point 存在但缺 $(basename "$target") 子目录"
+    fi
+
+    # 再检一次
+    if [ -d "$target" ]; then
+        echo "  [OK  ] $desc (通过 bak 软链恢复)"
+        return 0
+    else
+        echo "  [FAIL] $desc 建立软链后仍找不到: $target"
+        FAIL=$((FAIL+1))
+        return 1
+    fi
+}
+
 echo "==================================================="
 echo "Level 1: 核心路径"
 echo "==================================================="
 check_dir "$WORK_DIR" "WORK_DIR"
-check_dir "$MODEL_BASE" "MODEL_BASE (SFT 产物)"
+check_sft_product_with_bak "$MODEL_BASE" "MODEL_BASE (SFT 产物)"
 check_dir "$POMO_BASELINE_DIR" "POMO_BASELINE_DIR"
 check_dir "$POMO_CKPT_DIR" "POMO_CKPT_DIR"
 check_dir "$PIPD_DIR" "PIPD_DIR"
@@ -164,7 +228,7 @@ fi
 
 echo ""
 echo "==================================================="
-echo "Level 7: UniCOP-Reason 核心模块 import + PIP-D 运行"
+echo "Level 7a: UniCOP-Reason 核心模块 import + POMOPRM 实例化"
 echo "==================================================="
 cd "$WORK_DIR" || exit 1
 export CUDA_HOME="$CUDA_HOME_PATH"
@@ -182,7 +246,7 @@ except Exception as e:
     print(f"  [FAIL] 模块 import 失败: {e}")
     sys.exit(1)
 
-# 实例化 POMOPRM
+# 实例化 POMOPRM (不会触发 ckpt 实际加载,懒加载在 _get_model 里)
 try:
     pomo_prm = POMOPRM(
         pomo_ckpt_dir="${POMO_CKPT_DIR}",
@@ -195,8 +259,29 @@ try:
 except Exception as e:
     print(f"  [FAIL] POMOPRM 实例化失败: {e}")
     sys.exit(1)
+EOF
+if [ $? -ne 0 ]; then
+    FAIL=$((FAIL+1))
+fi
 
-# PIP-D 端到端测试 (TSPTW n=50 ckpt 应该存在)
+echo ""
+echo "==================================================="
+echo "Level 7b: PIP-D TSPTW 端到端测试"
+echo "==================================================="
+if [[ " ${PROBLEMS[*]} " =~ " tsptw " ]]; then
+    python - <<EOF
+import sys
+sys.path.insert(0, ".")
+from pomo_prm import POMOPRM
+
+pomo_prm = POMOPRM(
+    pomo_ckpt_dir="${POMO_CKPT_DIR}",
+    pomo_baseline_dir="${POMO_BASELINE_DIR}",
+    device="cuda",
+    pipd_ckpt_dir="${PIPD_CKPT_DIR}",
+    pipd_dir="${PIPD_DIR}",
+)
+
 try:
     import numpy as np
     import torch
@@ -216,15 +301,12 @@ try:
     tw[1:, 1] = l + width
     instance = {"n": n, "coords": coords, "time_windows": tw}
 
-    # foresight
     prefix = [0, 3, 7, 1, 5, 10, 20, 30, 40, 2]
     fs_idx = wrapper.foresight_check(instance, prefix)
     print(f"  [OK  ] foresight_check 跑通, 返回 fs_idx={fs_idx}")
 
-    # batch_rollout
     values = wrapper.batch_rollout(instance, valid_prefix=prefix, prefix_lengths=[3, 6, 10])
     print(f"  [OK  ] batch_rollout 跑通, values={[round(v,3) for v in values]}")
-    # value 应该是负数 (=-tour_distance), 在 [-10, -3] 左右合理
     if all(v < 0 for v in values):
         print("  [OK  ] rollout values 全为负数 (正常)")
     else:
@@ -234,10 +316,12 @@ except Exception as e:
     import traceback
     print(f"  [FAIL] PIP-D 端到端测试失败:\n{traceback.format_exc()}")
     sys.exit(1)
-
 EOF
-if [ $? -ne 0 ]; then
-    FAIL=$((FAIL+1))
+    if [ $? -ne 0 ]; then
+        FAIL=$((FAIL+1))
+    fi
+else
+    echo "  [SKIP] 训练矩阵无 tsptw (PROBLEMS=${PROBLEMS[*]}),跳过 PIP-D 端到端测试"
 fi
 
 echo ""
