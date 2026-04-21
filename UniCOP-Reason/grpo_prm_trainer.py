@@ -387,6 +387,30 @@ class GRPOPRMTrainer(GRPOTrainer):
         loss_prm_t  = -torch.min(ratio * prm_adv,
                                   clipped_ratio * prm_adv)
 
+        # ── vLLM Importance Sampling 校正 (TRL 1.2+ 新特性, 对齐官方 compute_loss) ──
+        # TRL 1.2 默认 vllm_importance_sampling_correction=True, 在
+        # _generate_and_score_completions 里把 importance_sampling_ratio =
+        # exp(old_logps - vllm_logps) 写入 batch (已按 mode 做过 truncate/mask)。
+        # 官方 compute_loss: per_token_loss *= importance_sampling_ratio (在 min-clip
+        # 之后, KL 之前). 我们的双 loss 同样处理,否则 vLLM/训练模型的 logp 数值差
+        # 无法校正 → off-policy 偏置。
+        # 参考: trl/trainer/grpo_trainer.py main line 2541-2542
+        # shape: token_* mode → (B, T);  sequence_* mode → (B, 1),都能广播。
+        is_ratio = inputs.get("importance_sampling_ratio")
+        if is_ratio is not None:
+            loss_term_t = loss_term_t * is_ratio
+            loss_prm_t  = loss_prm_t  * is_ratio
+        else:
+            # TRL 版本不同可能换 key 名或关闭此特性; 一次性 WARN
+            if not getattr(self, '_is_ratio_warning_emitted', False):
+                print(
+                    f"⚠️ WARNING: inputs 里没找到 importance_sampling_ratio。\n"
+                    f"   若 use_vllm=True 且 vllm_importance_sampling_correction=True (TRL 1.2+ 默认),\n"
+                    f"   vLLM/训练 logp 数值差的 IS 校正未应用 → off-policy 偏置.\n"
+                    f"   当前 inputs keys: {sorted(inputs.keys())}"
+                )
+                self._is_ratio_warning_emitted = True
+
         # KL 正则（仍用 completion_mask 范围，按 terminal 那项归一）
         beta_kl = getattr(self, 'beta', 0.0)
         if beta_kl != 0.0:

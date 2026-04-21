@@ -294,8 +294,20 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
                 idx = i * num_samples + s
                 output_ids = outputs[idx]
                 completion_ids = output_ids[input_len:]
-                mask = completion_ids != tokenizer.pad_token_id
-                completion_ids = completion_ids[mask]
+                # 修正(2026-04-21): 原做法 mask = (ids != pad_token_id) + 删所有 pad
+                #   在 R1-Distill 默认 pad == eos 情况下会把"真实生成的 EOS"误删,
+                #   导致 num_tokens 少算 1, truncation 判定失准, decode 仍完整。
+                # 新做法: pad != eos 时原逻辑(删所有 pad); pad == eos 时保留第一个 eos,
+                #   仅 trim 第一个 eos 之后的连续填充。
+                pad_id = tokenizer.pad_token_id
+                eos_id = tokenizer.eos_token_id
+                if pad_id != eos_id:
+                    completion_ids = completion_ids[completion_ids != pad_id]
+                else:
+                    eos_positions = (completion_ids == eos_id).nonzero(as_tuple=True)[0]
+                    if len(eos_positions) > 0:
+                        first_eos = eos_positions[0].item()
+                        completion_ids = completion_ids[:first_eos + 1]
                 # 标记是否被截断（token 数达到 max_completion_length）
                 num_tokens = len(completion_ids)
                 is_truncated = (num_tokens >= max_completion_length)
