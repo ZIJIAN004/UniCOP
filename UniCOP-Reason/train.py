@@ -215,14 +215,41 @@ def main():
     # ── 加载模型 ────────────────────────────────────────────────────────
     print("\n加载模型...")
     tokenizer = AutoTokenizer.from_pretrained(config.model_name, trust_remote_code=True)
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.model_max_length = config.max_prompt_length
+
+    # ⚠️ pad_token 处理 (对齐 SFT 的 safe 逻辑):
+    # GRPO 下 completion_mask 基于 attention_mask 识别,SFT 那种"EOS 被 mask
+    # 不学"的致命 bug 在 GRPO 里 不直接发生。但仍然避免 pad=eos,
+    # 保证 attention_mask/padding 逻辑清晰,和 SFT 阶段一致。
+    if tokenizer.pad_token_id is None or tokenizer.pad_token_id == tokenizer.eos_token_id:
+        _pad_set = False
+        for cand in ["<｜▁pad▁｜>", "<|▁pad▁|>", "<|PAD_TOKEN|>"]:
+            tid = tokenizer.convert_tokens_to_ids(cand)
+            if isinstance(tid, int) and tid >= 0 and tid != tokenizer.eos_token_id:
+                tokenizer.pad_token = cand
+                _pad_set = True
+                break
+        if not _pad_set:
+            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    print(f"  pad_token_id={tokenizer.pad_token_id}, eos_token_id={tokenizer.eos_token_id}")
+
+    # ⚠️ 不要用 tokenizer.model_max_length 限制长度。
+    # 原配置 `tokenizer.model_max_length = config.max_prompt_length (=768)` 会触发
+    # "Token indices sequence length is longer than the specified maximum sequence length"
+    # 警告 (超过 768 就 warn),但实际 prompt+completion 总长常到 5000 token。
+    # 正确做法: 保留 tokenizer 从 model config 读到的上限 (Qwen2.5 是 131K),
+    # prompt 长度上限由 GRPOConfig(max_prompt_length=...) 独立控制,见下面 grpo_config。
 
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     )
+
+    # 如果前面 add_special_tokens 新加了 pad token (vocab size +1),
+    # 必须在 LoRA wrap 之前 resize embedding,否则 pad_token_id 会超出 embedding 范围
+    if len(tokenizer) > model.get_input_embeddings().num_embeddings:
+        print(f"  resize_token_embeddings {model.get_input_embeddings().num_embeddings} → {len(tokenizer)}")
+        model.resize_token_embeddings(len(tokenizer))
 
     if config.use_lora:
         print(f"启用 LoRA (rank={config.lora_rank})")
@@ -311,6 +338,7 @@ def main():
     grpo_config = GRPOConfig(
         output_dir=config.output_dir,
         num_generations=config.num_generations,
+        max_prompt_length=config.max_prompt_length,        # GRPO 独立控制 prompt 上限
         max_completion_length=config.max_completion_length,
         per_device_train_batch_size=config.per_device_train_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
