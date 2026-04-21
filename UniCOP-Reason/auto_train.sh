@@ -166,15 +166,17 @@ start_vllm_server() {
     # $TRL_BIN 指向当前 env 的 trl binary（在脚本顶部定义）
     # FLASHINFER_DISABLE_VERSION_CHECK=1: 绕过 flashinfer/flashinfer-cubin 版本不一致检查
     #
-    # --logits-processors 关键参数:
-    #   vLLM V1 废弃 SamplingParams(logits_processors=...),必须在 server 启动
-    #   时通过 CLI 注册 AdapterLogitsProcessor 子类。我们的实现在
-    #   utils/vllm_ngram_processor.py:NoRepeatNgramAdapterLP,等价于 HF 的
-    #   no_repeat_ngram_size。训练端通过 SamplingParams.extra_args 传 n=6 开关。
-    #   参考: https://docs.vllm.ai/en/stable/features/custom_logitsprocs/
+    # ── 自定义 LogitsProcessor (n_gram=6) 注册方式 ──
+    # 走 vLLM entry point 机制,不通过 CLI flag 传递:
+    #   1. pyproject.toml 里声明 [project.entry-points."vllm.logits_processors"]
+    #   2. cd UniCOP-Reason && pip install -e .  (只需装一次)
+    #   3. vLLM 启动时自动 scan + load,无需任何 CLI 参数
+    # 为什么不用 --logits-processors flag:
+    #   trl vllm-serve 的 HfArgumentParser 不识别这个 flag (原生 vllm serve 才有),
+    #   会报 "Some specified arguments are not used by the HfArgumentParser"。
+    # 参考: https://docs.vllm.ai/en/stable/features/custom_logitsprocs/
     #
-    # PYTHONPATH="$WORK_DIR": 让 vLLM 子进程能 import 到 utils.vllm_ngram_processor
-    #   (本项目非 pip install 方式,靠 PYTHONPATH 暴露 Python 包路径)
+    # PYTHONPATH 保留为双保险,即使没 pip install -e . 也能让 Python 找到包路径。
     PYTHONPATH="$WORK_DIR:${PYTHONPATH:-}" \
     CUDA_VISIBLE_DEVICES="$vllm_gpu" \
     CUDA_HOME=/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux \
@@ -188,7 +190,6 @@ start_vllm_server() {
         --dtype "$VLLM_DTYPE" \
         --enable_prefix_caching "$VLLM_ENABLE_PREFIX_CACHING" \
         --trust_remote_code True \
-        --logits-processors utils.vllm_ngram_processor:NoRepeatNgramAdapterLP \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
 

@@ -247,10 +247,29 @@ try:
     from grpo_prm_trainer import GRPOPRMTrainer
     from terminal_reward import compute_terminal_reward
     from utils.pipd_wrapper import PIPDWrapper, _resolve_pipd_dir
+    from utils.vllm_ngram_processor import NoRepeatNgramAdapterLP
     from config import config
-    print("  [OK  ] 核心模块全部可 import")
+    print("  [OK  ] 核心模块全部可 import (含 vllm_ngram_processor)")
 except Exception as e:
     print(f"  [FAIL] 模块 import 失败: {e}")
+    sys.exit(1)
+
+# 验证 vLLM logits_processors entry point 已注册
+# (走 pyproject.toml + pip install -e . 路径,vLLM 启动时自动 discover)
+try:
+    from importlib.metadata import entry_points
+    eps = list(entry_points(group="vllm.logits_processors"))
+    names = [ep.name for ep in eps]
+    values = [ep.value for ep in eps]
+    if "no_repeat_ngram" in names:
+        idx = names.index("no_repeat_ngram")
+        print(f"  [OK  ] vllm.logits_processors entry point 已注册: {names[idx]} -> {values[idx]}")
+    else:
+        print(f"  [FAIL] vllm.logits_processors entry point 未注册 (当前: {names or '空'})")
+        print(f"         修复: cd $(pwd) && pip install -e .")
+        sys.exit(1)
+except Exception as e:
+    print(f"  [FAIL] entry point 检查异常: {e}")
     sys.exit(1)
 
 # 实例化 POMOPRM (不会触发 ckpt 实际加载,懒加载在 _get_model 里)

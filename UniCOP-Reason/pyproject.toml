@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unicop-reason"
+version = "0.1.0"
+description = "GRPO + POMO PRM for routing combinatorial optimization problems"
+requires-python = ">=3.10"
+# 依赖不在这里锁定,统一走 requirements.txt 和用户手动 pip install 'trl==1.2.0' 那套
+# 这个 pyproject.toml 的唯一作用: 让 pip install -e . 注册 vllm.logits_processors
+# entry point,让 vLLM 启动时自动 discover 我们的 NoRepeatNgramAdapterLP。
+
+# ══════════════════════════════════════════════════════════════════════
+# vLLM 自定义 LogitsProcessor 注册 (核心!)
+# ──────────────────────────────────────────────────────────────────────
+# 背景: trl vllm-serve 的 CLI 不支持 --logits-processors flag (ValueError:
+# Some specified arguments are not used by the HfArgumentParser)。
+# 唯一稳健方案是用 vLLM 的 entry point 机制:
+#   - vLLM 启动时自动 scan 所有已安装 package 的 [vllm.logits_processors]
+#     entry point,注册其中的 AdapterLogitsProcessor 子类。
+#   - 完全不依赖 TRL 或 vLLM 的 CLI 参数透传。
+#
+# 使用步骤 (只要装一次):
+#   cd /Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason
+#   pip install -e .
+#
+# 验证注册成功:
+#   python -c "from importlib.metadata import entry_points; \
+#              print(list(entry_points(group='vllm.logits_processors')))"
+# 参考: https://docs.vllm.ai/en/stable/features/custom_logitsprocs/
+# ══════════════════════════════════════════════════════════════════════
+[project.entry-points."vllm.logits_processors"]
+no_repeat_ngram = "utils.vllm_ngram_processor:NoRepeatNgramAdapterLP"
+
+# ── setuptools 包发现 ──
+# 只把项目里的三个 package (utils / problems / data) 纳入 editable install,
+# 顶层脚本 (train.py / evaluate.py / config.py 等) 靠 cwd 直接 python 执行,
+# 不作为 package 安装。排除训练产物和缓存目录。
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["utils*", "problems*", "data*"]
+exclude = ["output*", "logs*", "model*", "tests*", "__pycache__*", "eval_results*"]
