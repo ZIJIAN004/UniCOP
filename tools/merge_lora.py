@@ -44,7 +44,17 @@ def main():
         print(f"[FAIL] 无效 base 路径: {base_path}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[1/3] Loading base model: {base_path}")
+    # 先读 adapter 旁的 tokenizer, 判断 SFT 训练时是否新加了 pad_token
+    # (train_sft.py 在 candidate 全 miss 时会 add_special_tokens + resize_token_embeddings,
+    # 但 LoRA target_modules 不含 embed_tokens, adapter 不保存这个 resize。
+    # merge 时必须先把 base 也 resize, 否则 merged model vocab_size 比 tokenizer 小,
+    # pad_token_id 越界, 下游 from_pretrained 就崩。)
+    tok_src = args.adapter if os.path.isfile(
+        os.path.join(args.adapter, "tokenizer_config.json")
+    ) else base_path
+    tokenizer = AutoTokenizer.from_pretrained(tok_src, trust_remote_code=True)
+
+    print(f"[1/4] Loading base model: {base_path}")
     base = AutoModelForCausalLM.from_pretrained(
         base_path,
         torch_dtype=torch.bfloat16,
@@ -52,20 +62,25 @@ def main():
         device_map=args.device,
     )
 
-    print(f"[2/3] Loading adapter: {args.adapter}")
+    target_vocab = len(tokenizer)
+    base_vocab = base.get_input_embeddings().num_embeddings
+    if target_vocab > base_vocab:
+        print(f"[2/4] resize base embedding {base_vocab} → {target_vocab} "
+              f"(tokenizer 比 base 多 {target_vocab - base_vocab} 个 token, 对齐)")
+        base.resize_token_embeddings(target_vocab)
+    elif target_vocab < base_vocab:
+        print(f"[2/4] WARN tokenizer ({target_vocab}) < base ({base_vocab}), 保留 base 大小")
+    else:
+        print(f"[2/4] tokenizer 与 base vocab 一致 ({base_vocab}), 无需 resize")
+
+    print(f"[3/4] Loading adapter: {args.adapter}")
     lora = PeftModel.from_pretrained(base, args.adapter)
 
-    print("[3/3] Merging + saving...")
+    print("[4/4] Merging + saving...")
     merged = lora.merge_and_unload()
     os.makedirs(args.output, exist_ok=True)
     merged.save_pretrained(args.output, safe_serialization=True)
-
-    # tokenizer 优先从 adapter 目录读(可能含训练时追加的 pad_token),
-    # 兜底从 base
-    tok_src = args.adapter if os.path.isfile(
-        os.path.join(args.adapter, "tokenizer_config.json")
-    ) else base_path
-    AutoTokenizer.from_pretrained(tok_src, trust_remote_code=True).save_pretrained(args.output)
+    tokenizer.save_pretrained(args.output)
 
     print(f"[DONE] 合并完成: {args.output}")
 
