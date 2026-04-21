@@ -8,8 +8,13 @@ import re
 
 def parse_single_route(text: str, n: int) -> list[int] | None:
     """
-    解析单条路线，仅在 </think> 之后的答案区查找；
-    无 </think> 或答案区无匹配 → 视为解析失败 (return None)。
+    解析单条路线。
+
+    查找区域规则:
+      - 有 </think>: 只在 </think> 之后的答案区查找 (原语义,避免抓 think 内草稿 Route)
+      - 无 </think>: 退化为全文查找 (模型在温度采样下偶尔跳过 <think> 标签,
+        但末尾答案依然合法,此时不应因格式小瑕疵丢掉合法答案)。
+        matches[-1] 总抓最后一个,天然保护: think 段草稿 Route 不会覆盖末尾答案。
 
     结构约束: 首节点必须是 depot (0)。不从 depot 出发 → 视为解析失败,
     触发下游整条 completion 零 PRM + terminal R_parse=0 的强惩罚。
@@ -26,9 +31,8 @@ def parse_single_route(text: str, n: int) -> list[int] | None:
         return None
 
     think_end = text.rfind("</think>")
-    if think_end == -1:
-        return None
-    answer_text = text[think_end:]
+    # 有 </think> → 只看答案段; 无 → 退化全文搜索
+    answer_text = text[think_end:] if think_end != -1 else text
 
     # 说明: 英文 `route` 和中文 `路线` 都允许可选的空格+数字(如 "Route 1:" / "路线 1:"),
     #        防止模型泛化到 "Route 1: 0 -> ... -> 0" 这种带编号的单路径写法被 parser 拒绝。
@@ -53,8 +57,11 @@ def parse_single_route(text: str, n: int) -> list[int] | None:
 
 def parse_multi_route(text: str, n: int) -> list[list[int]] | None:
     """
-    解析多条路线，仅在 </think> 之后的答案区查找；
-    无 </think> 或答案区无匹配 → 视为解析失败 (return None)。
+    解析多条路线。
+
+    查找区域规则 (和 parse_single_route 一致):
+      - 有 </think>: 只在 </think> 之后的答案区查找
+      - 无 </think>: 退化全文搜索 (防模型跳 think 标签导致合法答案被丢)
 
     结构约束: 每条路线的首节点必须是 depot (0)。任意一条违反 → 视为解析失败,
     触发下游整条 completion 零 PRM + terminal R_parse=0 的强惩罚。
@@ -71,9 +78,7 @@ def parse_multi_route(text: str, n: int) -> list[list[int]] | None:
         return None
 
     think_end = text.rfind("</think>")
-    if think_end == -1:
-        return None
-    search_text = text[think_end:]
+    search_text = text[think_end:] if think_end != -1 else text
 
     pattern = r'(?:路线\s*\d+|route\s*\d+)[：:]\s*([\d\s\->→\-]+)'
     matches = re.findall(pattern, search_text, re.IGNORECASE)
