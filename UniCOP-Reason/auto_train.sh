@@ -41,7 +41,17 @@ VLLM_ENABLE_PREFIX_CACHING=True
 VLLM_STARTUP_TIMEOUT=300 # server 启动最长等待（秒）
 
 # ── 训练资源路径（POMO 路径需要自己填） ─────────────────────────
-MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_r1_v2/merged_model"
+# 测试阶段: MODEL_BASE 直接指向 bak 目录里的 SFT 产物,免去 mv / 软链折腾。
+# sort -r | head -1 自动取最新的一个 bak (按时间戳字典序,与 date +%Y%m%d_%H%M%S 一致)。
+# 正式训练阶段: 把 output_sft_r1_v2 物理 mv 回 UniCOP/UniCOP-Distill/, 然后改为
+#   MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_r1_v2/merged_model"
+MODEL_BASE=$(ls -d /Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/merged_model 2>/dev/null | sort -r | head -1)
+if [ -z "$MODEL_BASE" ]; then
+    echo "❌ 找不到 /Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/merged_model"
+    echo "   请确认 bak 目录存在,或把 SFT 产物 mv 回 monorepo 后改回此处路径。"
+    exit 1
+fi
+echo "[MODEL_BASE] $MODEL_BASE"
 POMO_CKPT_DIR="/Data04/yangzhihan/lzj/POMO-Baseline/result"
 POMO_BASELINE_DIR="/Data04/yangzhihan/lzj/POMO-Baseline"
 # PIP-D (NeurIPS 2024) for TSPTW,和 POMO 目录并存

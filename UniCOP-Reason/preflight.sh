@@ -20,7 +20,14 @@ WARN=0
 
 # 复用 auto_train.sh 的路径 (如果你改了路径,先改 auto_train.sh 再跑这个)
 WORK_DIR="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason"
-MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_r1_v2/final_model"
+# 测试阶段: MODEL_BASE 直接指 bak (见 auto_train.sh 同处注释)。
+# 注意: auto_train.sh 用的是 merged_model (LoRA 合并版本,vLLM 加载),
+#       preflight 用的是 final_model (LoRA adapter 版本,供 sanity check)。
+MODEL_BASE=$(ls -d /Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/final_model 2>/dev/null | sort -r | head -1)
+if [ -z "$MODEL_BASE" ]; then
+    MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP-Distill.bak_NOT_FOUND/output_sft_r1_v2/final_model"
+fi
+echo "[MODEL_BASE] $MODEL_BASE"
 POMO_CKPT_DIR="/Data04/yangzhihan/lzj/POMO-Baseline/result"
 POMO_BASELINE_DIR="/Data04/yangzhihan/lzj/POMO-Baseline"
 PIPD_CKPT_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
