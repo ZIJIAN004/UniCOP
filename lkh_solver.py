@@ -3,14 +3,13 @@ lkh_solver.py
 为各 COP 问题类型调用对应求解器，返回 UniCOP-Reason 格式的近最优解。
 
 求解器分配：
-  TSP   → LKH-2
-  CVRP  → LKH-3
+  TSP   → LKH（快速，TSP 是 LKH 最擅长的场景）
+  CVRP  → PyVRP（HGS，对 n=50/100 远快于 LKH-3，无 timeout 问题）
   TSPTW → PyVRP（1辆车 VRPTW，时间窗约束满足率高）
   VRPTW → PyVRP（原生支持，约束满足率高）
 
-LKH 二进制路径配置（修改下方常量，或通过环境变量覆盖）：
-  LKH_BIN  = LKH-2 路径，处理 TSP
-  LKH3_BIN = LKH-3 路径，处理 CVRP
+LKH 二进制路径配置（仅 TSP 使用，修改下方常量或通过环境变量覆盖）：
+  LKH_BIN = LKH 路径
 """
 
 import os
@@ -21,8 +20,8 @@ from typing import Optional
 import numpy as np
 
 # ── 二进制路径（在此处修改，或通过环境变量覆盖）────────────────────────────────
-LKH_BIN  = os.environ.get("LKH_BIN",  "/path/to/LKH")     # LKH-2 binary
-LKH3_BIN = os.environ.get("LKH3_BIN", "/path/to/LKH3")    # LKH-3 binary
+LKH_BIN  = os.environ.get("LKH_BIN", "/path/to/LKH3")     # LKH-3 binary（同时处理 TSP 和 CVRP）
+LKH3_BIN = LKH_BIN  # 保持向后兼容，两者指向同一二进制
 
 # 坐标缩放系数：LKH/PyVRP 使用整数距离，原始坐标在 [0,1]，放大以保留精度
 _COORD_SCALE = 1_000_000
@@ -35,17 +34,18 @@ _MAX_TW_SCALED = 2_000_000_000
 # ─────────────────────────────────────────────────────────────────────────────
 
 def solve(problem_type: str, instance: dict,
-          lkh_bin: str = LKH_BIN, lkh3_bin: str = LKH3_BIN,
+          lkh_bin: str = LKH_BIN,
           runs: int = 1, seed: int = 42, timeout: int = 60) -> Optional[str]:
     """
     统一入口：根据问题类型调用对应求解器。
     返回 UniCOP-Reason 格式的解字符串，失败返回 None。
+    lkh_bin 仅用于 TSP；CVRP/TSPTW/VRPTW 均使用 PyVRP。
     """
     try:
         if problem_type == "tsp":
             return _solve_tsp(instance, lkh_bin, runs=runs, seed=seed, timeout=timeout)
         elif problem_type == "cvrp":
-            return _solve_cvrp(instance, lkh3_bin, runs=runs, seed=seed, timeout=timeout)
+            return _solve_cvrp(instance, timeout=timeout)
         elif problem_type == "tsptw":
             return _solve_tsptw_pyvrp(instance, timeout=timeout)
         elif problem_type == "vrptw":
@@ -90,13 +90,80 @@ def _solve_tsp(instance, lkh_bin, runs=1, seed=42, timeout=60):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PyVRP 公共辅助：添加所有边（Euclidean 距离）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _add_pyvrp_edges(m, locs, coords_scaled, with_duration=False):
+    """
+    为 PyVRP Model 添加所有 (i, j) 边，距离 = 缩放后坐标的欧氏距离整数值。
+    locs: add_depot/add_client 返回的对象列表（Depot + Client）。
+    with_duration=True 时同时设置 duration（时间窗问题需要）。
+    """
+    n = len(locs)
+    for i in range(n):
+        xi, yi = coords_scaled[i]
+        for j in range(n):
+            if i == j:
+                continue
+            xj, yj = coords_scaled[j]
+            dist = int(np.sqrt((xi - xj) ** 2 + (yi - yj) ** 2))
+            if with_duration:
+                m.add_edge(locs[i], locs[j], distance=dist, duration=dist)
+            else:
+                m.add_edge(locs[i], locs[j], distance=dist)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CVRP — PyVRP（HGS，对大规模实例远快于 LKH-3）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _solve_cvrp(instance, timeout=120):
+    from pyvrp import Model
+    from pyvrp.stop import MaxRuntime
+
+    n        = instance["n"]
+    coords   = np.array(instance["coords"])
+    demands  = np.array(instance["demands"])
+    capacity = instance["capacity"]
+
+    S       = _COORD_SCALE
+    cap_int = int(round(capacity * S))
+
+    coords_scaled = [(int(coords[i][0] * S), int(coords[i][1] * S)) for i in range(n + 1)]
+
+    m = Model()
+    depot = m.add_depot(x=coords_scaled[0][0], y=coords_scaled[0][1])
+    clients = [
+        m.add_client(
+            x=coords_scaled[i][0], y=coords_scaled[i][1],
+            delivery=int(round(demands[i] * S)),
+            service_duration=0,
+        )
+        for i in range(1, n + 1)
+    ]
+    locs = [depot] + clients
+    _add_pyvrp_edges(m, locs, coords_scaled, with_duration=False)
+    m.add_vehicle_type(num_available=n, capacity=cap_int)
+
+    result = m.solve(stop=MaxRuntime(timeout), display=False)
+    if not result.is_feasible():
+        return None
+
+    pyvrp_routes = list(result.best.routes())
+    if not pyvrp_routes:
+        return None
+
+    routes = [[0] + [int(v) for v in r] + [0] for r in pyvrp_routes]
+    return _fmt_multi(routes)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TSPTW — PyVRP（1辆车）
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _solve_tsptw_pyvrp(instance, timeout=60):
     """
     将 TSPTW 建模为单车辆 VRPTW（num_available=1）交给 PyVRP 求解。
-    相比 LKH-2 的 TSPTW 模式，PyVRP 时间窗约束满足率更高。
     """
     from pyvrp import Model
     from pyvrp.stop import MaxRuntime
@@ -106,24 +173,26 @@ def _solve_tsptw_pyvrp(instance, timeout=60):
     tw     = np.array(instance["time_windows"])
 
     S = _COORD_SCALE
+    coords_scaled = [(int(coords[i][0] * S), int(coords[i][1] * S)) for i in range(n + 1)]
 
     m = Model()
-    m.add_depot(
-        x=int(coords[0][0] * S),
-        y=int(coords[0][1] * S),
+    depot = m.add_depot(
+        x=coords_scaled[0][0], y=coords_scaled[0][1],
         tw_early=int(tw[0][0] * S),
         tw_late=min(int(tw[0][1] * S), _MAX_TW_SCALED),
     )
-    for i in range(1, n + 1):
+    clients = [
         m.add_client(
-            x=int(coords[i][0] * S),
-            y=int(coords[i][1] * S),
+            x=coords_scaled[i][0], y=coords_scaled[i][1],
+            delivery=1,
             tw_early=int(tw[i][0] * S),
             tw_late=min(int(tw[i][1] * S), _MAX_TW_SCALED),
-            demand=1,
             service_duration=0,
         )
-    # 单车辆，容量足够覆盖所有节点（不作为约束）
+        for i in range(1, n + 1)
+    ]
+    locs = [depot] + clients
+    _add_pyvrp_edges(m, locs, coords_scaled, with_duration=True)
     m.add_vehicle_type(num_available=1, capacity=n + 1)
 
     result = m.solve(stop=MaxRuntime(timeout), display=False)
@@ -134,51 +203,7 @@ def _solve_tsptw_pyvrp(instance, timeout=60):
     if not routes:
         return None
 
-    # TSPTW 只有 1 条路线；PyVRP client index 与添加顺序一致（1-indexed → 对应节点 1..n）
-    nodes = [int(v) for v in routes[0]]   # client indices == our node indices (1..n)
-    route = [0] + nodes + [0]
-    return _fmt_single(route)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CVRP — LKH-3
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _solve_cvrp(instance, lkh3_bin, runs=1, seed=42, timeout=120):
-    n        = instance["n"]
-    coords   = np.array(instance["coords"])
-    demands  = np.array(instance["demands"])
-    capacity = instance["capacity"]
-
-    cap_int = int(round(capacity * _COORD_SCALE))
-
-    with tempfile.TemporaryDirectory() as tmp:
-        vrp_f  = os.path.join(tmp, "p.vrp")
-        par_f  = os.path.join(tmp, "p.par")
-        tour_f = os.path.join(tmp, "p.tour")
-
-        with open(vrp_f, "w") as f:
-            f.write(f"NAME: cvrp\nTYPE: CVRP\nDIMENSION: {n+1}\n")
-            f.write(f"CAPACITY: {cap_int}\nEDGE_WEIGHT_TYPE: EUC_2D\n")
-            f.write("NODE_COORD_SECTION\n")
-            for i in range(n + 1):
-                x, y = int(coords[i][0] * _COORD_SCALE), int(coords[i][1] * _COORD_SCALE)
-                f.write(f"{i+1} {x} {y}\n")
-            f.write("DEMAND_SECTION\n")
-            f.write("1 0\n")
-            for i in range(1, n + 1):
-                f.write(f"{i+1} {int(round(demands[i] * _COORD_SCALE))}\n")
-            f.write("DEPOT_SECTION\n1\n-1\nEOF\n")
-
-        _write_par(par_f, vrp_f, tour_f, runs, seed, timeout)
-        _run_lkh(lkh3_bin, par_f, timeout)
-
-        tour = _parse_tour(tour_f)
-        if tour is None:
-            return None
-
-        routes = _split_multi_routes(tour, depot_lkh=1)
-        return _fmt_multi(routes)
+    return _fmt_single([0] + [int(v) for v in routes[0]] + [0])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,7 +213,6 @@ def _solve_cvrp(instance, lkh3_bin, runs=1, seed=42, timeout=120):
 def _solve_vrptw_pyvrp(instance, timeout=120):
     """
     用 PyVRP 求解 VRPTW（无容量约束版）。
-    PyVRP 是 HGS 的 Python 封装，对时间窗约束的处理优于 LKH-3。
     """
     from pyvrp import Model
     from pyvrp.stop import MaxRuntime
@@ -198,24 +222,26 @@ def _solve_vrptw_pyvrp(instance, timeout=120):
     tw     = np.array(instance["time_windows"])
 
     S = _COORD_SCALE
+    coords_scaled = [(int(coords[i][0] * S), int(coords[i][1] * S)) for i in range(n + 1)]
 
     m = Model()
-    m.add_depot(
-        x=int(coords[0][0] * S),
-        y=int(coords[0][1] * S),
+    depot = m.add_depot(
+        x=coords_scaled[0][0], y=coords_scaled[0][1],
         tw_early=int(tw[0][0] * S),
         tw_late=min(int(tw[0][1] * S), _MAX_TW_SCALED),
     )
-    for i in range(1, n + 1):
+    clients = [
         m.add_client(
-            x=int(coords[i][0] * S),
-            y=int(coords[i][1] * S),
+            x=coords_scaled[i][0], y=coords_scaled[i][1],
+            delivery=1,
             tw_early=int(tw[i][0] * S),
             tw_late=min(int(tw[i][1] * S), _MAX_TW_SCALED),
-            demand=1,
             service_duration=0,
         )
-    # 无容量约束：最多 n 辆车，容量足够覆盖所有节点
+        for i in range(1, n + 1)
+    ]
+    locs = [depot] + clients
+    _add_pyvrp_edges(m, locs, coords_scaled, with_duration=True)
     m.add_vehicle_type(num_available=n, capacity=n + 1)
 
     result = m.solve(stop=MaxRuntime(timeout), display=False)
@@ -226,12 +252,7 @@ def _solve_vrptw_pyvrp(instance, timeout=120):
     if not pyvrp_routes:
         return None
 
-    # PyVRP client index 与添加顺序一致（1-indexed → 对应节点 1..n）
-    routes = []
-    for r in pyvrp_routes:
-        nodes = [int(v) for v in r]
-        routes.append([0] + nodes + [0])
-
+    routes = [[0] + [int(v) for v in r] + [0] for r in pyvrp_routes]
     return _fmt_multi(routes)
 
 
@@ -308,10 +329,9 @@ def _split_multi_routes(tour: list, depot_lkh: int = 1) -> list[list]:
 
 
 def _fmt_single(route: list) -> str:
-    """TSP / TSPTW 格式：Node selection + Route"""
-    nodes_str = ", ".join(str(v) for v in route[1:-1])
+    """TSP / TSPTW 格式：Route only"""
     route_str = " -> ".join(str(v) for v in route)
-    return f"Node selection: {nodes_str}\nRoute: {route_str}"
+    return f"Route: {route_str}"
 
 
 def _fmt_multi(routes: list[list]) -> str:
