@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-WORK_DIR="/Data04/yangzhihan/lzj/UniCOP-Distill"
-CREDENTIALS="/Data04/yangzhihan/lzj/UniCOP-Distill/advance-subject-493905-h9-020e2dc30ae7.json"
+WORK_DIR="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill"
+CREDENTIALS="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/advance-subject-493905-h9-020e2dc30ae7.json"
 PROJECT="advance-subject-493905-h9"
 LKH_BIN="/Data04/yangzhihan/lzj/LKH-3.0.9/LKH"
 SEED=2027
@@ -20,6 +20,7 @@ python generate_chains.py \
     --sizes 20 50 100 \
     --num_samples 400 \
     --seed "$SEED" \
+    --concurrency 4 \
     --output "$RAW_OUTPUT"
 
 echo "===== [$(date '+%F %T')] Step 2/2: clean chains ====="
