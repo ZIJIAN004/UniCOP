@@ -109,10 +109,15 @@ else
     echo "      flash-attn 2.8.3 已装"
 fi
 
-# ── Step 5: 装 OpenRLHF[vllm] (拉 vllm/deepspeed/ray/transformers) ─
-# CUDA_HOME 已在 Step 2 export, deepspeed 的 post-install 检查能过
-echo "[5/6] 装 openrlhf[vllm]..."
-python -m pip install "openrlhf[vllm]"
+# ── Step 5: 强制锁版本装 vllm + openrlhf ──────────────────────────
+# 重要: 不能用 `pip install "openrlhf[vllm]"`, 因为 pip resolver 会被
+# env 里已有的其他包约束拽跑, 选老版本 vllm (如 0.15.1) 匹配老 torch,
+# 结果和我们 pinned 的 torch 2.10 打架.
+# 解决: 按顺序 + 显式版本号, 不给 resolver 自由度.
+# CUDA_HOME 已在 Step 2 export, deepspeed 的 post-install 检查能过.
+echo "[5/6] 装 vllm 0.19.1 + openrlhf 0.10.2 (强制锁版本)..."
+python -m pip install vllm==0.19.1
+python -m pip install openrlhf==0.10.2
 
 # ── Step 6: 装本目录杂项依赖 (fastapi/uvicorn/pydantic 等) ───────────
 echo "[6/7] 装 openrlhf/requirements.txt..."
