@@ -29,7 +29,11 @@
 set -euo pipefail
 
 ENV_PATH=/Data04/yangzhihan/envs/openrlhf_env
-CUDA_HOME_SRC=/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux
+CUDA_HOME_SRC=/Data04/yangzhihan/envs/analog_env
+# 注意: 必须用 env 根目录, 不是 targets/x86_64-linux
+#   targets/x86_64-linux 路径对运行时 (libcudart) 够用,
+#   但对编译时的 nvcc 不够: nvcc 编译时要调 $CUDA_HOME/bin/cudafe++,
+#   而 cudafe++ 在 env 根目录的 bin/ 下, 不在 targets/.../bin/ 下
 
 echo "==============================================="
 echo "OpenRLHF 环境安装"
