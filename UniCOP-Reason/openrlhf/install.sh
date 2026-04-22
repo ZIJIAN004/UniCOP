@@ -1,7 +1,7 @@
 #!/bin/bash
 # OpenRLHF 环境一键安装脚本
 # 用法:
-#   cd /Data04/yangzhihan/lzj/UniCOP-Reason/openrlhf
+#   cd /Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf
 #   bash install.sh
 #
 # 前置条件:

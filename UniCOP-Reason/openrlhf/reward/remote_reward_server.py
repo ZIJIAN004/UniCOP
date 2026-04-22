@@ -23,13 +23,14 @@ OpenRLHF 的 GRPO trainer 通过 --remote_rm_url http://host:port/get_reward 调
 # 参考父目录 grpo_prm_trainer.py 中的 compute_advantages.
 # ------------------------------------------------------------
 
-用法:
+用法 (在服务器上):
+    conda activate /Data04/yangzhihan/envs/openrlhf_env
+    cd /Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf
     python reward/remote_reward_server.py \
         --problem_type tsp \
         --problem_size 10 \
-        --port 5000 \
-        --pomo_ckpt_dir /Data04/yangzhihan/lzj/POMO-Baseline/result \
-        --pomo_baseline_dir /Data04/yangzhihan/lzj/POMO-Baseline
+        --port 5000
+    # POMO 路径用 argparse default (见 main() 末尾),无需每次传
 """
 
 import argparse

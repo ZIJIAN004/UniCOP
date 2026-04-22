@@ -6,12 +6,13 @@
 
 本子目录在**不动父目录任何代码**的前提下，平行实现一套 **OpenRLHF** 版本的 GRPO 训练流程。两者共享：
 
-- SFT 初始权重（`/Data04/yangzhihan/lzj/UniCOP-Distill/output_sft_r1_v2/merged_model`）
+- SFT 初始权重（`/Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/merged_model`，训练脚本自动扫最新）
 - 数据集定义（父目录 `problems/`）
 - POMO PRM 和 terminal reward 算法（父目录 `pomo_prm.py` / `terminal_reward.py`）
 
 但**完全隔离**：
 
+- 服务器根路径: `/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf/`
 - Python 环境：`/Data04/yangzhihan/envs/openrlhf_env`（独立 conda env）
 - 输出 ckpt：`openrlhf/output/`（不写父目录 `output/`）
 - 训练脚本、reward wrapper、logits processor：全部新写
@@ -66,15 +67,19 @@ openrlhf/
 ## 跑通流程（首次）
 
 ```bash
+# 0. 同步代码 (用 git, 不要 rsync)
+#    本地 commit + push → 服务器 git pull
+
 # 1. 装环境（只做一次）
-cd /Data04/yangzhihan/lzj/UniCOP-Reason/openrlhf
+cd /Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf
 bash install.sh
 
 # 2. 自检
 conda activate /Data04/yangzhihan/envs/openrlhf_env
 python scripts/verify_env.py
+# smoke test 会自动扫最新的 UniCOP-Distill.bak_* SFT 产物
 python scripts/smoke_test_vllm.py \
-  --model /Data04/yangzhihan/lzj/UniCOP-Distill/output_sft_r1_v2/merged_model
+  --model "$(ls -d /Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/merged_model | sort -r | head -1)"
 
 # 3. 准备数据（只做一次，产物写到 data/processed/）
 python data/prepare_dataset.py --problem_type tsp --problem_size 10 --num_train 20000
@@ -82,7 +87,7 @@ python data/prepare_dataset.py --problem_type tsp --problem_size 10 --num_train 
 # 4. 起远程 reward server（一个终端常驻）
 python reward/remote_reward_server.py --problem_type tsp --problem_size 10 --port 5000
 
-# 5. 另一个终端启动训练
+# 5. 另一个终端启动训练（脚本内会自动扫 SFT bak 目录）
 bash configs/train_grpo_tsp10_1.5b.sh
 ```
 

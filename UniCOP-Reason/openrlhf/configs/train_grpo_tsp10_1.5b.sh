@@ -16,8 +16,14 @@
 set -euo pipefail
 
 # ── 路径 ─────────────────────────────────────────────────────────────
-WORK_DIR="/Data04/yangzhihan/lzj/UniCOP-Reason/openrlhf"
-MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP-Distill/output_sft_r1_v2/merged_model"
+WORK_DIR="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf"
+# 与父目录 auto_train.sh 一致: 扫 UniCOP-Distill.bak_* 里最新一份 SFT 产物
+MODEL_BASE=$(ls -d /Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/merged_model 2>/dev/null | sort -r | head -1)
+if [ -z "$MODEL_BASE" ]; then
+    echo "❌ 找不到 /Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/merged_model"
+    exit 1
+fi
+echo "[MODEL_BASE] $MODEL_BASE"
 DATA_TRAIN="$WORK_DIR/data/processed/tsp10_train.jsonl"
 OUTPUT_DIR="$WORK_DIR/output/tsp10_1.5b_grpo_lora_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTPUT_DIR"
