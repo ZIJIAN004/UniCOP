@@ -35,18 +35,25 @@ conda activate "$ENV_PATH"
 python_ver=$(python -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
 echo "      python: $python_ver"
 
-# ── Step 2: 装 PyTorch 2.5.1 + cu121 ───────────────────────────────
-echo "[2/5] 装 PyTorch 2.5.1 + cu121..."
-if ! python -c 'import torch' 2>/dev/null; then
-    pip install torch==2.5.1 torchvision --index-url https://download.pytorch.org/whl/cu121
+# ── Step 2: 装 PyTorch 2.9.0 + cu128 ───────────────────────────────
+# 为什么选这个版本:
+#   - torch 2.9 是 flash-attn 2.8.3 官方 pre-built wheel 最高支持的版本
+#     (torch 2.10 没官方 wheel,只有社区版,不稳)
+#   - cu128 和服务器驱动 (CUDA 12.8) 匹配
+#   - vLLM 0.19.1、deepspeed 0.18.9、OpenRLHF 0.10 都在此版本测试过
+echo "[2/5] 装 PyTorch 2.9.0 + cu128..."
+if ! python -c 'import torch; assert torch.__version__.startswith("2.9")' 2>/dev/null; then
+    pip install --force-reinstall torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu128
 else
-    echo "      torch 已装: $(python -c 'import torch; print(torch.__version__)')"
+    echo "      torch 2.9.x 已装: $(python -c 'import torch; print(torch.__version__)')"
 fi
 
 # ── Step 3: 装 flash-attn 2.8.3 (pre-built wheel, 免编译) ────────
+# ABI 警告: flash-attn wheel 的 torchX.Y 必须与 Step 2 装的 torch 主次版本完全一致,
+# 否则会出 "undefined symbol: _ZN3c104cuda..." 这种 C++ ABI 错误
 echo "[3/5] 装 flash-attn 2.8.3 (wheel)..."
 if ! python -c 'import flash_attn' 2>/dev/null; then
-    WHEEL_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
+    WHEEL_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.9cxx11abiFALSE-cp310-cp310-linux_x86_64.whl"
     pip install "$WHEEL_URL"
 else
     echo "      flash-attn 已装: $(python -c 'import flash_attn; print(flash_attn.__version__)')"
