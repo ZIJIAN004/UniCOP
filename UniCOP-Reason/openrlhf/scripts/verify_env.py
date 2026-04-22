@@ -7,8 +7,24 @@ OpenRLHF 环境验证脚本
     python verify_env.py
 """
 
+import os
 import sys
 import importlib
+
+
+# ── 自动设置 CUDA_HOME (openrlhf_env 本身没装 nvcc,借 analog_env 的) ──
+_CUDA_HOME_CANDIDATES = [
+    "/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux",
+    "/usr/local/cuda",
+]
+if not os.environ.get("CUDA_HOME"):
+    for _c in _CUDA_HOME_CANDIDATES:
+        if os.path.exists(os.path.join(_c, "bin", "nvcc")):
+            os.environ["CUDA_HOME"] = _c
+            print(f"[init] 自动设置 CUDA_HOME={_c}")
+            break
+    else:
+        print("[init] WARNING: 没找到 nvcc, deepspeed/flash-attn 导入可能失败")
 
 
 REQUIRED_PKGS = [
@@ -25,6 +41,7 @@ REQUIRED_PKGS = [
 
 
 def check_version(pkg_name, min_version):
+    """独立 try/except 兜底, 任何异常都不再往上冒, 保证后续包能继续检查."""
     try:
         mod = importlib.import_module(pkg_name)
         version = getattr(mod, "__version__", "unknown")
@@ -38,6 +55,10 @@ def check_version(pkg_name, min_version):
         return version, status, warn
     except ImportError as e:
         return None, "MISSING", f" ({e})"
+    except Exception as e:
+        # deepspeed 在 CUDA_HOME 未设时抛 MissingCUDAException 之类的运行时异常
+        # 捕获,避免脚本整体挂掉
+        return None, "ERROR", f" ({type(e).__name__}: {e})"
 
 
 def main():
@@ -58,7 +79,7 @@ def main():
         version, status, warn = check_version(pkg, min_v)
         version_str = version if version else "N/A"
         print(f"{pkg:<15} {version_str:<15} {status}{warn}")
-        if status == "MISSING":
+        if status in ("MISSING", "ERROR"):
             all_ok = False
 
     print()
