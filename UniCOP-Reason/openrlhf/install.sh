@@ -12,6 +12,7 @@
 # 总耗时: 约 40-60 分钟
 #   - torch 等包下载: 5 分钟
 #   - flash-attn 源码编译: 20-40 分钟 (单架构 sm_86, MAX_JOBS=4)
+#   - 最后一步配 conda activate hook, 以后进 env 自动 export CUDA_HOME
 #
 # 版本选择说明 (2026-04 调研):
 #   OpenRLHF 0.10.2 锁 flash-attn==2.8.3 + vllm==0.19.1
@@ -114,19 +115,41 @@ echo "[5/6] 装 openrlhf[vllm]..."
 python -m pip install "openrlhf[vllm]"
 
 # ── Step 6: 装本目录杂项依赖 (fastapi/uvicorn/pydantic 等) ───────────
-echo "[6/6] 装 openrlhf/requirements.txt..."
+echo "[6/7] 装 openrlhf/requirements.txt..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 python -m pip install -r "$SCRIPT_DIR/requirements.txt"
+
+# ── Step 7: 配 conda activate/deactivate hook (根治 CUDA_HOME 问题) ─
+# 一次性写 hook: 以后 conda activate openrlhf_env 自动 export CUDA_HOME,
+# 不用再每次手动 export.
+echo "[7/7] 配置 conda activate/deactivate hook..."
+ACTIVATE_DIR="$ENV_PATH/etc/conda/activate.d"
+DEACTIVATE_DIR="$ENV_PATH/etc/conda/deactivate.d"
+mkdir -p "$ACTIVATE_DIR" "$DEACTIVATE_DIR"
+
+cat > "$ACTIVATE_DIR/cuda_home.sh" << EOF
+#!/bin/bash
+# 自动配置 CUDA_HOME, 每次 conda activate 时运行
+# 指向 env 根目录 (不是 targets/x86_64-linux), 编译时 cudafe++ 才能被找到
+export CUDA_HOME=$CUDA_HOME_SRC
+export PATH=\$CUDA_HOME/bin:\$PATH
+export LD_LIBRARY_PATH=\$CUDA_HOME/lib:\${LD_LIBRARY_PATH:-}
+EOF
+chmod +x "$ACTIVATE_DIR/cuda_home.sh"
+
+cat > "$DEACTIVATE_DIR/cuda_home.sh" << 'EOF'
+#!/bin/bash
+unset CUDA_HOME
+# PATH 和 LD_LIBRARY_PATH 由 conda 自动恢复
+EOF
+chmod +x "$DEACTIVATE_DIR/cuda_home.sh"
+echo "      activate hook: $ACTIVATE_DIR/cuda_home.sh"
+echo "      deactivate hook: $DEACTIVATE_DIR/cuda_home.sh"
 
 echo ""
 echo "==============================================="
 echo "安装完成。下一步:"
-echo "  conda activate $ENV_PATH"
-echo "  export CUDA_HOME=$CUDA_HOME_SRC"
-echo "  export PATH=\$CUDA_HOME/bin:\$PATH"
-echo "  export LD_LIBRARY_PATH=\$CUDA_HOME/lib:\$LD_LIBRARY_PATH"
+echo "  conda deactivate && conda activate $ENV_PATH   # 让 hook 生效"
+echo "  echo \$CUDA_HOME                                # 验证: 应该有输出"
 echo "  python $SCRIPT_DIR/scripts/verify_env.py"
 echo "==============================================="
-echo ""
-echo "提示: CUDA_HOME 和 PATH 每次 conda activate 后都要手动 export."
-echo "      一劳永逸做法: 在 $ENV_PATH/etc/conda/activate.d/ 放激活脚本."
