@@ -31,7 +31,8 @@ BASE_MODEL="/Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/d
 SFT_DATA="$DISTILL_DIR/data/chains_v3_clean.jsonl"
 
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-SFT_OUT="$DISTILL_DIR/output_sft_auto_$TIMESTAMP"
+# 复用已完成的 SFT 产物，跳过阶段 1
+SFT_OUT="$DISTILL_DIR/output_sft_auto_20260423_024302"
 SFT_MERGED="$SFT_OUT/merged_model"
 
 # RL 输出沿用 auto_train.sh 的结构
@@ -479,21 +480,11 @@ notify "🚀 UniCOP auto_all 启动" \
 启动: $(date '+%Y-%m-%d %H:%M:%S')
 SFT out: $SFT_OUT"
 
-# ── 阶段 1: SFT 训练 ─────────────────────────────────────────────
+# ── 阶段 1: SFT 训练 (已跳过，复用已有产物) ──────────────────────
 echo ""
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [1/5] SFT 训练 ═══"
-wait_for_gpus $NEED_GPUS
-run_sft "$FREE_GPUS"
-ec=$?
-if [ $ec -eq 99 ]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] SFT OOM, 等另一批 4 张空闲卡重试"
-    wait_for_gpus $NEED_GPUS
-    run_sft "$FREE_GPUS"
-    ec=$?
-fi
-if [ $ec -ne 0 ]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ SFT 最终失败 (ec=$ec),退出"
-    notify "❌ UniCOP SFT 失败" "exit=$ec, 详见 $LOG_DIR/sft_${TIMESTAMP}.log"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [1/5] SFT 训练 — 跳过，复用 $SFT_OUT ═══"
+if [ ! -d "$SFT_OUT/final_model" ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ❌ SFT adapter 不存在: $SFT_OUT/final_model"
     exit 1
 fi
 
