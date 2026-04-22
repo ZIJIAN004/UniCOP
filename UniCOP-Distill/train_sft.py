@@ -259,8 +259,8 @@ def main():
                              "(CVRP/VRPTW n=50/100) 的 prompt 就有 2000-3000 token,"
                              "加 <think> 链后 4096 会砍掉 50%+ 样本尾部的答案, 故默认 8192。"
                              "tokenizer.model_max_length=16384 还有余量,显存紧可降。")
-    parser.add_argument("--val_ratio",    type=float, default=0.05,
-                        help="验证集比例（默认 5%%）")
+    parser.add_argument("--val_ratio",    type=float, default=0.0,
+                        help="验证集比例（默认 0 不验证）")
 
     # 训练
     parser.add_argument("--seed",         type=int,   default=42,
