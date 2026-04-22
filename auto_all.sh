@@ -51,7 +51,6 @@ POMO_BASELINE_DIR="/Data04/yangzhihan/lzj/POMO-Baseline"
 PIPD_CKPT_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
 PIPD_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP"
 
-CUDA_HOME_PATH="/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux"
 
 # ══════════════════════════════════════════════════════════════════════
 # GPU 调度参数
@@ -178,7 +177,6 @@ start_vllm_server() {
 
     PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
     CUDA_VISIBLE_DEVICES="$vllm_gpu" \
-    CUDA_HOME="$CUDA_HOME_PATH" \
     FLASHINFER_DISABLE_VERSION_CHECK=1 \
         "$TRL_BIN" vllm-serve \
         --model "$model_path" \
@@ -238,7 +236,6 @@ run_sft() {
 
     PYTHONPATH="$DISTILL_DIR:${PYTHONPATH:-}" \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
-    CUDA_HOME="$CUDA_HOME_PATH" \
     CUDA_VISIBLE_DEVICES="$gpus" \
         python -m accelerate.commands.launch --num_processes "$num_proc" \
         "$DISTILL_DIR/train_sft.py" \
@@ -314,8 +311,7 @@ run_eval() {
     while [ "$bs" -ge 1 ]; do
         echo "===== batch_size=$bs  $(date '+%Y-%m-%d %H:%M:%S')  GPUs=$gpus =====" >> "$log_file"
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
-        CUDA_HOME="$CUDA_HOME_PATH" \
-        CUDA_VISIBLE_DEVICES="$gpus" \
+            CUDA_VISIBLE_DEVICES="$gpus" \
             python "$REASON_DIR/evaluate.py" \
             --model_path "$model_path" \
             --problem $problems \
@@ -377,7 +373,6 @@ run_rl() {
 
     PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
-    CUDA_HOME="$CUDA_HOME_PATH" \
     CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" \
         python -m accelerate.commands.launch --num_processes "$train_proc" \
         "$REASON_DIR/train.py" \
