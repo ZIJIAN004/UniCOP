@@ -23,11 +23,6 @@ import os
 
 import torch
 
-# 预留 95% 显存，防止其他进程挤占导致训练 OOM
-if torch.cuda.is_available():
-    for i in range(torch.cuda.device_count()):
-        torch.cuda.set_per_process_memory_fraction(0.95, i)
-
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 from trl import SFTConfig, SFTTrainer

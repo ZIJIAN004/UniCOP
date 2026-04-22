@@ -237,7 +237,7 @@ run_sft() {
     echo "  log:    $log_file"
 
     PYTHONPATH="$DISTILL_DIR:${PYTHONPATH:-}" \
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
     CUDA_HOME="$CUDA_HOME_PATH" \
     CUDA_VISIBLE_DEVICES="$gpus" \
         python -m accelerate.commands.launch --num_processes "$num_proc" \
@@ -312,7 +312,7 @@ run_eval() {
 
     while [ "$bs" -ge 1 ]; do
         echo "===== batch_size=$bs  $(date '+%Y-%m-%d %H:%M:%S')  GPUs=$gpus =====" >> "$log_file"
-        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+        PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
         CUDA_HOME="$CUDA_HOME_PATH" \
         CUDA_VISIBLE_DEVICES="$gpus" \
             python "$REASON_DIR/evaluate.py" \
@@ -375,7 +375,7 @@ run_rl() {
     fi
 
     PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
     CUDA_HOME="$CUDA_HOME_PATH" \
     CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" \
         python -m accelerate.commands.launch --num_processes "$train_proc" \
