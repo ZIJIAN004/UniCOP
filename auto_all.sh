@@ -497,15 +497,14 @@ if ! run_sft_merge; then
     exit 1
 fi
 
-# ── 阶段 3: SFT evaluate (4 卡, 12 组) ────────────────────────────
+# ── 阶段 3: SFT evaluate (不等空闲卡，直接尝试) ──────────────────
 echo ""
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [3/5] SFT evaluate (全套 4×3) ═══"
-wait_for_gpus $EVAL_GPUS_SFT
+check_gpus_free $EVAL_GPUS_SFT
 run_eval "$SFT_MERGED" "$FREE_GPUS" "$SFT_INIT_BATCH_SIZE" "sft" \
     "tsp cvrp vrptw tsptw" "20 50 100"
-# eval 失败不阻塞后续 RL
 if [ $? -ne 0 ]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ SFT eval 失败,继续 RL 阶段"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ SFT eval 失败,跳过,直接进 RL"
     notify "⚠️ UniCOP SFT eval 失败" "不阻塞, 继续 RL"
 fi
 
