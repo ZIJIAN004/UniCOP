@@ -56,13 +56,31 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
         "train_batch_size":               "auto",
         "gradient_accumulation_steps":    "auto",
         "steps_per_print":                50,
+        "optimizer": {
+            "type": "AdamW",
+            "params": {
+                "lr":           "auto",
+                "betas":        "auto",
+                "eps":          "auto",
+                "weight_decay": "auto",
+            },
+        },
+        "scheduler": {
+            "type": "WarmupDecayLR",
+            "params": {
+                "warmup_min_lr":    0,
+                "warmup_max_lr":    "auto",
+                "warmup_num_steps": "auto",
+                "total_num_steps":  "auto",
+            },
+        },
     }
 
     if zero_stage == 2:
         base["zero_optimization"] = {
             "stage":                2,
-            "overlap_comm":         True,    # 通信与计算重叠，降低多卡同步开销
-            "contiguous_gradients": True,    # 梯度内存连续，减少碎片
+            "overlap_comm":         True,
+            "contiguous_gradients": True,
             "reduce_bucket_size":   5e8,
             "reduce_scatter":       True,
         }
@@ -73,32 +91,11 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "overlap_comm":                   True,
             "contiguous_gradients":           True,
             "reduce_bucket_size":             "auto",
-            "stage3_prefetch_bucket_size":    "auto",   # 预取下一层参数，隐藏通信延迟
-            # stage3_param_persistence_threshold:
-            # 小于此值的 param 永不分片(常驻每张卡), 否则按 ZeRO-3 切片。
-            # 设成 1e6 让所有 norm/embedding 层的小参数(< 1M 元素)不分片,
-            # 解决 LoRA + gradient_checkpointing + ZeRO-3 三件套下
-            # backward 重算时 frozen 小参数被分片导致 shape mismatch 的问题。
-            # 代价: 每张卡多占几 MB(整模型小参数加起来)
+            "stage3_prefetch_bucket_size":    "auto",
             "stage3_param_persistence_threshold": 1_000_000,
             "stage3_max_live_parameters":     1e9,
             "stage3_max_reuse_distance":      1e9,
-            "gather_16bit_weights_on_model_save": True,  # 保存时合并分片权重
-        }
-        # 让 DeepSpeed 自己创建 scheduler 而不是 HF Trainer 创建。
-        # 修 "ValueError: zip() argument 2 is longer than argument 1" 错:
-        # HF Trainer 先创 scheduler (基于 optimizer 的 N 个 param_groups),
-        # 然后 DeepSpeed wrap optimizer 时合并成 M 个 (M < N), scheduler
-        # 看到 mismatch → 崩。让 DeepSpeed 接管 scheduler 即可避免。
-        # WarmupDecayLR 等价 HF Trainer 默认的 "linear" scheduler。
-        base["scheduler"] = {
-            "type": "WarmupDecayLR",
-            "params": {
-                "warmup_min_lr":    0.0,
-                "warmup_max_lr":    "auto",   # 用 TrainingArguments.learning_rate
-                "warmup_num_steps": "auto",   # 用 warmup_ratio × total_steps
-                "total_num_steps":  "auto",   # 用 max_steps 或 epochs × steps_per_epoch
-            }
+            "gather_16bit_weights_on_model_save": True,
         }
 
     return base
