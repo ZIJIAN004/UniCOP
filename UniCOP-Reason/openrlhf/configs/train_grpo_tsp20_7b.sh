@@ -1,17 +1,18 @@
 #!/bin/bash
-# OpenRLHF GRPO 训练 · TSP n=10 · DeepSeek-R1-Distill-Qwen-1.5B · LoRA
+# OpenRLHF GRPO 训练 · TSP n=20 · DeepSeek-R1-Distill-Qwen-7B · LoRA
 #
-# 预期资源:
+# 预期资源 (与 auto_all.sh 阶段 4 对齐):
 #   - 1 卡 vLLM rollout
-#   - 1 卡 POMO reward server (远程)
-#   - 6 卡训练 (FSDP2 分片)
+#   - 3 卡训练 (ZeRO-3 + offload_optimizer)
 #
 # 用法:
 #   # 终端 1: 起 reward server
-#   python reward/remote_reward_server.py --problem_type tsp --problem_size 10 --port 5000
+#   python reward/remote_reward_server.py --problem_type tsp --problem_size 20 --port 5000 \
+#       --pomo_ckpt_dir /Data04/yangzhihan/lzj/POMO-Baseline/result \
+#       --pomo_baseline_dir /Data04/yangzhihan/lzj/POMO-Baseline
 #
-#   # 终端 2 (另一个): 跑训练
-#   bash configs/train_grpo_tsp10_1.5b.sh
+#   # 终端 2: 跑训练
+#   bash configs/train_grpo_tsp20_7b.sh
 
 set -euo pipefail
 
@@ -23,22 +24,22 @@ if [ ! -d "$MODEL_BASE" ]; then
     exit 1
 fi
 echo "[MODEL_BASE] $MODEL_BASE"
-DATA_TRAIN="$WORK_DIR/data/processed/tsp10_train.jsonl"
-OUTPUT_DIR="$WORK_DIR/output/tsp10_1.5b_grpo_lora_$(date +%Y%m%d_%H%M%S)"
+DATA_TRAIN="$WORK_DIR/data/processed/tsp20_train.jsonl"
+OUTPUT_DIR="$WORK_DIR/output/tsp20_7b_grpo_lora_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTPUT_DIR"
 
 REWARD_URL="http://localhost:5000/get_reward"
 
-# ── GPU 调度 ─────────────────────────────────────────────────────────
-export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
-N_GPUS=8
+# ── GPU 调度 (4 卡, 与 auto_all.sh 阶段 4 对齐) ─────────────────────
+export CUDA_VISIBLE_DEVICES="0,1,2,3"
+N_GPUS=4
 VLLM_GPUS=1          # 1 卡 rollout
-TRAIN_GPUS=7         # 7 卡训练 (POMO reward server 放在 CPU 上跑或者复用 vllm 卡)
+TRAIN_GPUS=3         # 3 卡训练
 
 # ── 训练超参 (与父目录 config.py 对齐) ───────────────────────────────
 MAX_PROMPT_LEN=768
 MAX_COMPLETION_LEN=4096
-NUM_GENERATIONS=8               # GRPO 组内样本数
+NUM_GENERATIONS=8
 LR=5e-6
 KL_COEF=0.01
 CLIP_EPS_LOW=0.20               # DAPO
@@ -62,20 +63,9 @@ ray stop || true
 ray start --head --num-gpus=$N_GPUS
 
 # ── OpenRLHF GRPO 训练命令 ──────────────────────────────────────────
-# 关键参数说明:
-#   --algo grpo                 选 GRPO 算法 (也可换 dapo / reinforce++_baseline)
-#   --advantage_estimator group_norm    GRPO 的组归一化 advantage
-#   --eps_clip_low/high         DAPO 非对称 clip
-#   --remote_rm_url             远程 reward server
-#   --actor_num_gpus_per_node   训练并行度
-#   --vllm_num_engines          vLLM rollout 并行度
-#   --vllm_gpu_memory_utilization 0.85   与父目录 VLLM_GPU_MEM_UTIL 一致
-#   --enable_prefix_caching     GRPO 组内同 prompt prefix 复用
-#   --lora_rank / lora_alpha    LoRA 配置
-#   --flash_attn                启用 FA2
-#   --gradient_checkpointing    激活重计算
-#   --zero_stage 3              DeepSpeed ZeRO-3 (也可换 --use_fsdp2)
-#   --generation_kwargs         透传给 SamplingParams, 其中 extra_args 进入 ngram processor
+# 7B ZeRO-3 + gradient_checkpointing + offload_optimizer
+# micro_train_batch_size=1 + train_batch_size=24 → grad_accum=8 (3卡×8=24)
+# rollout_batch_size 降到 64 (相比 1.5B 的 128) 避免 vLLM 单卡 OOM
 
 python -m openrlhf.cli.train_ppo_ray \
     --ref_num_nodes 1 \
@@ -97,9 +87,9 @@ python -m openrlhf.cli.train_ppo_ray \
     --logging_steps 1 \
     --eval_steps 100 \
     --micro_train_batch_size 1 \
-    --train_batch_size 64 \
-    --micro_rollout_batch_size 4 \
-    --rollout_batch_size 128 \
+    --train_batch_size 24 \
+    --micro_rollout_batch_size 2 \
+    --rollout_batch_size 64 \
     --max_epochs 1 \
     --num_episodes 3 \
     --prompt_max_len $MAX_PROMPT_LEN \
@@ -121,7 +111,7 @@ python -m openrlhf.cli.train_ppo_ray \
     --bf16 \
     --use_wandb \
     --wandb_project "UniCOP-Reason-OpenRLHF" \
-    --wandb_run_name "tsp10_1.5b_grpo_lora_$(date +%Y%m%d_%H%M%S)" \
+    --wandb_run_name "tsp20_7b_grpo_lora_$(date +%Y%m%d_%H%M%S)" \
     --generation_kwargs '{"extra_args": {"no_repeat_ngram_size": 6}}'
 
 # ── 清理 ─────────────────────────────────────────────────────────────

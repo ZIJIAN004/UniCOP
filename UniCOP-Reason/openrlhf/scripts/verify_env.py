@@ -14,7 +14,7 @@ import importlib
 
 # ── 自动设置 CUDA_HOME (openrlhf_env 本身没装 nvcc,借 analog_env 的) ──
 _CUDA_HOME_CANDIDATES = [
-    "/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux",
+    "/Data04/yangzhihan/envs/analog_env",
     "/usr/local/cuda",
 ]
 if not os.environ.get("CUDA_HOME"):

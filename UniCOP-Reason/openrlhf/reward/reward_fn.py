@@ -99,6 +99,6 @@ def batch_reward_fn(prompts: list[str], responses: list[str]) -> list[float]:
                 sum(step_rew.customer_rewards) + sum(step_rew.depot_rewards)
             ) / step_rew.n
 
-        rewards.append(1.0 * terminal_total + 0.5 * prm_total)
+        rewards.append(1.0 * terminal_total + 1.0 * prm_total)
 
     return rewards

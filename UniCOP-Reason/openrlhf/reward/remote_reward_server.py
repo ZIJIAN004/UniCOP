@@ -12,7 +12,7 @@ OpenRLHF 的 GRPO trainer 通过 --remote_rm_url http://host:port/get_reward 调
     total = w_terminal * (parse + coverage + constraint + format)
           + w_prm * (sum(customer_rewards) + sum(depot_rewards)) / max(n, 1)
 
-默认权重 w_terminal=1.0, w_prm=0.5 (与父目录 grpo_prm_trainer 保持等量级).
+默认权重 w_terminal=1.0, w_prm=1.0 (与父目录 config.py terminal_alpha/prm_beta 对齐).
 
 # TODO: step-level
 # ------------------------------------------------------------
@@ -62,7 +62,7 @@ class State:
     instances: dict = {}               # instance_id -> instance dict
     pomo_prm: POMOPRM | None = None
     w_terminal: float = 1.0
-    w_prm: float = 0.5
+    w_prm: float = 1.0
 
 
 STATE = State()
@@ -199,7 +199,7 @@ def main():
     parser.add_argument("--skip_pomo", action="store_true",
                         help="不加载 POMO, 只算 terminal reward (调试用)")
     parser.add_argument("--w_terminal", type=float, default=1.0)
-    parser.add_argument("--w_prm", type=float, default=0.5)
+    parser.add_argument("--w_prm", type=float, default=1.0)
     args = parser.parse_args()
 
     STATE.problem_type = args.problem_type
