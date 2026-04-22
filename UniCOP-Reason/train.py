@@ -56,15 +56,6 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
         "train_batch_size":               "auto",
         "gradient_accumulation_steps":    "auto",
         "steps_per_print":                50,
-        "optimizer": {
-            "type": "AdamW",
-            "params": {
-                "lr":           "auto",
-                "betas":        "auto",
-                "eps":          "auto",
-                "weight_decay": "auto",
-            },
-        },
         "scheduler": {
             "type": "WarmupDecayLR",
             "params": {
