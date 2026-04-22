@@ -1,0 +1,23 @@
+# OpenRLHF 版训练依赖锁 (2026-04 最新稳定组合)
+# 注意: torch + flash-attn 用 pre-built wheel 装, 不在此列表
+#
+# 安装顺序见 install.sh:
+#   1. torch 2.5.1 + cu121 (index-url)
+#   2. flash-attn 2.8.3 (pre-built wheel from github)
+#   3. openrlhf[vllm] (拉 vllm/deepspeed/ray/transformers 等)
+#   4. 本文件里的其他杂项
+
+# 远程 reward server
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+
+# 数据处理
+pandas>=2.0
+pyarrow>=14.0
+
+# 日志 / 可视化（父目录也用 wandb，保持一致）
+wandb>=0.17
+
+# 断言 / 开发辅助
+rich>=13.7

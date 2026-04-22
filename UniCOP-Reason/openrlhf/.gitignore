@@ -1,0 +1,17 @@
+# ckpt / 训练输出
+output/*
+!output/.gitkeep
+
+# 处理后的数据集 (可复现, 不进 git)
+data/processed/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# wandb 本地 logs
+wandb/
+
+# ray session 文件
+/tmp/ray/
