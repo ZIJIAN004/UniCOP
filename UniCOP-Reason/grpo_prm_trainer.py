@@ -373,7 +373,7 @@ class GRPOPRMTrainer(GRPOTrainer):
         ratio = torch.exp(per_token_logps - old_per_token_logps)
 
         # GRPO clipped per-token loss 的两个分量
-        eps_low  = getattr(self, 'epsilon_low', 0.2)
+        eps_low  = getattr(self, 'epsilon', 0.2)
         eps_high = getattr(self, 'epsilon_high', 0.2)
         clipped_ratio = torch.clamp(ratio, 1 - eps_low, 1 + eps_high)
 

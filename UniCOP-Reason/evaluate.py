@@ -281,7 +281,7 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
             do_sample=(num_samples > 1),
             temperature=temperature if num_samples > 1 else 1.0,
             num_return_sequences=num_samples,
-            pad_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
             repetition_penalty=repetition_penalty,
         )
         if no_repeat_ngram_size and no_repeat_ngram_size > 0:
