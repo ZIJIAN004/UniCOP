@@ -320,6 +320,31 @@ def main():
     from problems import get_problem  # noqa: E402
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+
+    # 清理已有文件中超长样本（output_tokens > max_output_tokens）
+    if os.path.exists(args.output):
+        kept_lines = []
+        purged = 0
+        with open(args.output, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    r = json.loads(stripped)
+                    ot = r.get("output_tokens")
+                    if ot is not None and ot > args.max_output_tokens:
+                        purged += 1
+                        continue
+                except json.JSONDecodeError:
+                    pass
+                kept_lines.append(stripped)
+        if purged > 0:
+            with open(args.output, "w", encoding="utf-8") as f:
+                for kl in kept_lines:
+                    f.write(kl + "\n")
+            print(f"  清理超长样本: 删除 {purged} 条 (output_tokens > {args.max_output_tokens})")
+
     client       = build_client(args.credentials, args.project, args.location)
     existing_ids = load_existing_ids(args.output)
     valid_counts = count_valid_samples(args.output, args.max_output_tokens)
