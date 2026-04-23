@@ -308,6 +308,21 @@ def main():
         print_stats(args.output)
         return
 
+    try:
+        _run(args)
+    except KeyboardInterrupt:
+        print("\n用户中断")
+        _notify_serverchan("generate_chains 被手动中断")
+    except Exception:
+        import traceback
+        _notify_serverchan("generate_chains 异常退出", traceback.format_exc()[-400:])
+        raise
+    else:
+        _notify_serverchan("generate_chains 正常完成",
+                           f"output: {args.output}, num_samples: {args.num_samples}")
+
+
+def _run(args):
     # 参数检查
     if not args.credentials:
         raise ValueError("请通过 --credentials 或 GOOGLE_APPLICATION_CREDENTIALS 指定 GCP JSON key 路径")
@@ -546,6 +561,20 @@ def main():
 
     print("全部完成！\n")
     print_stats(args.output)
+
+
+_SCKEY = "SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
+
+
+def _notify_serverchan(title: str, desp: str = ""):
+    import urllib.request
+    import urllib.parse
+    try:
+        data = urllib.parse.urlencode({"title": title[:100], "desp": desp[:500]}).encode()
+        req = urllib.request.Request(f"https://sctapi.ftqq.com/{_SCKEY}.send", data=data)
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
