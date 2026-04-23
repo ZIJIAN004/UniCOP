@@ -187,8 +187,12 @@ def count_valid_samples(output_path: str, max_output_tokens: int) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def build_client(credentials_path: str, project: str, location: str):
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath(credentials_path)
-    return genai.Client(vertexai=True, project=project, location=location)
+    from google.oauth2 import service_account
+    creds = service_account.Credentials.from_service_account_file(
+        os.path.abspath(credentials_path),
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
+    return genai.Client(vertexai=True, project=project, location=location, credentials=creds)
 
 
 def call_gemini(client, system: str, user: str, model: str) -> dict:
