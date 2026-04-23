@@ -52,7 +52,7 @@ _DEFAULT_UNICOP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 
 
 # ── 默认测试矩阵 ──────────────────────────────────────────────────────────────
 PROBLEM_TYPES = ["tsp", "cvrp", "tsptw", "vrptw"]
-NODE_SIZES    = [5, 10, 20, 50]
+NODE_SIZES    = [20, 50, 100]
 GEMINI_MODEL  = "gemini-2.5-pro"
 
 # ── 后验推理的 system prompt 后缀（追加到各问题原有 system prompt 之后）────────
