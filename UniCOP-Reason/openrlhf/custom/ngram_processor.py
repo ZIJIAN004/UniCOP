@@ -2,22 +2,33 @@
 vLLM V1 NoRepeatNgram LogitsProcessor (OpenRLHF 版)
 
 与父目录 utils/vllm_ngram_processor.py 的区别:
-    - 父目录用 trl 的 AdapterLogitsProcessor (通过 trl vllm-serve --logits-processors 注册)
+    - 父目录用 trl 的 AdapterLogitsProcessor (通过 trl vllm-serve 注册)
     - 本版本直接用 vLLM 原生 v1 LogitsProcessor 接口, 供 OpenRLHF 的 vllm engine
       通过 custom logits processor 入口加载
 
-注册方式 (OpenRLHF + vLLM V1):
-    方案 A: 环境变量 VLLM_LOGITS_PROCESSORS
-        export VLLM_LOGITS_PROCESSORS="openrlhf.custom.ngram_processor:NoRepeatNgramProcessor"
-    方案 B: pyproject.toml entry point (需要把 openrlhf/ 装为 pip package)
+注册方式:
+    OpenRLHF 0.10.2 不透传 vLLM 的 --logits-processors CLI 参数,
+    也不存在 VLLM_LOGITS_PROCESSORS 环境变量。
 
-本项目用方案 A, 见 configs/train_grpo_tsp10_1.5b.sh.
+    可行方案:
+    A. pyproject.toml entry point (需 pip install -e . 注册)
+       [project.entry-points."vllm.logits_processors"]
+       no_repeat_ngram = "openrlhf.custom.ngram_processor:NoRepeatNgramProcessor"
 
-参数:
-    ngram_size: 通过 SamplingParams.extra_args={"no_repeat_ngram_size": 6} 传入
+    B. 修改 OpenRLHF 源码的 vllm_engine.py, 在 create_vllm_engines() 中
+       传入自定义 processor
+
+    当前推荐方案 A。在服务器上执行:
+       cd /Data04/.../UniCOP-Reason/openrlhf && pip install -e .
+
+参数获取:
+    1. 优先从 SamplingParams.extra_args["no_repeat_ngram_size"] 读取
+    2. fallback 到环境变量 NO_REPEAT_NGRAM_SIZE (默认 6)
+    这样即使 OpenRLHF 无法透传 extra_args, 只要设了环境变量就能生效
 """
 
 from __future__ import annotations
+import os
 from typing import Any
 import torch
 
@@ -25,6 +36,8 @@ from vllm.v1.sample.logits_processor import (
     AdapterLogitsProcessor,
     RequestLogitsProcessor,
 )
+
+_DEFAULT_NGRAM_SIZE = int(os.environ.get("NO_REPEAT_NGRAM_SIZE", "6"))
 
 
 class _NoRepeatNgramCallable:
@@ -43,16 +56,12 @@ class _NoRepeatNgramCallable:
         if n <= 1:
             return logits
 
-        # 拼接 prompt + output 作为完整历史
         all_ids = list(prompt_token_ids) + list(output_token_ids)
         if len(all_ids) < n - 1:
             return logits
 
-        # 当前"末尾 n-1 个 token"
         tail = tuple(all_ids[-(n - 1):])
 
-        # 扫描 all_ids 的每个长度 n 子串, 如果其前 n-1 个 = tail,
-        # 则第 n 个就是 "会触发重复的禁用 token"
         banned = set()
         for i in range(len(all_ids) - n + 1):
             if tuple(all_ids[i:i + n - 1]) == tail:
@@ -66,15 +75,9 @@ class _NoRepeatNgramCallable:
 
 
 class NoRepeatNgramProcessor(AdapterLogitsProcessor):
-    """
-    vLLM V1 AdapterLogitsProcessor 子类 (per-request wrapper).
-
-    读取 SamplingParams.extra_args["no_repeat_ngram_size"], 为每 request
-    构造一个 _NoRepeatNgramCallable.
-    """
+    """vLLM V1 AdapterLogitsProcessor 子类。"""
 
     def is_argmax_invariant(self) -> bool:
-        # 禁用 tokens 后可能改变 argmax, 所以不是 argmax-invariant
         return False
 
     def new_req_logits_processor(
@@ -82,7 +85,7 @@ class NoRepeatNgramProcessor(AdapterLogitsProcessor):
         params: Any,
     ) -> RequestLogitsProcessor | None:
         extra = getattr(params, "extra_args", None) or {}
-        n = extra.get("no_repeat_ngram_size", 0)
+        n = extra.get("no_repeat_ngram_size", _DEFAULT_NGRAM_SIZE)
         if n is None or int(n) <= 1:
             return None
         return _NoRepeatNgramCallable(int(n))

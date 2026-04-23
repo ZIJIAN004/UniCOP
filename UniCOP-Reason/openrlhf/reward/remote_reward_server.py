@@ -1,8 +1,20 @@
 """
 OpenRLHF 远程 reward HTTP 服务
 
-OpenRLHF 的 GRPO trainer 通过 --remote_rm_url http://host:port/get_reward 调用本服务,
-传入 prompt + completion 列表, 返回每条 completion 的 scalar reward.
+OpenRLHF 0.10.2 的 GRPO trainer 通过 --reward.remote_url http://host:port/get_reward
+调用本服务, 传入 prompt + completion 列表, 返回每条 completion 的 scalar reward.
+
+OpenRLHF /get_reward 请求格式 (0.10.2):
+    {"query": [prompt+completion 拼接文本],
+     "prompts": [仅 prompt 文本],
+     "labels": [label 字段, 本项目传 instance_id]}
+
+    query  = hf_tokenizer.decode(observation_tokens, skip_special_tokens=False)
+    prompts = 原始 prompt 字符串 (apply_chat_template 后)
+    labels  = --data.label_key 指定字段的原始值
+
+    返回格式:
+    {"rewards": [float], "scores": [float], "extra_logs": {str: [float]}}
 
 复用父目录实现:
     - terminal_reward.compute_terminal_components  (4 维 scalar 分量)
@@ -30,7 +42,6 @@ OpenRLHF 的 GRPO trainer 通过 --remote_rm_url http://host:port/get_reward 调
         --problem_type tsp \
         --problem_size 10 \
         --port 5000
-    # POMO 路径用 argparse default (见 main() 末尾),无需每次传
 """
 
 import argparse
@@ -38,10 +49,9 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, Request
 import uvicorn
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -66,17 +76,6 @@ class State:
 
 
 STATE = State()
-
-
-# ── FastAPI 模型 ────────────────────────────────────────────────────
-
-class RewardRequest(BaseModel):
-    query: List[str]                   # prompt 列表 (带 [[instance_id:xxx]] 标记)
-    response: List[str]                # completion 列表
-
-
-class RewardResponse(BaseModel):
-    rewards: List[float]
 
 
 # ── 初始化 ──────────────────────────────────────────────────────────
@@ -105,7 +104,6 @@ def init_pomo(args):
         pipd_ckpt_dir=args.pipd_ckpt_dir,
         pipd_dir=args.pipd_dir,
     )
-    # 预校验 ckpt 存在性,失败早抛
     STATE.pomo_prm.check_checkpoints(
         problem_types=[args.problem_type],
         problem_sizes=[args.problem_size],
@@ -113,26 +111,46 @@ def init_pomo(args):
     print(f"[init] POMOPRM 加载完成 ({args.problem_type}{args.problem_size})")
 
 
-# ── 核心 reward 计算 ───────────────────────────────────────────────
+# ── completion 提取 ───────────────────────────────────────────────
 
 _INSTANCE_MARKER_RE = re.compile(r"\[\[instance_id:([^\]]+)\]\]")
 
+_ASSISTANT_MARKERS = ["<|Assistant|>", "<|assistant|>", "<｜Assistant｜>"]
 
-def extract_instance_id(prompt: str) -> str | None:
-    """从 prompt 文本里解出 instance_id (prepare_dataset.py 嵌入)."""
-    m = _INSTANCE_MARKER_RE.search(prompt)
+
+def _extract_completion(query: str, prompt: str) -> str:
+    """从 query (prompt+completion 拼接) 中提取 completion 部分。
+
+    OpenRLHF 的 query 是 tokenize → decode 后的全文, prompt 是原始文本,
+    两者可能因 special token 编解码有微小差异, 所以先试精确前缀匹配,
+    再 fallback 到 assistant marker 切分。
+    """
+    if query.startswith(prompt):
+        return query[len(prompt):]
+    for marker in _ASSISTANT_MARKERS:
+        idx = query.rfind(marker)
+        if idx >= 0:
+            tail = query[idx + len(marker):]
+            if tail.startswith("<think>\n"):
+                tail = tail[len("<think>\n"):]
+            return tail
+    return query
+
+
+def _extract_instance_id(text: str) -> str | None:
+    m = _INSTANCE_MARKER_RE.search(text)
     return m.group(1) if m else None
 
 
-def compute_reward(prompt: str, completion: str) -> float:
-    """单条 (prompt, completion) 的聚合 scalar reward。"""
-    instance_id = extract_instance_id(prompt)
-    if instance_id is None or instance_id not in STATE.instances:
+# ── 核心 reward 计算 ───────────────────────────────────────────────
+
+def compute_reward(completion: str, instance_id: str) -> float:
+    """单条 completion 的聚合 scalar reward。"""
+    if instance_id not in STATE.instances:
         return 0.0
 
     instance = STATE.instances[instance_id]
 
-    # Terminal (4 维求和)
     terminal = compute_terminal_components(
         completion, instance, STATE.problem_type,
     )
@@ -141,7 +159,6 @@ def compute_reward(prompt: str, completion: str) -> float:
         + terminal["constraint"] + terminal["format"]
     )
 
-    # PRM (step-level → 聚合 scalar)
     prm_total = 0.0
     if STATE.pomo_prm is not None:
         step_rew = STATE.pomo_prm.compute_step_rewards(
@@ -162,12 +179,46 @@ def compute_reward(prompt: str, completion: str) -> float:
 app = FastAPI()
 
 
-@app.post("/get_reward", response_model=RewardResponse)
-def get_reward(req: RewardRequest) -> RewardResponse:
-    assert len(req.query) == len(req.response), \
-        f"query/response 长度不一致: {len(req.query)} vs {len(req.response)}"
-    rewards = [compute_reward(q, r) for q, r in zip(req.query, req.response)]
-    return RewardResponse(rewards=rewards)
+@app.post("/get_reward")
+async def get_reward(request: Request) -> Dict[str, Any]:
+    """OpenRLHF 0.10.2 远程 reward 接口。
+
+    请求体: {"query": [...], "prompts": [...], "labels": [...]}
+    响应体: {"rewards": [...], "scores": [...], "extra_logs": {...}}
+    """
+    data = await request.json()
+    queries: List[str] = data.get("query", [])
+    prompts: List[str] = data.get("prompts", [])
+    labels: List[str] = data.get("labels", [])
+
+    n = len(queries)
+    assert len(prompts) == n, \
+        f"query/prompts 长度不一致: {n} vs {len(prompts)}"
+
+    rewards: List[float] = []
+    for i in range(n):
+        completion = _extract_completion(queries[i], prompts[i])
+
+        # instance_id: 优先从 labels 拿 (--data.label_key instance_id),
+        # 其次从 prompt 文本 regex 提取
+        instance_id = None
+        if i < len(labels) and labels[i]:
+            instance_id = labels[i]
+        if not instance_id:
+            instance_id = _extract_instance_id(prompts[i])
+
+        if instance_id is None:
+            rewards.append(0.0)
+        else:
+            rewards.append(compute_reward(completion, instance_id))
+
+    return {
+        "rewards": rewards,
+        "scores": [max(0.0, min(1.0, r)) for r in rewards],
+        "extra_logs": {
+            "raw_rewards": rewards,
+        },
+    }
 
 
 @app.get("/health")

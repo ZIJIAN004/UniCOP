@@ -14,8 +14,9 @@
 #   - flash-attn 源码编译: 20-40 分钟 (单架构 sm_86, MAX_JOBS=4)
 #   - 最后一步配 conda activate hook, 以后进 env 自动 export CUDA_HOME
 #
-# 版本选择说明 (2026-04 调研):
-#   OpenRLHF 0.10.2 锁 flash-attn==2.8.3 + vllm==0.19.1
+# 版本选择说明 (2026-04 调研, 社区交叉验证):
+#   OpenRLHF 0.10.2 依赖: vllm>=0.19.0, deepspeed==0.18.9, ray>=2.55.0, transformers>=5.5.0
+#   (v0.9.10 release notes: bump vllm 0.19.0, transformers 5.5.0, deepspeed 0.18.9)
 #   vllm 0.19.1 硬 pin torch==2.10.0 + torchvision==0.25.0 + torchaudio==2.10.0
 #   flash-attn 2.8.3 官方 pre-built wheel 最高只到 torch 2.9,且 torch 2.10
 #     的社区 wheel 只有 cp312,没有 cp310
@@ -109,14 +110,21 @@ else
     echo "      flash-attn 2.8.3 已装"
 fi
 
-# ── Step 5: 强制锁版本装 vllm + openrlhf ──────────────────────────
+# ── Step 5: 强制锁版本装 vllm + openrlhf + 对齐依赖 ────────────────
 # 重要: 不能用 `pip install "openrlhf[vllm]"`, 因为 pip resolver 会被
 # env 里已有的其他包约束拽跑, 选老版本 vllm (如 0.15.1) 匹配老 torch,
 # 结果和我们 pinned 的 torch 2.10 打架.
 # 解决: 按顺序 + 显式版本号, 不给 resolver 自由度.
 # CUDA_HOME 已在 Step 2 export, deepspeed 的 post-install 检查能过.
-echo "[5/6] 装 vllm 0.19.1 + openrlhf 0.10.2 (强制锁版本)..."
+#
+# OpenRLHF 0.10.2 的 requires_dist 依赖:
+#   deepspeed==0.18.9, ray>=2.55.0, transformers>=5.5.0
+# 必须显式装对版本, 否则 OpenRLHF 内部 import 会崩
+echo "[5/6] 装 vllm 0.19.1 + openrlhf 0.10.2 + 对齐依赖 (强制锁版本)..."
 python -m pip install vllm==0.19.1
+python -m pip install deepspeed==0.18.9
+python -m pip install "ray>=2.55.0"
+python -m pip install "transformers>=5.5.0"
 python -m pip install openrlhf==0.10.2
 
 # ── Step 6: 装本目录杂项依赖 (fastapi/uvicorn/pydantic 等) ───────────

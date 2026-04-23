@@ -28,13 +28,13 @@ if not os.environ.get("CUDA_HOME"):
 
 
 REQUIRED_PKGS = [
-    ("torch", None),
-    ("openrlhf", None),
+    ("torch", "2.10.0"),
+    ("openrlhf", "0.10.2"),
     ("vllm", "0.19.0"),
-    ("deepspeed", "0.18.2"),
-    ("ray", "2.48.0"),
+    ("deepspeed", "0.18.9"),
+    ("ray", "2.55.0"),
     ("flash_attn", "2.8.0"),
-    ("transformers", "4.57.0"),
+    ("transformers", "5.5.0"),
     ("peft", None),
     ("bitsandbytes", None),
 ]

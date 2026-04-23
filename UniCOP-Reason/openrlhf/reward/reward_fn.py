@@ -1,20 +1,28 @@
 """
 colocate 模式的本地 reward 函数 (不走 HTTP)
 
-OpenRLHF 也支持 --reward_fn python_module:function 直接本地调用,
+OpenRLHF 0.10.2 支持 --reward.remote_url /path/to/reward_fn.py 直接加载本地函数,
 适合显存富余 / POMO 模型能和训练同机的场景。
+
+函数签名 (OpenRLHF 0.10.2 规范):
+    def reward_func(queries, prompts, labels, **kwargs) -> dict
+        queries: list[str]  完整文本 (prompt + completion 拼接)
+        prompts: list[str]  原始 prompt 文本
+        labels:  list[str]  --data.label_key 指定的字段 (本项目传 instance_id)
+        return: {"rewards": [...], "scores": [...], "extra_logs": {...}}
 
 本地模式省了 HTTP 序列化开销, 但要求 POMOPRM 占训练进程的 GPU.
 8×3090 紧张时用 remote_reward_server.py 更稳.
 
-用法 (如果将来想切到 colocate):
-    --reward_fn openrlhf.reward.reward_fn:batch_reward_fn
+用法:
+    --reward.remote_url /Data04/.../openrlhf/reward/reward_fn.py
 """
 
 import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -32,10 +40,11 @@ _PROBLEM_TYPE: str = os.environ.get("PROBLEM_TYPE", "tsp")
 _PROBLEM_SIZE: int = int(os.environ.get("PROBLEM_SIZE", "10"))
 
 _INSTANCE_MARKER_RE = re.compile(r"\[\[instance_id:([^\]]+)\]\]")
+_ASSISTANT_MARKERS = ["<|Assistant|>", "<|assistant|>", "<｜Assistant｜>"]
 
 
 def _ensure_loaded():
-    """首次调用时加载 instances + POMOPRM (colocate 训练每个 rank 都会调一次)。"""
+    """首次调用时加载 instances + POMOPRM."""
     global _INSTANCES_CACHE, _POMO_PRM
     if _INSTANCES_CACHE is not None:
         return
@@ -61,33 +70,50 @@ def _ensure_loaded():
     )
 
 
-def _extract_instance_id(prompt: str) -> str | None:
-    m = _INSTANCE_MARKER_RE.search(prompt)
+def _extract_completion(query: str, prompt: str) -> str:
+    """从 query (prompt+completion) 中提取 completion。"""
+    if query.startswith(prompt):
+        return query[len(prompt):]
+    for marker in _ASSISTANT_MARKERS:
+        idx = query.rfind(marker)
+        if idx >= 0:
+            tail = query[idx + len(marker):]
+            if tail.startswith("<think>\n"):
+                tail = tail[len("<think>\n"):]
+            return tail
+    return query
+
+
+def _extract_instance_id(text: str) -> str | None:
+    m = _INSTANCE_MARKER_RE.search(text)
     return m.group(1) if m else None
 
 
-def batch_reward_fn(prompts: list[str], responses: list[str]) -> list[float]:
-    """
-    OpenRLHF colocate 模式 reward fn 签名:
-        def f(prompts: list[str], responses: list[str]) -> list[float]
-    """
+def reward_func(queries: list[str], prompts: list[str],
+                labels: list[str], **kwargs: Any) -> dict:
+    """OpenRLHF 0.10.2 colocate 模式 reward function。"""
     _ensure_loaded()
     assert _INSTANCES_CACHE is not None and _POMO_PRM is not None
 
-    rewards = []
-    for prompt, completion in zip(prompts, responses):
-        instance_id = _extract_instance_id(prompt)
+    rewards: list[float] = []
+    for i, (query, prompt) in enumerate(zip(queries, prompts)):
+        completion = _extract_completion(query, prompt)
+
+        instance_id = None
+        if i < len(labels) and labels[i]:
+            instance_id = labels[i]
+        if not instance_id:
+            instance_id = _extract_instance_id(prompt)
+
         if instance_id is None or instance_id not in _INSTANCES_CACHE:
             rewards.append(0.0)
             continue
 
         instance = _INSTANCES_CACHE[instance_id]
 
-        # terminal
         t = compute_terminal_components(completion, instance, _PROBLEM_TYPE)
         terminal_total = t["parse"] + t["coverage"] + t["constraint"] + t["format"]
 
-        # PRM
         step_rew = _POMO_PRM.compute_step_rewards(
             completion=completion,
             instance=instance,
@@ -101,4 +127,8 @@ def batch_reward_fn(prompts: list[str], responses: list[str]) -> list[float]:
 
         rewards.append(1.0 * terminal_total + 1.0 * prm_total)
 
-    return rewards
+    return {
+        "rewards": rewards,
+        "scores": [max(0.0, min(1.0, r)) for r in rewards],
+        "extra_logs": {"raw_rewards": rewards},
+    }

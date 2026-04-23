@@ -1,5 +1,7 @@
 #!/bin/bash
-# OpenRLHF GRPO 训练 · TSP n=20 · DeepSeek-R1-Distill-Qwen-7B · LoRA
+# OpenRLHF 0.10.2 GRPO 训练 · TSP n=20 · DeepSeek-R1-Distill-Qwen-7B · LoRA
+#
+# CLI 格式: 0.10.2 层级式 dot notation
 #
 # 预期资源 (与 auto_all.sh 阶段 4 对齐):
 #   - 1 卡 vLLM rollout
@@ -33,17 +35,17 @@ REWARD_URL="http://localhost:5000/get_reward"
 # ── GPU 调度 (4 卡, 与 auto_all.sh 阶段 4 对齐) ─────────────────────
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 N_GPUS=4
-VLLM_GPUS=1          # 1 卡 rollout
-TRAIN_GPUS=3         # 3 卡训练
+VLLM_GPUS=1
+TRAIN_GPUS=3
 
 # ── 训练超参 (与父目录 config.py 对齐) ───────────────────────────────
-MAX_PROMPT_LEN=768
-MAX_COMPLETION_LEN=4096
-NUM_GENERATIONS=8
+MAX_LEN=4864
+MAX_NEW_TOKENS=4096
+NUM_SAMPLES=8
 LR=5e-6
 KL_COEF=0.01
-CLIP_EPS_LOW=0.20               # DAPO
-CLIP_EPS_HIGH=0.28              # DAPO clip-higher
+CLIP_EPS_LOW=0.20                # DAPO
+CLIP_EPS_HIGH=0.28               # DAPO clip-higher
 
 # LoRA
 LORA_RANK=64
@@ -54,65 +56,70 @@ export CUDA_HOME=/Data04/yangzhihan/envs/analog_env
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
 
-# ── NoRepeatNgram 通过环境变量注册到 vLLM ────────────────────────────
+# ── NoRepeatNgram: 通过环境变量传参 ─────────────────────────────────
+export NO_REPEAT_NGRAM_SIZE=6
 export PYTHONPATH="$WORK_DIR:${PYTHONPATH:-}"
-export VLLM_LOGITS_PROCESSORS="openrlhf.custom.ngram_processor:NoRepeatNgramProcessor"
 
 # ── 启动 Ray 集群 (单节点) ───────────────────────────────────────────
 ray stop || true
 ray start --head --num-gpus=$N_GPUS
 
-# ── OpenRLHF GRPO 训练命令 ──────────────────────────────────────────
+# ── OpenRLHF 0.10.2 GRPO 训练命令 ──────────────────────────────────
 # 7B ZeRO-3 + gradient_checkpointing + offload_optimizer
-# micro_train_batch_size=1 + train_batch_size=24 → grad_accum=8 (3卡×8=24)
+# micro_batch_size=1 + batch_size=24 → grad_accum=8 (3卡×8=24)
 # rollout_batch_size 降到 64 (相比 1.5B 的 128) 避免 vLLM 单卡 OOM
 
 python -m openrlhf.cli.train_ppo_ray \
-    --ref_num_nodes 1 \
-    --ref_num_gpus_per_node $TRAIN_GPUS \
-    --actor_num_nodes 1 \
-    --actor_num_gpus_per_node $TRAIN_GPUS \
-    --vllm_num_engines $VLLM_GPUS \
-    --vllm_tensor_parallel_size 1 \
-    --vllm_gpu_memory_utilization 0.85 \
-    --colocate_all_models \
-    --enable_prefix_caching \
-    --advantage_estimator group_norm \
-    --num_generations $NUM_GENERATIONS \
-    --pretrain "$MODEL_BASE" \
-    --save_path "$OUTPUT_DIR" \
-    --ckpt_path "$OUTPUT_DIR/ckpt" \
-    --max_ckpt_num 3 \
-    --save_steps 50 \
-    --logging_steps 1 \
-    --eval_steps 100 \
-    --micro_train_batch_size 1 \
-    --train_batch_size 24 \
-    --micro_rollout_batch_size 2 \
-    --rollout_batch_size 64 \
-    --max_epochs 1 \
-    --num_episodes 3 \
-    --prompt_max_len $MAX_PROMPT_LEN \
-    --generate_max_len $MAX_COMPLETION_LEN \
-    --actor_learning_rate $LR \
-    --init_kl_coef $KL_COEF \
-    --eps_clip_low $CLIP_EPS_LOW \
-    --eps_clip_high $CLIP_EPS_HIGH \
-    --prompt_data "$DATA_TRAIN" \
-    --input_key messages \
-    --apply_chat_template \
-    --remote_rm_url "$REWARD_URL" \
-    --lora_rank $LORA_RANK \
-    --lora_alpha $LORA_ALPHA \
-    --target_modules q_proj,v_proj,k_proj,o_proj,gate_proj,up_proj,down_proj \
-    --flash_attn \
-    --gradient_checkpointing \
-    --zero_stage 3 \
-    --bf16 \
-    --use_wandb \
-    --wandb_project "UniCOP-Reason-OpenRLHF" \
-    --wandb_run_name "tsp20_7b_grpo_lora_$(date +%Y%m%d_%H%M%S)" \
-    --generation_kwargs '{"extra_args": {"no_repeat_ngram_size": 6}}'
+    --ref.num_nodes 1 \
+    --ref.num_gpus_per_node $TRAIN_GPUS \
+    --actor.num_nodes 1 \
+    --actor.num_gpus_per_node $TRAIN_GPUS \
+    --vllm.num_engines $VLLM_GPUS \
+    --vllm.tensor_parallel_size 1 \
+    --vllm.gpu_memory_utilization 0.85 \
+    --vllm.enable_prefix_caching \
+    --vllm.sync_backend nccl \
+    --train.colocate_all \
+    --algo.advantage.estimator group_norm \
+    --algo.advantage.gamma 1.0 \
+    --algo.kl.init_coef $KL_COEF \
+    --algo.kl.use_loss \
+    --algo.kl.estimator k3 \
+    --actor.eps_clip_low_high $CLIP_EPS_LOW $CLIP_EPS_HIGH \
+    --rollout.n_samples_per_prompt $NUM_SAMPLES \
+    --actor.model_name_or_path "$MODEL_BASE" \
+    --ckpt.output_dir "$OUTPUT_DIR" \
+    --ckpt.path "$OUTPUT_DIR/ckpt" \
+    --ckpt.max_ckpt_num 3 \
+    --ckpt.save_steps 50 \
+    --ckpt.save_hf \
+    --logger.logging_steps 1 \
+    --eval.steps 100 \
+    --train.micro_batch_size 1 \
+    --train.batch_size 24 \
+    --rollout.micro_batch_size 2 \
+    --rollout.batch_size 64 \
+    --train.max_epochs 1 \
+    --train.num_episodes 3 \
+    --data.max_len $MAX_LEN \
+    --rollout.max_new_tokens $MAX_NEW_TOKENS \
+    --actor.adam.lr $LR \
+    --data.prompt_dataset "$DATA_TRAIN" \
+    --data.input_key messages \
+    --data.label_key instance_id \
+    --data.apply_chat_template \
+    --reward.remote_url "$REWARD_URL" \
+    --ds.lora.rank $LORA_RANK \
+    --ds.lora.alpha $LORA_ALPHA \
+    --ds.lora.target_modules q_proj,v_proj,k_proj,o_proj,gate_proj,up_proj,down_proj \
+    --actor.gradient_checkpointing_enable \
+    --ds.attn_implementation flash_attn_2 \
+    --ds.zero_stage 3 \
+    --ds.offload_optimizer \
+    --ds.param_dtype bf16 \
+    --logger.use_wandb \
+    --logger.wandb_project "UniCOP-Reason-OpenRLHF" \
+    --logger.wandb_run_name "tsp20_7b_grpo_lora_$(date +%Y%m%d_%H%M%S)"
 
 # ── 清理 ─────────────────────────────────────────────────────────────
 ray stop
