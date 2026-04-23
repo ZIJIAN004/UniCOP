@@ -290,14 +290,16 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
         with torch.no_grad():
             outputs = model.generate(**inputs, **gen_kwargs)
 
-        input_lens = inputs["attention_mask"].sum(dim=1).tolist()
+        # padding_side="left" → 短 prompt 左侧补 PAD, generate 输出保留完整
+        # padded input 前缀. 必须用 padded 总长度切, 否则 completion 混入
+        # 残留 PAD 和 real input tokens, 导致 token 计数膨胀 / 文本污染.
+        padded_input_len = inputs["input_ids"].shape[1]
 
         for i in range(cur_batch_size):
-            input_len = input_lens[i]
             for s in range(num_samples):
                 idx = i * num_samples + s
                 output_ids = outputs[idx]
-                completion_ids = output_ids[input_len:]
+                completion_ids = output_ids[padded_input_len:]
                 # 修正(2026-04-21): 原做法 mask = (ids != pad_token_id) + 删所有 pad
                 #   在 R1-Distill 默认 pad == eos 情况下会把"真实生成的 EOS"误删,
                 #   导致 num_tokens 少算 1, truncation 判定失准, decode 仍完整。
@@ -633,10 +635,10 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             if parsed:
                 total_parsed += 1
                 if len(parsed_samples) < MAX_COLLECT_PER_CLASS:
-                    parsed_samples.append((i, completion))
+                    parsed_samples.append((i, completion, is_truncated, comp_len))
             else:
                 if len(unparsed_samples) < MAX_COLLECT_PER_CLASS:
-                    unparsed_samples.append((i, completion))
+                    unparsed_samples.append((i, completion, is_truncated, comp_len))
 
             feasible = prob.is_feasible(completion, instance)
             if feasible:
@@ -692,36 +694,38 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     for k in range(n_unparsed_pick):
         examples.append((f"UNPARSED #{k + 1}", unparsed_samples[k]))
 
-    def _focused_preview(comp_text: str, head_max=300, tail_max=1200) -> str:
-        """
-        显示开头 + (</think> 到结尾) 的内容。parse 失败往往因为
-        </think> 之后格式异常,优先完整打印尾部。
-        """
+    FULL_DISPLAY_CHAR_LIMIT = 8000
+
+    def _focused_preview(comp_text: str, truncated: bool) -> str:
+        if not truncated and len(comp_text) <= FULL_DISPLAY_CHAR_LIMIT:
+            return comp_text
+        head_max = 300
+        tail_max = 1500
         think_end_idx = comp_text.rfind("</think>")
         if think_end_idx == -1:
-            # 完全没 </think>,直接取开头和结尾
             if len(comp_text) <= head_max + tail_max:
                 return comp_text
             return comp_text[:head_max] + "\n    ...[middle omitted]...\n" + comp_text[-tail_max:]
-        # 有 </think>: 取开头 + 从 </think> 往后的整段
-        after_think_end = comp_text[think_end_idx:think_end_idx + tail_max]
+        after_think = comp_text[think_end_idx:]
         if think_end_idx <= head_max:
-            return comp_text[:think_end_idx + tail_max]
+            return comp_text[:think_end_idx + len(after_think)]
         return (comp_text[:head_max]
                 + f"\n    ...[think middle omitted, {think_end_idx - head_max} chars]...\n"
-                + after_think_end)
+                + after_think)
 
-    for label, (inst_idx, comp_text) in examples:
-        preview = _focused_preview(comp_text)
-        print(f"\n  >>> 示例 [{label}]  (实例 #{inst_idx}, 原始长度 {len(comp_text)} chars)")
+    for label, (inst_idx, comp_text, trunc, n_tok) in examples:
+        trunc_tag = "TRUNCATED" if trunc else "COMPLETE"
+        preview = _focused_preview(comp_text, trunc)
+        print(f"\n  >>> 示例 [{label}]  (实例 #{inst_idx}, {n_tok} tokens, {trunc_tag})")
         print(f"    {preview}")
 
-    # 将示例也写入结果 JSON
     example_records = []
-    for label, (inst_idx, comp_text) in examples:
+    for label, (inst_idx, comp_text, trunc, n_tok) in examples:
         example_records.append({
             "label": label,
             "instance_idx": inst_idx,
+            "num_tokens": n_tok,
+            "is_truncated": trunc,
             "completion": comp_text,
         })
 
