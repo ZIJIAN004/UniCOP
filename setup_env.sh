@@ -4,7 +4,7 @@
 # 用法: bash setup_env.sh
 # 完成后: conda activate unicop && bash auto_all.sh
 
-set -euo pipefail
+set -eo pipefail
 
 ENV_NAME="unicop"
 
