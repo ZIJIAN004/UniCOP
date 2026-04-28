@@ -24,8 +24,10 @@ merged_model/
 *.pkl
 *.ckpt
 
-# ── 数据集 (大文件) ────────────────────────────────
-data/
+# ── 数据集 (大文件,只排除数据产物,不排除代码) ──────
+**/data/processed/
+**/data/*.json
+!UniCOP-Reason/data/
 *.jsonl
 *.npz
 
