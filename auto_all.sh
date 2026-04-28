@@ -65,14 +65,7 @@ VLLM_DTYPE=bfloat16
 VLLM_PREFIX_CACHE_FLAG="--enable_prefix_caching"
 VLLM_STARTUP_TIMEOUT=300
 VLLM_PID=""
-
-# ── TRL CLI 二进制 ────────────────────────────────────────────────────
-TRL_BIN="$(dirname "$(which python)")/trl"
-if [ ! -x "$TRL_BIN" ]; then
-    echo "❌ TRL binary 未找到: $TRL_BIN"
-    echo "   请在当前 env 安装: pip install 'trl[vllm]==1.1.0'"
-    exit 1
-fi
+VLLM_NGRAM_SIZE=6
 
 # ── 评估参数 ─────────────────────────────────────────────────────────
 EVAL_NUM_TEST=10
@@ -250,12 +243,13 @@ start_vllm_server() {
     local port=$2
     local log_file=$3
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 vLLM server | GPU=$vllm_gpu | port=$port"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 vLLM server | GPU=$vllm_gpu | port=$port | ngram=$VLLM_NGRAM_SIZE"
     PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
     CUDA_VISIBLE_DEVICES="$vllm_gpu" \
     CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
     FLASHINFER_DISABLE_VERSION_CHECK=1 \
-        "$TRL_BIN" vllm-serve \
+        python "$REASON_DIR/utils/vllm_serve_ngram.py" \
+        --no_repeat_ngram_size "$VLLM_NGRAM_SIZE" \
         --model "$SFT_MERGED" \
         --tensor_parallel_size 1 \
         --port "$port" \
