@@ -475,28 +475,14 @@ if ! run_sft_merge; then
     notify "❌ UniCOP SFT merge 失败" "详见 $LOG_DIR/sft_merge_${TIMESTAMP}.log"
     exit 1
 fi
-notify "✓ SFT merge 完成" "开始 eval SFT"
+notify "✓ SFT merge 完成" "开始 GRPO RL"
 
 # ══════════════════════════════════════════════════════════════════════
-# Step 2: eval SFT merged 模型
+# Step 2: GRPO RL 训练 (tsptw + cvrp, n=20)
 # ══════════════════════════════════════════════════════════════════════
 echo ""
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [Step 2] evaluate SFT merged ═══"
-CURRENT_STAGE="Step2-eval-SFT"
-wait_for_gpus $EVAL_GPUS
-if ! run_eval "$SFT_MERGED" "$FREE_GPUS" "$EVAL_INIT_BATCH_SIZE" \
-    "$EVAL_PROBLEMS" "$EVAL_SIZES" "sft"; then
-    notify "❌ SFT evaluate 失败" "详见 $LOG_DIR/eval_sft_${TIMESTAMP}.log"
-    exit 1
-fi
-notify "✓ SFT eval 完成" "开始 GRPO tsp n=20"
-
-# ══════════════════════════════════════════════════════════════════════
-# Step 3: GRPO RL 训练 (tsptw + cvrp, n=20)
-# ══════════════════════════════════════════════════════════════════════
-echo ""
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [Step 3] GRPO RL ($GRPO_TOTAL 个任务) ═══"
-CURRENT_STAGE="Step3-GRPO"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [Step 2] GRPO RL ($GRPO_TOTAL 个任务) ═══"
+CURRENT_STAGE="Step2-GRPO"
 
 run_grpo_with_retry() {
     local problem=$1
@@ -528,14 +514,25 @@ for problem in "${GRPO_PROBLEMS[@]}"; do
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ── GRPO [${GRPO_IDX}/${GRPO_TOTAL}] $problem n=20 ──"
     run_grpo_with_retry "$problem" 20 "$GRPO_IDX"
 done
-notify "✓ GRPO 全部完成" "开始 RL eval"
+notify "✓ GRPO 全部完成" "开始评估"
 
 # ══════════════════════════════════════════════════════════════════════
-# Step 4: eval RL 模型
+# Step 3: eval SFT + RL 模型
 # ══════════════════════════════════════════════════════════════════════
 echo ""
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [Step 4] evaluate RL 模型 ═══"
-CURRENT_STAGE="Step4-eval-RL"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [Step 3] evaluate SFT merged ═══"
+CURRENT_STAGE="Step3-eval-SFT"
+wait_for_gpus $EVAL_GPUS
+if ! run_eval "$SFT_MERGED" "$FREE_GPUS" "$EVAL_INIT_BATCH_SIZE" \
+    "$EVAL_PROBLEMS" "$EVAL_SIZES" "sft"; then
+    notify "❌ SFT evaluate 失败" "详见 $LOG_DIR/eval_sft_${TIMESTAMP}.log"
+    exit 1
+fi
+notify "✓ SFT eval 完成" "开始 RL eval"
+
+echo ""
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [Step 3b] evaluate RL 模型 ═══"
+CURRENT_STAGE="Step3-eval-RL"
 
 for problem in "${GRPO_PROBLEMS[@]}"; do
     RL_MODEL="$GRPO_OUTPUT_DIR/${problem}_n20/final_model"
