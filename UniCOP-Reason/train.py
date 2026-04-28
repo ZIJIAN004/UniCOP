@@ -346,7 +346,6 @@ def main():
         num_train_epochs=config.num_train_epochs,
         warmup_ratio=config.warmup_ratio,
         beta=config.kl_coef,
-        loss_type="grpo",
         mask_truncated_completions=True,
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
