@@ -219,6 +219,11 @@ run_sft_merge() {
         return 1
     fi
 
+    if [ -f "$SFT_MERGED/config.json" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ SFT merged 已存在,跳过 merge"
+        return 0
+    fi
+
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 阶段 2: 合并 SFT LoRA → $SFT_MERGED"
     CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
     python "$TOOLS_DIR/merge_lora.py" \
