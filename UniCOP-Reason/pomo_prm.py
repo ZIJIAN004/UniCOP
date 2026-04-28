@@ -107,7 +107,7 @@ class POMOPRM:
     SUPPORTED = {"tsp", "cvrp", "vrptw", "tsptw"}
 
     # TSPTW 不走 POMO 接口,这里单独维护 PIP-D ckpt 路径约定
-    PIPD_CKPT_SUBDIR_FMT   = "tsptw{n_total}_easy"    # n_total = 客户数 + 1
+    PIPD_CKPT_SUBDIR_FMT   = "tsptw{n}_easy"
     PIPD_CKPT_MODEL_SUBDIR = "POMO_star_PIP-D"
     PIPD_CKPT_FILENAME     = "epoch-10000.pt"
 
@@ -150,17 +150,14 @@ class POMOPRM:
         - TSP/CVRP/VRPTW: POMO-Baseline 格式
             {pomo_ckpt_dir}/{timestamp}__POMO_{TYPE_UPPER}_n{N}/MODEL_FINAL.pt
         - TSPTW: PIP-D (NeurIPS 2024) 格式
-            {pipd_ckpt_dir}/tsptw{N+1}_easy/POMO_star_PIP-D/epoch-10000.pt
-            注: PIP-D 的 tsptw50 = 50 总节点 (49 customers),
-                所以 UniCOP n 客户对应 PIP-D 的 tsptw{n+1}
+            {pipd_ckpt_dir}/tsptw{N}_easy/POMO_star_PIP-D/epoch-10000.pt
         """
         if problem_type == "tsptw":
             if not self.pipd_ckpt_dir:
                 return f"<PIPD_CKPT_DIR 未设置: TSPTW n={problem_size}>"
-            n_total = problem_size + 1
             return os.path.join(
                 self.pipd_ckpt_dir,
-                self.PIPD_CKPT_SUBDIR_FMT.format(n_total=n_total),
+                self.PIPD_CKPT_SUBDIR_FMT.format(n=problem_size),
                 self.PIPD_CKPT_MODEL_SUBDIR,
                 self.PIPD_CKPT_FILENAME,
             )
