@@ -339,7 +339,6 @@ def main():
     grpo_config = GRPOConfig(
         output_dir=config.output_dir,
         num_generations=config.num_generations,
-        max_prompt_length=config.max_prompt_length,        # GRPO 独立控制 prompt 上限
         max_completion_length=config.max_completion_length,
         per_device_train_batch_size=config.per_device_train_batch_size,
         gradient_accumulation_steps=config.gradient_accumulation_steps,
