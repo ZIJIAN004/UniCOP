@@ -36,8 +36,8 @@ OpenRLHF /get_reward 请求格式 (0.10.2):
 # ------------------------------------------------------------
 
 用法 (在服务器上):
-    conda activate /Data04/yangzhihan/envs/openrlhf_env
-    cd /Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf
+    conda activate /home/ntu/anaconda3/envs/zjh
+    cd /home/ntu/lzj/UniCOP/UniCOP-Reason/openrlhf
     python reward/remote_reward_server.py \
         --problem_type tsp \
         --problem_size 10 \
@@ -240,9 +240,9 @@ def main():
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--pomo_ckpt_dir", type=str,
-                        default="/Data04/yangzhihan/lzj/POMO-Baseline/result")
+                        default="/home/ntu/lzj/POMO-Baseline/result")
     parser.add_argument("--pomo_baseline_dir", type=str,
-                        default="/Data04/yangzhihan/lzj/POMO-Baseline")
+                        default="/home/ntu/lzj/POMO-Baseline")
     parser.add_argument("--pipd_ckpt_dir", type=str, default=None,
                         help="TSPTW 用 PIP-D ckpt 根目录 (仅 TSPTW 需要)")
     parser.add_argument("--pipd_dir", type=str, default=None,

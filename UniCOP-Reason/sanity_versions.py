@@ -20,7 +20,7 @@ if not os.environ.get("CUDA_HOME"):
     print("!" * 60)
     print("注意：环境变量 CUDA_HOME 未设置，DeepSpeed 将无法 import。")
     print("auto_train.sh 里已经 hardcode 设了，但直接跑本脚本需要你自己 export：")
-    print("  export CUDA_HOME=/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux")
+    print("  export CUDA_HOME=/usr/local/cuda")
     print("（请先验证路径有效：ls $CUDA_HOME/bin/nvcc）")
     print("!" * 60)
     print()

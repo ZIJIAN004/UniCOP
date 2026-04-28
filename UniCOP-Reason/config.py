@@ -11,10 +11,7 @@ class Config:
     problem_size: int  = 10      # 客户节点数（不含 depot）
 
     # ── 模型 ─────────────────────────────────────────────────────────
-    # 本地路径示例（modelscope 下载后的实际路径，. 被替换为 ___）：
-    # "F:/HuaweiMoveData/Users/Carl/Desktop/代码/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1___5B"
-    # "F:/HuaweiMoveData/Users/Carl/Desktop/代码/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-    model_name: str   = "F:/HuaweiMoveData/Users/Carl/Desktop/代码/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1___5B"
+    model_name: str   = "/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
     use_lora: bool    = True
     lora_rank: int    = 64
     lora_alpha: int   = 128

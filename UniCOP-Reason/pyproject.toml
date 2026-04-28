@@ -22,7 +22,7 @@ requires-python = ">=3.10"
 #   - 完全不依赖 TRL 或 vLLM 的 CLI 参数透传。
 #
 # 使用步骤 (只要装一次):
-#   cd /Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason
+#   cd /home/ntu/lzj/UniCOP/UniCOP-Reason
 #   pip install -e .
 #
 # 验证注册成功:

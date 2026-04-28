@@ -3,7 +3,7 @@ OpenRLHF 环境验证脚本
 
 用途: 装完 openrlhf[vllm] 后,一次性检查所有核心包版本 + 兼容性
 用法:
-    conda activate /Data04/yangzhihan/envs/openrlhf_env
+    conda activate /home/ntu/anaconda3/envs/zjh
     python verify_env.py
 """
 
@@ -14,7 +14,6 @@ import importlib
 
 # ── 自动设置 CUDA_HOME (openrlhf_env 本身没装 nvcc,借 analog_env 的) ──
 _CUDA_HOME_CANDIDATES = [
-    "/Data04/yangzhihan/envs/analog_env",
     "/usr/local/cuda",
 ]
 if not os.environ.get("CUDA_HOME"):

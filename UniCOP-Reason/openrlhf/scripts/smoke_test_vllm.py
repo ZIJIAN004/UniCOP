@@ -2,10 +2,10 @@
 vLLM 烟雾测试 - 确认 vLLM + GPU + 小模型能打通
 
 用法:
-    conda activate /Data04/yangzhihan/envs/openrlhf_env
+    conda activate /home/ntu/anaconda3/envs/zjh
 
     # 方式 A: 用服务器上已有的 SFT ckpt
-    python smoke_test_vllm.py --model /Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_auto_20260423_024302/merged_model
+    python smoke_test_vllm.py --model /home/ntu/lzj/UniCOP/UniCOP-Distill/output/merged_model
 
     # 方式 B: 用 HF hub 自动下载小模型 (需要联网,约 1GB)
     python smoke_test_vllm.py --model Qwen/Qwen2.5-0.5B

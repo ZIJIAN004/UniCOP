@@ -7,7 +7,7 @@
   - 评估截断率，判断当前设置是否合理
 
 运行示例：
-  python test_output_length.py --model /Data04/yangzhihan/lzj/UniCOP-Reason/model/Qwen3-4B
+  python test_output_length.py --model /home/ntu/lzj/UniCOP/UniCOP-Reason/model/Qwen3-4B
   python test_output_length.py --model /path/to/model --max_length 2048 --num_samples 10 --no_thinking
 """
 
@@ -110,7 +110,7 @@ def print_table(results, node_sizes, problem_types):
 def main():
     parser = argparse.ArgumentParser(description="系统测试模型输出长度分布")
     parser.add_argument("--model",       type=str,  required=True,
-                        help="模型路径，如 /Data04/.../Qwen3-4B")
+                        help="模型路径")
     parser.add_argument("--max_length",  type=int,  default=4096,
                         help="生成最大 token 数（截断上限，默认 4096）")
     parser.add_argument("--num_samples", type=int,  default=5,

@@ -19,20 +19,17 @@ FAIL=0
 WARN=0
 
 # 复用 auto_train.sh 的路径 (如果你改了路径,先改 auto_train.sh 再跑这个)
-WORK_DIR="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason"
-# 测试阶段: MODEL_BASE 直接指 bak (见 auto_train.sh 同处注释)。
-# 注意: auto_train.sh 用的是 merged_model (LoRA 合并版本,vLLM 加载),
-#       preflight 用的是 final_model (LoRA adapter 版本,供 sanity check)。
-MODEL_BASE=$(ls -d /Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/final_model 2>/dev/null | sort -r | head -1)
+WORK_DIR="/home/ntu/lzj/UniCOP/UniCOP-Reason"
+MODEL_BASE=$(ls -d /home/ntu/lzj/UniCOP/UniCOP-Distill/output/*/final_model 2>/dev/null | sort -r | head -1)
 if [ -z "$MODEL_BASE" ]; then
-    MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP-Distill.bak_NOT_FOUND/output_sft_r1_v2/final_model"
+    MODEL_BASE="/home/ntu/lzj/UniCOP/UniCOP-Distill/output/NOT_FOUND/final_model"
 fi
 echo "[MODEL_BASE] $MODEL_BASE"
-POMO_CKPT_DIR="/Data04/yangzhihan/lzj/POMO-Baseline/result"
-POMO_BASELINE_DIR="/Data04/yangzhihan/lzj/POMO-Baseline"
-PIPD_CKPT_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
-PIPD_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP"
-CUDA_HOME_PATH="/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux"
+POMO_CKPT_DIR="/home/ntu/lzj/POMO-Baseline/result"
+POMO_BASELINE_DIR="/home/ntu/lzj/POMO-Baseline"
+PIPD_CKPT_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
+PIPD_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP"
+CUDA_HOME_PATH="/usr/local/cuda"
 
 # 当前训练矩阵: 自动从 auto_train.sh 读取,避免两边手动对齐
 AUTO_TRAIN_SH="$(dirname "$0")/auto_train.sh"
@@ -75,7 +72,7 @@ check_file_warn() {
 }
 
 # MODEL_BASE 这种训练产物在 .gitignore 里被排除,git clone 后不存在是预期的。
-# 自动尝试从 /Data04/.../UniCOP-Distill.bak_*/output_sft_r1_v2 建立软链,
+# 自动尝试从 UniCOP-Distill/output/*/final_model 建立软链,
 # 让路径在 monorepo 里一致,不需要手动 ln -s。
 check_sft_product_with_bak() {
     local target="$1"   # 例: .../UniCOP/UniCOP-Distill/output_sft_r1_v2/final_model

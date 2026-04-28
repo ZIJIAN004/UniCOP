@@ -1,12 +1,12 @@
 #!/bin/bash
 # OpenRLHF 环境一键安装脚本
 # 用法:
-#   cd /Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf
+#   cd /home/ntu/lzj/UniCOP/UniCOP-Reason/openrlhf
 #   bash install.sh
 #
 # 前置条件:
 #   - 服务器已有 conda
-#   - /Data04/yangzhihan/envs/analog_env 里已有 nvcc (flash-attn 源码编译需要)
+#   - /usr/local/cuda 里已有 nvcc (flash-attn 源码编译需要)
 #   - 有外网访问权限
 #
 # 总耗时: 约 40-60 分钟
@@ -30,8 +30,8 @@
 
 set -euo pipefail
 
-ENV_PATH=/Data04/yangzhihan/envs/openrlhf_env
-CUDA_HOME_SRC=/Data04/yangzhihan/envs/analog_env
+ENV_PATH=/home/ntu/anaconda3/envs/zjh
+CUDA_HOME_SRC=/usr/local/cuda
 # 注意: 必须用 env 根目录, 不是 targets/x86_64-linux
 #   targets/x86_64-linux 路径对运行时 (libcudart) 够用,
 #   但对编译时的 nvcc 不够: nvcc 编译时要调 $CUDA_HOME/bin/cudafe++,

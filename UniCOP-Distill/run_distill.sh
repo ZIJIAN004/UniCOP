@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-WORK_DIR="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill"
-CREDENTIALS="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/advance-subject-493905-h9-020e2dc30ae7.json"
+WORK_DIR="/home/ntu/lzj/UniCOP/UniCOP-Distill"
+CREDENTIALS="/home/ntu/lzj/UniCOP/UniCOP-Distill/advance-subject-493905-h9-020e2dc30ae7.json"
 PROJECT="advance-subject-493905-h9"
-LKH_BIN="/Data04/yangzhihan/lzj/LKH-3.0.9/LKH"
+LKH_BIN="/home/ntu/LKH/LKH"
 SEED=2027
 RAW_OUTPUT="data/chains_v4.jsonl"
 CLEAN_OUTPUT="data/chains_v4_clean.jsonl"

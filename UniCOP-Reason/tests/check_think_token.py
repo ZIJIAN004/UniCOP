@@ -4,7 +4,7 @@ import sys
 from transformers import AutoTokenizer
 
 MODEL_PATH = sys.argv[1] if len(sys.argv) > 1 else \
-    "/Data04/yangzhihan/lzj/UniCOP-Reason/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+    "/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
 
 tok = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 

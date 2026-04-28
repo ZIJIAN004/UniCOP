@@ -6,16 +6,16 @@
 #   - 2 张卡空闲且仅剩 1.5B 任务：两张卡各跑一个 1.5B 任务（并行）
 #   - 大模型优先级：4B > 7B
 
-EVAL_DIR="/home/ntu/lzj/UniCOP-Reason"
+EVAL_DIR="/home/ntu/lzj/UniCOP/UniCOP-Reason"
 LOG_DIR="$EVAL_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 TOTAL_GPUS=4
 
 # 模型列表
-MODEL_1_5B="/home/ntu/lzj/UniCOP-Reason/model/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_4B="/home/ntu/lzj/UniCOP-Reason/model/Qwen3-4B-Thinking-2507"
-MODEL_7B="/home/ntu/lzj/UniCOP-Reason/model/DeepSeek-R1-Distill-Qwen-7B"
+MODEL_1_5B="/home/ntu/lzj/UniCOP/UniCOP-Reason/model/DeepSeek-R1-Distill-Qwen-1.5B"
+MODEL_4B="/home/ntu/lzj/UniCOP/UniCOP-Reason/model/Qwen3-4B-Thinking-2507"
+MODEL_7B="/home/ntu/lzj/UniCOP/UniCOP-Reason/model/DeepSeek-R1-Distill-Qwen-7B"
 
 # 全局日志
 exec > >(tee -a "$LOG_DIR/auto_eval_base_$(date '+%Y%m%d_%H%M%S').log") 2>&1

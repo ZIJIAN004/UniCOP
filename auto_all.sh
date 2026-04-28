@@ -1,8 +1,7 @@
 #!/bin/bash
-# auto_all.sh — 全局自动化: 数据生成 → SFT → merge → evaluate
+# auto_all.sh — 全局自动化: SFT → merge → evaluate
 #
 # 流程:
-#   阶段 0: generate_chains.py 数据生成 (concurrency=8)
 #   阶段 1: SFT 训练 (4 卡, ZeRO-3 + LoRA + gc)
 #   阶段 2: 合并 LoRA → merged_model
 #   阶段 3: evaluate (4 卡, TSP/CVRP/VRPTW/TSPTW × 20/50/100)
@@ -16,21 +15,16 @@ set -uo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # 路径配置
 # ══════════════════════════════════════════════════════════════════════
-MONO_DIR="/Data04/yangzhihan/lzj/UniCOP"
+MONO_DIR="/home/ntu/lzj/UniCOP"
 DISTILL_DIR="$MONO_DIR/UniCOP-Distill"
 REASON_DIR="$MONO_DIR/UniCOP-Reason"
 TOOLS_DIR="$MONO_DIR/tools"
 
-BASE_MODEL="/Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+BASE_MODEL="/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
 SFT_DATA="$DISTILL_DIR/data/chains_v3_clean.jsonl"
 
-# 数据生成参数
-GEN_CREDENTIALS="$DISTILL_DIR/advance-subject-493905-h9-020e2dc30ae7.json"
-GEN_PROJECT="advance-subject-493905-h9"
-LKH_BIN="/Data04/yangzhihan/lzj/LKH-3.0.9/LKH"
-
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-SFT_OUT="$DISTILL_DIR/output_sft_auto_${TIMESTAMP}"
+SFT_OUT="$DISTILL_DIR/output/sft_auto_${TIMESTAMP}"
 SFT_MERGED="$SFT_OUT/merged_model"
 
 LOG_DIR="$MONO_DIR/logs_auto_all"
@@ -125,41 +119,6 @@ wait_for_gpus() {
 }
 
 # ══════════════════════════════════════════════════════════════════════
-# 阶段 0: 数据生成 (generate_chains.py)
-# ══════════════════════════════════════════════════════════════════════
-run_generate() {
-    local log_file="$LOG_DIR/generate_${TIMESTAMP}.log"
-
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 阶段 0: 数据生成"
-    echo "  credentials: $GEN_CREDENTIALS"
-    echo "  project:     $GEN_PROJECT"
-    echo "  output:      $SFT_DATA"
-    echo "  concurrency: 8"
-    echo "  log:         $log_file"
-
-    cd "$DISTILL_DIR" || return 1
-    python -u generate_chains.py \
-        --credentials "$GEN_CREDENTIALS" \
-        --project "$GEN_PROJECT" \
-        --lkh_bin "$LKH_BIN" \
-        --output "$SFT_DATA" \
-        --num_samples 200 \
-        --concurrency 8 \
-        --sleep 2 \
-        --max_output_tokens 4096 \
-        2>&1 | tee "$log_file"
-
-    local ec=${PIPESTATUS[0]}
-    if [ $ec -ne 0 ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ 数据生成失败 (exit=$ec)"
-        return 1
-    fi
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ 数据生成完成"
-    cd "$MONO_DIR" || return 1
-    return 0
-}
-
-# ══════════════════════════════════════════════════════════════════════
 # 阶段 1: SFT 训练 (4 卡, ZeRO-3 + LoRA + gc)
 # ══════════════════════════════════════════════════════════════════════
 run_sft() {
@@ -176,7 +135,7 @@ run_sft() {
 
     PYTHONPATH="$DISTILL_DIR:${PYTHONPATH:-}" \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
-    CUDA_HOME=/Data04/yangzhihan/envs/analog_env \
+    CUDA_HOME=/usr/local/cuda \
     CUDA_VISIBLE_DEVICES="$gpus" \
         python -m accelerate.commands.launch --num_processes "$num_proc" \
         "$DISTILL_DIR/train_sft.py" \
@@ -186,6 +145,7 @@ run_sft() {
         --epochs 3 --lr 1e-4 \
         --batch_size 1 --grad_accum 8 \
         --max_length 8192 \
+        --max_output_length 4096 \
         --val_ratio 0 \
         --zero_stage 3 --gradient_checkpointing \
         --output_dir "$SFT_OUT" \
@@ -289,9 +249,8 @@ run_eval() {
 preflight() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ========== 前置检查 =========="
     local fail=0
-    for p in "$BASE_MODEL" "$DISTILL_DIR/train_sft.py" "$DISTILL_DIR/generate_chains.py" \
-             "$REASON_DIR/evaluate.py" "$TOOLS_DIR/merge_lora.py" \
-             "$GEN_CREDENTIALS" "$LKH_BIN"; do
+    for p in "$BASE_MODEL" "$SFT_DATA" "$DISTILL_DIR/train_sft.py" \
+             "$REASON_DIR/evaluate.py" "$TOOLS_DIR/merge_lora.py"; do
         if [ ! -e "$p" ]; then
             echo "  ✗ 路径不存在: $p"
             fail=1
@@ -321,20 +280,10 @@ echo "  Logs:       $LOG_DIR"
 echo ""
 
 notify "🚀 UniCOP auto_all 启动" \
-"流程: 数据生成 → SFT → merge → evaluate
+"流程: SFT → merge → evaluate
 启动: $(date '+%Y-%m-%d %H:%M:%S')
 SFT data: $SFT_DATA
 SFT out: $SFT_OUT"
-
-# ── 阶段 0: 数据生成 ─────────────────────────────────────────────────
-echo ""
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] ═══ [0/3] 数据生成 ═══"
-CURRENT_STAGE="阶段0-数据生成"
-if ! run_generate; then
-    notify "❌ UniCOP 数据生成失败" "详见 $LOG_DIR/generate_${TIMESTAMP}.log"
-    exit 1
-fi
-notify "✓ 数据生成完成" "开始等待 GPU 进入 SFT"
 
 # ── 阶段 1: SFT 训练 ─────────────────────────────────────────────────
 echo ""

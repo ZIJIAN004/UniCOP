@@ -1,9 +1,9 @@
 """统计各 problem × size 的 prompt token 数 (含 chat_template 渲染后)。
 
 用法 (远程):
-    cd /Data04/yangzhihan/lzj/UniCOP
+    cd /home/ntu/lzj/UniCOP
     python tools/count_prompt_tokens.py \
-        --model /Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+        --model /home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B
 
 输出: 表格, 每格是 5 次采样的中位数。重点看 "chat" 列 (vLLM 实际拿到的 prompt 长度)。
 """
@@ -19,7 +19,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, help="base model 路径 (含 tokenizer)")
     parser.add_argument("--reason_dir",
-                        default="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason",
+                        default="/home/ntu/lzj/UniCOP/UniCOP-Reason",
                         help="UniCOP-Reason 目录 (有 problems/ 子模块)")
     parser.add_argument("--samples", type=int, default=5,
                         help="每个 (problem, size) 的采样次数,取中位数")

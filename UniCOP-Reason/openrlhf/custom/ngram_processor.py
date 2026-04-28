@@ -19,7 +19,7 @@ vLLM V1 NoRepeatNgram LogitsProcessor (OpenRLHF 版)
        传入自定义 processor
 
     当前推荐方案 A。在服务器上执行:
-       cd /Data04/.../UniCOP-Reason/openrlhf && pip install -e .
+       cd /home/ntu/lzj/UniCOP/UniCOP-Reason/openrlhf && pip install -e .
 
 参数获取:
     1. 优先从 SamplingParams.extra_args["no_repeat_ngram_size"] 读取

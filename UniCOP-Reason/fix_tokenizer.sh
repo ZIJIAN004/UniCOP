@@ -11,7 +11,7 @@
 
 set -e
 
-MERGED="/Data04/yangzhihan/lzj/UniCOP-Distill/output_sft_r1_v2/merged_model"
+MERGED="/home/ntu/lzj/UniCOP/UniCOP-Distill/output/merged_model"
 CFG="$MERGED/tokenizer_config.json"
 BAK="$MERGED/tokenizer_config.json.bak"
 

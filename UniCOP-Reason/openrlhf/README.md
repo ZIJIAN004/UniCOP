@@ -6,14 +6,14 @@
 
 本子目录在**不动父目录任何代码**的前提下，平行实现一套 **OpenRLHF** 版本的 GRPO 训练流程。两者共享：
 
-- SFT 初始权重（`/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_auto_20260423_024302/merged_model`）
+- SFT 初始权重（`/home/ntu/lzj/UniCOP/UniCOP-Distill/output/merged_model`）
 - 数据集定义（父目录 `problems/`）
 - POMO PRM 和 terminal reward 算法（父目录 `pomo_prm.py` / `terminal_reward.py`）
 
 但**完全隔离**：
 
-- 服务器根路径: `/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf/`
-- Python 环境：`/Data04/yangzhihan/envs/openrlhf_env`（独立 conda env）
+- 服务器根路径: `/home/ntu/lzj/UniCOP/UniCOP-Reason/openrlhf/`
+- Python 环境：`/home/ntu/anaconda3/envs/zjh`
 - 输出 ckpt：`openrlhf/output/`（不写父目录 `output/`）
 - 训练脚本、reward wrapper、logits processor：全部新写
 
@@ -127,14 +127,14 @@ openrlhf/
 #    本地 commit + push → 服务器 git pull
 
 # 1. 装环境（只做一次）
-cd /Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf
+cd /home/ntu/lzj/UniCOP/UniCOP-Reason/openrlhf
 bash install.sh
 
 # 2. 自检
-conda activate /Data04/yangzhihan/envs/openrlhf_env
+conda activate /home/ntu/anaconda3/envs/zjh
 python scripts/verify_env.py
 python scripts/smoke_test_vllm.py \
-  --model "/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_auto_20260423_024302/merged_model"
+  --model "/home/ntu/lzj/UniCOP/UniCOP-Distill/output/merged_model"
 
 # 3. 准备数据（只做一次，产物写到 data/processed/）
 python data/prepare_dataset.py --problem_type tsp --problem_size 10 --num_train 20000

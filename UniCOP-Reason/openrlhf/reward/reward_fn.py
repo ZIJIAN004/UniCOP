@@ -15,7 +15,7 @@ OpenRLHF 0.10.2 支持 --reward.remote_url /path/to/reward_fn.py 直接加载本
 8×3090 紧张时用 remote_reward_server.py 更稳.
 
 用法:
-    --reward.remote_url /Data04/.../openrlhf/reward/reward_fn.py
+    --reward.remote_url /home/ntu/lzj/UniCOP/UniCOP-Reason/openrlhf/reward/reward_fn.py
 """
 
 import os
@@ -61,9 +61,9 @@ def _ensure_loaded():
 
     _POMO_PRM = POMOPRM(
         pomo_ckpt_dir=os.environ.get(
-            "POMO_CKPT_DIR", "/Data04/yangzhihan/lzj/POMO-Baseline/result"),
+            "POMO_CKPT_DIR", "/home/ntu/lzj/POMO-Baseline/result"),
         pomo_baseline_dir=os.environ.get(
-            "POMO_BASELINE_DIR", "/Data04/yangzhihan/lzj/POMO-Baseline"),
+            "POMO_BASELINE_DIR", "/home/ntu/lzj/POMO-Baseline"),
         device="cuda",
         pipd_ckpt_dir=os.environ.get("PIPD_CKPT_DIR"),
         pipd_dir=os.environ.get("PIPD_DIR"),

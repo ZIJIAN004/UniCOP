@@ -10,8 +10,8 @@
 # 用法:
 #   # 终端 1: 起 reward server
 #   python reward/remote_reward_server.py --problem_type tsp --problem_size 20 --port 5000 \
-#       --pomo_ckpt_dir /Data04/yangzhihan/lzj/POMO-Baseline/result \
-#       --pomo_baseline_dir /Data04/yangzhihan/lzj/POMO-Baseline
+#       --pomo_ckpt_dir /home/ntu/lzj/POMO-Baseline/result \
+#       --pomo_baseline_dir /home/ntu/lzj/POMO-Baseline
 #
 #   # 终端 2: 跑训练
 #   bash configs/train_grpo_tsp20_7b.sh
@@ -19,8 +19,8 @@
 set -euo pipefail
 
 # ── 路径 ─────────────────────────────────────────────────────────────
-WORK_DIR="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason/openrlhf"
-MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_auto_20260423_024302/merged_model"
+WORK_DIR="/home/ntu/lzj/UniCOP/UniCOP-Reason/openrlhf"
+MODEL_BASE="/home/ntu/lzj/UniCOP/UniCOP-Distill/output/merged_model"
 if [ ! -d "$MODEL_BASE" ]; then
     echo "❌ SFT merged model 不存在: $MODEL_BASE"
     exit 1
@@ -52,7 +52,7 @@ LORA_RANK=64
 LORA_ALPHA=128
 
 # ── CUDA_HOME (DeepSpeed 编译/检查需要) ──────────────────────────────
-export CUDA_HOME=/Data04/yangzhihan/envs/analog_env
+export CUDA_HOME=/usr/local/cuda
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
 

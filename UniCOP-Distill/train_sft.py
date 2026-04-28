@@ -31,8 +31,8 @@ from peft import LoraConfig
 
 # ── 默认参数 ────────────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "F:/HuaweiMoveData/Users/Carl/Desktop/代码/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1___5B"
-DEFAULT_DATA  = "data/chains.jsonl"
+DEFAULT_MODEL = "/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
+DEFAULT_DATA  = "data/chains_v3_clean.jsonl"
 
 # generate_chains.py 中追加到 system prompt 的后验推理后缀（用于定位和剥离）
 _POSTHOC_SYSTEM_MARKER = "\n\nYour output MUST start with <think>"
@@ -119,7 +119,8 @@ def strip_posthoc_user(user: str) -> str:
     return user
 
 
-def load_sft_dataset(data_path: str, tokenizer, max_length: int) -> Dataset:
+def load_sft_dataset(data_path: str, tokenizer, max_length: int,
+                     max_output_length: int = 4096) -> Dataset:
     """
     从 chains.jsonl 加载数据，构建 SFT 训练集。
 
@@ -146,6 +147,7 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int) -> Dataset:
     """
     records = []
     skipped = 0
+    skipped_too_long = 0
 
     # ── 探针: 首次渲染时验证 chat_template 是否如预期在末尾加 <think>\n ──
     # (如果 R1 换代导致 chat_template 行为变化, 早期告警避免静默退化)
@@ -202,11 +204,12 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int) -> Dataset:
             #    (eos_token 显式加, 让模型学会"完整答案结束就停止")
             completion_text = output_stripped + tokenizer.eos_token
 
-            # 用 prompt-completion 格式替代 language modeling 格式。
-            # TRL SFTTrainer 检测到 "prompt" + "completion" 两列时,默认
-            # completion_only_loss=True, 只在 completion tokens 上做 loss,
-            # prompt tokens 的 label 被 mask 成 -100。
-            # 这避免了"让模型在 prompt 上浪费梯度"的严重问题。
+            # output token 超长过滤
+            completion_token_len = len(tokenizer.encode(completion_text))
+            if completion_token_len > max_output_length:
+                skipped_too_long += 1
+                continue
+
             records.append({
                 "prompt":     prompt_text,
                 "completion": completion_text,
@@ -227,6 +230,8 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int) -> Dataset:
 
     if skipped:
         print(f"  跳过 {skipped} 条无效记录")
+    if skipped_too_long:
+        print(f"  过滤 {skipped_too_long} 条 output token > {max_output_length} 的样本")
 
     # 按问题类型统计
     from collections import Counter
@@ -272,6 +277,9 @@ def main():
                              "(CVRP/VRPTW n=50/100) 的 prompt 就有 2000-3000 token,"
                              "加 <think> 链后 4096 会砍掉 50%+ 样本尾部的答案, 故默认 8192。"
                              "tokenizer.model_max_length=16384 还有余量,显存紧可降。")
+    parser.add_argument("--max_output_length", type=int, default=4096,
+                        help="completion（output）部分的最大 token 数，超过此值的样本"
+                             "在训练前被过滤掉，不参与 SFT。")
     parser.add_argument("--val_ratio",    type=float, default=0.0,
                         help="验证集比例（默认 0 不验证）")
 
@@ -308,6 +316,7 @@ def main():
     print(f"  数据:       {args.data}")
     print(f"  LoRA:       {'关闭' if args.no_lora else f'rank={args.lora_rank}'}")
     print(f"  最大序列长: {args.max_length}")
+    print(f"  最大output: {args.max_output_length}")
     print(f"  ZeRO:       {args.zero_stage}")
     print(f"  输出:       {args.output_dir}")
     print(f"{'='*60}\n")
@@ -348,7 +357,7 @@ def main():
 
     # ── 加载数据 ─────────────────────────────────────────────────────────
     print("加载训练数据...")
-    dataset = load_sft_dataset(args.data, tokenizer, args.max_length)
+    dataset = load_sft_dataset(args.data, tokenizer, args.max_length, args.max_output_length)
 
     # 划分训练集和验证集
     if args.val_ratio > 0 and len(dataset) > 10:

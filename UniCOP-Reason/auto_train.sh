@@ -19,7 +19,7 @@
 #   - --gradient_checkpointing（激活重计算，砍 30~50% 激活内存）
 #   - --zero_stage 3（权重+优化器+梯度跨卡分片）
 
-WORK_DIR="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason"
+WORK_DIR="/home/ntu/lzj/UniCOP/UniCOP-Reason"
 LOG_DIR="$WORK_DIR/logs"
 EVAL_RESULT_DIR="$WORK_DIR/eval_results_auto_train"
 mkdir -p "$LOG_DIR" "$EVAL_RESULT_DIR"
@@ -52,19 +52,19 @@ VLLM_STARTUP_TIMEOUT=300 # server 启动最长等待（秒）
 # 测试阶段: MODEL_BASE 直接指向 bak 目录里的 SFT 产物,免去 mv / 软链折腾。
 # sort -r | head -1 自动取最新的一个 bak (按时间戳字典序,与 date +%Y%m%d_%H%M%S 一致)。
 # 正式训练阶段: 把 output_sft_r1_v2 物理 mv 回 UniCOP/UniCOP-Distill/, 然后改为
-#   MODEL_BASE="/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/output_sft_r1_v2/merged_model"
-MODEL_BASE=$(ls -d /Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/merged_model 2>/dev/null | sort -r | head -1)
+#   MODEL_BASE="/home/ntu/lzj/UniCOP/UniCOP-Distill/output/merged_model"
+MODEL_BASE=$(ls -d /home/ntu/lzj/UniCOP/UniCOP-Distill/output/*/merged_model 2>/dev/null | sort -r | head -1)
 if [ -z "$MODEL_BASE" ]; then
-    echo "❌ 找不到 /Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/merged_model"
-    echo "   请确认 bak 目录存在,或把 SFT 产物 mv 回 monorepo 后改回此处路径。"
+    echo "❌ 找不到 /home/ntu/lzj/UniCOP/UniCOP-Distill/output/*/merged_model"
+    echo "   请确认 SFT 产物已生成。"
     exit 1
 fi
 echo "[MODEL_BASE] $MODEL_BASE"
-POMO_CKPT_DIR="/Data04/yangzhihan/lzj/POMO-Baseline/result"
-POMO_BASELINE_DIR="/Data04/yangzhihan/lzj/POMO-Baseline"
+POMO_CKPT_DIR="/home/ntu/lzj/POMO-Baseline/result"
+POMO_BASELINE_DIR="/home/ntu/lzj/POMO-Baseline"
 # PIP-D (NeurIPS 2024) for TSPTW,和 POMO 目录并存
-PIPD_CKPT_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
-PIPD_DIR="/Data04/yangzhihan/lzj/PIP-D baseline/POMO+PIP"
+PIPD_CKPT_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
+PIPD_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP"
 
 # ── TRL CLI 二进制 ────────────────────────────────────────────────────
 # 用当前 conda/virtualenv 里的 trl binary,而不是 ~/.local/bin/trl
@@ -187,7 +187,7 @@ start_vllm_server() {
     # PYTHONPATH 保留为双保险,即使没 pip install -e . 也能让 Python 找到包路径。
     PYTHONPATH="$WORK_DIR:${PYTHONPATH:-}" \
     CUDA_VISIBLE_DEVICES="$vllm_gpu" \
-    CUDA_HOME=/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux \
+    CUDA_HOME=/usr/local/cuda \
     FLASHINFER_DISABLE_VERSION_CHECK=1 \
         "$TRL_BIN" vllm-serve \
         --model "$MODEL_BASE" \
@@ -284,7 +284,7 @@ run_train() {
     # (server 侧已在 start_vllm_server 内部设置过)
     PYTHONPATH="$WORK_DIR:${PYTHONPATH:-}" \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    CUDA_HOME=/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux \
+    CUDA_HOME=/usr/local/cuda \
     CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" \
         python -m accelerate.commands.launch --num_processes "$train_proc" "$WORK_DIR/train.py" \
         --problem "$problem" \
@@ -336,7 +336,7 @@ run_eval() {
     echo "  log: $log_file"
 
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    CUDA_HOME=/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux \
+    CUDA_HOME=/usr/local/cuda \
     CUDA_VISIBLE_DEVICES="$gpus" python "$WORK_DIR/evaluate.py" \
         --model_path "$model_path" \
         --problem "$problem" \

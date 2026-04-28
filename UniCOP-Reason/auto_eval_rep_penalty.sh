@@ -10,7 +10,7 @@
 #   - max_completion_length 保持 10000，与历史截断口径一致
 #   - 全 8 卡直接跑，OOM 才降级到 4 空闲卡
 
-EVAL_DIR="/Data04/yangzhihan/lzj/UniCOP-Reason"
+EVAL_DIR="/home/ntu/lzj/UniCOP/UniCOP-Reason"
 LOG_DIR="$EVAL_DIR/logs"
 mkdir -p "$LOG_DIR"
 
@@ -20,7 +20,7 @@ OOM_FALLBACK_GPUS=4
 FREE_GPUS=""
 
 # 模型路径
-MODEL_SFT="/Data04/yangzhihan/lzj/UniCOP-Distill/output_sft_r1_v2/final_model"
+MODEL_SFT="/home/ntu/lzj/UniCOP/UniCOP-Distill/output/final_model"
 
 MAX_COMPLETION_LENGTH=10000
 
@@ -72,7 +72,7 @@ run_eval() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Evaluate | model=$label | no_repeat_ngram=$ngram_n | bs=$bs | GPU=$gpus (full 8)"
 
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    CUDA_HOME=/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux \
+    CUDA_HOME=/usr/local/cuda \
     CUDA_VISIBLE_DEVICES="$gpus" python -u "$EVAL_DIR/evaluate.py" \
         --model_path "$model_path" \
         --problem tsp cvrp tsptw vrptw \
@@ -108,7 +108,7 @@ run_eval() {
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Retry | model=$label | no_repeat_ngram=$ngram_n | bs=$bs | GPU=$FREE_GPUS"
 
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-        CUDA_HOME=/Data04/yangzhihan/envs/analog_env/targets/x86_64-linux \
+        CUDA_HOME=/usr/local/cuda \
         CUDA_VISIBLE_DEVICES="$FREE_GPUS" python -u "$EVAL_DIR/evaluate.py" \
             --model_path "$model_path" \
             --problem tsp cvrp tsptw vrptw \

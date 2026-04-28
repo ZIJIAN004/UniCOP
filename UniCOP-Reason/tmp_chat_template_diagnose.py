@@ -3,7 +3,7 @@
 诊断 chat_template 在 SFT 训练 vs 推理时的 <think> token 行为是否一致。
 
 用法 (服务器上):
-    cd /Data04/yangzhihan/lzj/UniCOP/UniCOP-Reason
+    cd /home/ntu/lzj/UniCOP/UniCOP-Reason
     python tmp_chat_template_diagnose.py
     # 或指定 model_path:
     python tmp_chat_template_diagnose.py --model_path /path/to/merged_model
@@ -29,7 +29,7 @@ def main():
     if args.model_path:
         model_path = args.model_path
     else:
-        pattern = "/Data04/yangzhihan/lzj/UniCOP-Distill.bak_*/output_sft_r1_v2/merged_model"
+        pattern = "/home/ntu/lzj/UniCOP/UniCOP-Distill/output/*/merged_model"
         candidates = sorted(glob.glob(pattern), reverse=True)
         if not candidates:
             sys.exit(f"❌ 自动 glob 失败: {pattern}\n"

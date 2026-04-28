@@ -3,7 +3,7 @@ import os
 import sys
 import time
 
-CREDENTIAL_PATH = "/Data04/yangzhihan/lzj/UniCOP/UniCOP-Distill/advance-subject-493905-h9-020e2dc30ae7.json"
+CREDENTIAL_PATH = "/home/ntu/lzj/UniCOP/UniCOP-Distill/advance-subject-493905-h9-020e2dc30ae7.json"
 PROJECT = "advance-subject-493905-h9"
 LOCATION = "us-central1"
 MODEL = "gemini-2.5-pro"
