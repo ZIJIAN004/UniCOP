@@ -323,19 +323,6 @@ def main():
     # ── GRPO 配置 ────────────────────────────────────────────────────────
     ds_config = make_deepspeed_config(config.zero_stage)
 
-    # vLLM 生成配置 (server mode + n-gram 硬禁):
-    # vLLM V1 废弃了 SamplingParams(logits_processors=[...]),只能通过
-    # SamplingParams.extra_args + 预注册 AdapterLogitsProcessor 实现。
-    # 我们的 NoRepeatNgramAdapterLP (utils/vllm_ngram_processor.py) 通过
-    # `trl vllm-serve --logits-processors ...` 在 server 启动时注册,
-    # 训练端在 generation_kwargs 里塞 extra_args 即可 per-request 启用。
-    # 参考: https://docs.vllm.ai/en/stable/features/custom_logitsprocs/
-    generation_kwargs: dict = {}
-    if config.no_repeat_ngram_size > 1:
-        generation_kwargs["extra_args"] = {
-            "no_repeat_ngram_size": int(config.no_repeat_ngram_size),
-        }
-
     grpo_config = GRPOConfig(
         output_dir=config.output_dir,
         num_generations=config.num_generations,
@@ -346,31 +333,21 @@ def main():
         num_train_epochs=config.num_train_epochs,
         warmup_ratio=config.warmup_ratio,
         beta=config.kl_coef,
-        mask_truncated_completions=True,
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
-        eval_strategy="no",          # 关闭训练中测试集自动评估
-        save_strategy="steps",       # 仅按 save_steps 存 checkpoint，不触发 eval
+        eval_strategy="no",
+        save_strategy="steps",
         report_to="wandb" if config.use_wandb else "none",
         bf16=True,
         remove_unused_columns=False,
         deepspeed=ds_config,
         gradient_checkpointing=config.gradient_checkpointing,
-        # 反直觉但社区验证: ZeRO-3 + LoRA + gradient_checkpointing 三件套
-        # 实测 use_reentrant=True 反而能修 "Recomputed values shape [0]" bug
-        # (TRL #5217 多人报告). 老的 reentrant API 在 ZeRO-3 partition 下行为
-        # 反而比新的 non-reentrant 更稳。这是个 long-standing community
-        # workaround,不是 PyTorch 官方推荐做法。
         gradient_checkpointing_kwargs={"use_reentrant": True},
-        # DAPO Clip-Higher（trl ≥ 0.13 支持 epsilon_high；symmetric 时两者相等）
         epsilon=config.clip_epsilon_low,
         epsilon_high=config.clip_epsilon_high,
-        # ── vLLM server mode 生成加速 ────────────────────────────────────
         use_vllm=True,
-        vllm_mode="server",
         vllm_server_host=args.vllm_server_host,
         vllm_server_port=args.vllm_server_port,
-        generation_kwargs=generation_kwargs,
     )
 
     # ── 初始化 POMO PRM + 训练 ─────────────────────────────────────────
@@ -392,20 +369,6 @@ def main():
         train_dataset=train_dataset,
         processing_class=tokenizer,
     )
-
-    # n-gram 硬禁的生效路径说明:
-    # 1. 训练端 (这里): 通过 GRPOConfig.generation_kwargs["extra_args"] 透传给
-    #    TRL 内部的 SamplingParams 构造,进而通过 HTTP 发送到 vllm-serve。
-    # 2. vLLM server 端: 启动时 --logits-processors 注册 NoRepeatNgramAdapterLP,
-    #    每次收到 request 时读 extra_args.no_repeat_ngram_size 决定是否启用。
-    # 两端必须同时配合,缺一不可。server 端启动参数由 auto_train.sh 控制。
-    if config.no_repeat_ngram_size > 1:
-        print(
-            f"GRPO vLLM 生成: no_repeat_ngram_size={config.no_repeat_ngram_size} "
-            f"(通过 extra_args 透传到 vllm-serve 侧的 NoRepeatNgramAdapterLP)"
-        )
-    else:
-        print(f"no_repeat_ngram_size={config.no_repeat_ngram_size} ≤ 1,已关闭")
 
     print("\n开始 GRPO 训练...")
 
