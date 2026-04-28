@@ -52,7 +52,7 @@ LORA_RANK=64
 LORA_ALPHA=128
 
 # ── CUDA_HOME (DeepSpeed 编译/检查需要) ──────────────────────────────
-export CUDA_HOME=/usr/local/cuda
+export CUDA_HOME=/home/ntu/anaconda3/envs/zjh
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
 

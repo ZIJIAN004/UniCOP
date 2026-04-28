@@ -29,7 +29,7 @@ POMO_CKPT_DIR="/home/ntu/lzj/POMO-Baseline/result"
 POMO_BASELINE_DIR="/home/ntu/lzj/POMO-Baseline"
 PIPD_CKPT_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
 PIPD_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP"
-CUDA_HOME_PATH="/usr/local/cuda"
+CUDA_HOME_PATH="/home/ntu/anaconda3/envs/zjh"
 
 # 当前训练矩阵: 自动从 auto_train.sh 读取,避免两边手动对齐
 AUTO_TRAIN_SH="$(dirname "$0")/auto_train.sh"

@@ -72,7 +72,7 @@ run_eval() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Evaluate | model=$label | no_repeat_ngram=$ngram_n | bs=$bs | GPU=$gpus (full 8)"
 
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    CUDA_HOME=/usr/local/cuda \
+    CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
     CUDA_VISIBLE_DEVICES="$gpus" python -u "$EVAL_DIR/evaluate.py" \
         --model_path "$model_path" \
         --problem tsp cvrp tsptw vrptw \
@@ -108,7 +108,7 @@ run_eval() {
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Retry | model=$label | no_repeat_ngram=$ngram_n | bs=$bs | GPU=$FREE_GPUS"
 
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-        CUDA_HOME=/usr/local/cuda \
+        CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
         CUDA_VISIBLE_DEVICES="$FREE_GPUS" python -u "$EVAL_DIR/evaluate.py" \
             --model_path "$model_path" \
             --problem tsp cvrp tsptw vrptw \

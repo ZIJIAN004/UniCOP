@@ -187,7 +187,7 @@ start_vllm_server() {
     # PYTHONPATH 保留为双保险,即使没 pip install -e . 也能让 Python 找到包路径。
     PYTHONPATH="$WORK_DIR:${PYTHONPATH:-}" \
     CUDA_VISIBLE_DEVICES="$vllm_gpu" \
-    CUDA_HOME=/usr/local/cuda \
+    CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
     FLASHINFER_DISABLE_VERSION_CHECK=1 \
         "$TRL_BIN" vllm-serve \
         --model "$MODEL_BASE" \
@@ -284,7 +284,7 @@ run_train() {
     # (server 侧已在 start_vllm_server 内部设置过)
     PYTHONPATH="$WORK_DIR:${PYTHONPATH:-}" \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    CUDA_HOME=/usr/local/cuda \
+    CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
     CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" \
         python -m accelerate.commands.launch --num_processes "$train_proc" "$WORK_DIR/train.py" \
         --problem "$problem" \
@@ -336,7 +336,7 @@ run_eval() {
     echo "  log: $log_file"
 
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    CUDA_HOME=/usr/local/cuda \
+    CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
     CUDA_VISIBLE_DEVICES="$gpus" python "$WORK_DIR/evaluate.py" \
         --model_path "$model_path" \
         --problem "$problem" \
