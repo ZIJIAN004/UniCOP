@@ -1,28 +1,19 @@
 #!/bin/bash
-# setup_env.sh — 在 CUDA driver 12.2 的服务器上建 UniCOP 训练环境
+# setup_env.sh — 在现有 zjh 环境中降级到 CUDA 12.2 驱动兼容的版本栈
 #
 # 约束: driver 12.2 → 只能用 cu121 的 torch
-# 版本栈: torch 2.5.1+cu121 → vLLM 0.6.6.post1 → TRL (待定)
+# 版本栈: torch 2.5.1+cu121 → vLLM 0.6.6.post1 → TRL 0.16.0
 #
-# 用法: bash setup_env.sh
+# 用法: conda activate zjh && bash setup_env.sh
 
 set -euo pipefail
 
-ENV_NAME="unicop"
-PYTHON_VER="3.12"
-
-echo "=========================================="
-echo "Step 1: 创建 conda 环境"
-echo "=========================================="
-conda create -n "$ENV_NAME" python=$PYTHON_VER -y
-eval "$(conda shell.bash hook)"
-conda activate "$ENV_NAME"
+echo "当前环境: $CONDA_PREFIX"
 echo "Python: $(python --version)"
-echo "Env: $CONDA_PREFIX"
-
 echo ""
+
 echo "=========================================="
-echo "Step 2: 安装 torch 2.5.1+cu121"
+echo "Step 1: 降级 torch → 2.5.1+cu121"
 echo "=========================================="
 pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 \
     --index-url https://download.pytorch.org/whl/cu121
@@ -30,58 +21,37 @@ python -c "import torch; print(f'torch {torch.__version__}  CUDA {torch.version.
 
 echo ""
 echo "=========================================="
-echo "Step 3: 安装 vLLM 0.6.6.post1"
+echo "Step 2: 降级 vLLM → 0.6.6.post1"
 echo "=========================================="
-# --no-deps 避免 vLLM 拉新 torch
 pip install vllm==0.6.6.post1 --no-deps
-# 补装 vLLM 的非 torch 依赖
-pip install \
-    ray>=2.10 \
-    aiohttp \
-    fastapi \
-    uvicorn \
-    pydantic \
-    msgspec \
-    lm-format-enforcer \
-    outlines \
-    xformers==0.0.28.post3 \
-    triton \
-    prometheus-client \
-    sentencepiece \
-    tiktoken
 python -c "import vllm; print(f'vllm {vllm.__version__}')"
 
 echo ""
 echo "=========================================="
-echo "Step 4: 安装 TRL (先试 0.16.0)"
+echo "Step 3: 降级 TRL → 0.16.0"
 echo "=========================================="
-# TRL 0.16.0 是代码 sanity_versions.py 要求的最低版本
-# 如果和 vLLM 0.6.x 不兼容,后面手动降级到 0.14/0.13
-pip install trl==0.16.0
+pip install trl==0.16.0 --no-deps
 python -c "from trl import GRPOConfig, GRPOTrainer; print('TRL GRPOConfig+GRPOTrainer OK')"
 
 echo ""
 echo "=========================================="
-echo "Step 5: 安装其余训练栈"
+echo "Step 4: 重新编译 DeepSpeed cpu_adam"
 echo "=========================================="
-pip install \
-    transformers \
-    accelerate \
-    peft \
-    datasets \
-    numpy'<2.0' \
-    scipy \
-    wandb
-
-# DeepSpeed: 预编译 cpu_adam
 export CUDA_HOME="$CONDA_PREFIX"
-DS_BUILD_CPU_ADAM=1 pip install deepspeed --no-cache-dir
+DS_BUILD_CPU_ADAM=1 pip install deepspeed==0.18.9 --no-deps --force-reinstall --no-cache-dir
 
 echo ""
 echo "=========================================="
-echo "Step 6: 软链 nvidia pip 库到 env/lib"
+echo "Step 5: 修复 numpy (如被连锁升级)"
 echo "=========================================="
-NVIDIA_DIR="$CONDA_PREFIX/lib/python${PYTHON_VER}/site-packages/nvidia"
+pip install 'numpy>=1.26,<2.0' --no-deps
+
+echo ""
+echo "=========================================="
+echo "Step 6: 软链 nvidia pip 库"
+echo "=========================================="
+NVIDIA_DIR="$CONDA_PREFIX/lib/python3.12/site-packages/nvidia"
+count=0
 if [ -d "$NVIDIA_DIR" ]; then
     for lib in "$NVIDIA_DIR"/*/lib/lib*.so*; do
         [ -f "$lib" ] || continue
@@ -89,19 +59,18 @@ if [ -d "$NVIDIA_DIR" ]; then
         target="$CONDA_PREFIX/lib/$name"
         if [ ! -e "$target" ]; then
             ln -s "$lib" "$target"
+            count=$((count + 1))
         fi
     done
-    echo "nvidia 库软链完成"
-else
-    echo "无 nvidia pip 包,跳过"
 fi
+echo "新建 $count 个软链"
 
 echo ""
 echo "=========================================="
 echo "Step 7: 最终验证"
 echo "=========================================="
-python -c "
-pkgs = ['torch','vllm','trl','transformers','deepspeed','peft','accelerate']
+CUDA_HOME="$CONDA_PREFIX" python -c "
+pkgs = ['torch','vllm','trl','transformers','deepspeed','peft','accelerate','numpy']
 for p in pkgs:
     try:
         m = __import__(p)
@@ -111,9 +80,10 @@ for p in pkgs:
         print(f'[FAIL] {p:20s} {e}')
 import torch
 print(f'CUDA: {torch.cuda.is_available()}  version: {torch.version.cuda}')
+print(f'GPU count: {torch.cuda.device_count()}')
 "
 
 echo ""
 echo "=========================================="
-echo "完成！激活环境: conda activate $ENV_NAME"
+echo "完成！可以跑 bash auto_all.sh"
 echo "=========================================="
