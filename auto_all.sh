@@ -263,7 +263,6 @@ start_vllm_server() {
         --max_model_len "$VLLM_MAX_MODEL_LEN" \
         --dtype "$VLLM_DTYPE" \
         $VLLM_PREFIX_CACHE_FLAG \
-        --trust_remote_code True \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
 
