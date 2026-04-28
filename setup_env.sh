@@ -81,7 +81,7 @@ if [ -d "$NVIDIA_DIR" ]; then
 fi
 echo "nvidia 库软链: $count 个"
 
-DS_BUILD_CPU_ADAM=1 pip install deepspeed --no-cache-dir
+DS_BUILD_CPU_ADAM=1 pip install deepspeed --no-cache-dir --no-build-isolation
 python -c "
 from deepspeed.ops.op_builder import CPUAdamBuilder
 b = CPUAdamBuilder()
