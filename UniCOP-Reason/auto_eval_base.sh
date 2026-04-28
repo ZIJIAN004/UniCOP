@@ -65,7 +65,7 @@ run_eval() {
         local log_file="$LOG_DIR/eval_${label}_${prompt_mode}_bs${bs}.log"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Evaluate | model=$label | mode=$prompt_mode | max_len=$max_len | bs=$bs | GPU=$gpu_ids"
 
-        CUDA_HOME=/home/ntu/anaconda3/envs/zjh CUDA_VISIBLE_DEVICES="$gpu_ids" \
+        CUDA_HOME=/home/ntu/anaconda3/envs/unicop CUDA_VISIBLE_DEVICES="$gpu_ids" \
             python "$EVAL_DIR/evaluate.py" \
             --model_path "$model_path" \
             --problem tsp cvrp tsptw vrptw \

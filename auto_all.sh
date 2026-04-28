@@ -182,7 +182,7 @@ run_sft() {
 
     PYTHONPATH="$DISTILL_DIR:${PYTHONPATH:-}" \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
-    CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
+    CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
     CUDA_VISIBLE_DEVICES="$gpus" \
         python -m accelerate.commands.launch --num_processes "$num_proc" \
         "$DISTILL_DIR/train_sft.py" \
@@ -225,7 +225,7 @@ run_sft_merge() {
     fi
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 阶段 2: 合并 SFT LoRA → $SFT_MERGED"
-    CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
+    CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
     python "$TOOLS_DIR/merge_lora.py" \
         --adapter "$adapter" \
         --base "$BASE_MODEL" \
@@ -253,7 +253,7 @@ start_vllm_server() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 vLLM server | GPU=$vllm_gpu | port=$port"
     PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
     CUDA_VISIBLE_DEVICES="$vllm_gpu" \
-    CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
+    CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
     FLASHINFER_DISABLE_VERSION_CHECK=1 \
         "$TRL_BIN" vllm-serve \
         --model "$SFT_MERGED" \
@@ -322,7 +322,7 @@ run_grpo() {
 
     PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
+    CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
     CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" \
         python -m accelerate.commands.launch --num_processes "$train_proc" "$REASON_DIR/train.py" \
         --problem "$problem" \
@@ -377,7 +377,7 @@ run_eval() {
     while [ "$bs" -ge 1 ]; do
         echo "===== batch_size=$bs  $(date '+%Y-%m-%d %H:%M:%S')  GPUs=$gpus =====" >> "$log_file"
         PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
-        CUDA_HOME=/home/ntu/anaconda3/envs/zjh \
+        CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
             CUDA_VISIBLE_DEVICES="$gpus" \
             python "$REASON_DIR/evaluate.py" \
