@@ -28,7 +28,7 @@ class Config:
     max_prompt_length: int             = 768
     max_completion_length: int         = 4096
     learning_rate: float               = 5e-6   # GRPO + LoRA rank 64 推荐 5e-6~2e-5 (原 1e-6 过低,SFT 已升到 1e-4)
-    per_device_train_batch_size: int   = 8
+    per_device_train_batch_size: int   = 4
     gradient_accumulation_steps: int   = 8
     num_train_epochs: int              = 3
     warmup_ratio: float                = 0.05

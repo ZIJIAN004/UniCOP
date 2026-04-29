@@ -26,7 +26,7 @@ mkdir -p "$LOG_DIR" "$EVAL_RESULT_DIR"
 
 # ── GPU 调度参数 ─────────────────────────────────────────────────────
 TOTAL_GPUS=8
-INIT_GPUS=4              # 训练阶段 1：1 vLLM + 3 训练 = 4 卡
+INIT_GPUS=3              # 训练阶段 1：1 vLLM + 2 训练 = 3 卡
 OOM_GPUS=8               # 训练阶段 2：OOM 升级到 1 vLLM + 7 训练 = 8 卡
 EVAL_GPUS=1              # 评估：单卡足够
 FREE_GPUS=""

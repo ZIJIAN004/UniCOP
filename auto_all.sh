@@ -44,7 +44,7 @@ mkdir -p "$LOG_DIR" "$EVAL_RESULT_DIR"
 # ══════════════════════════════════════════════════════════════════════
 TOTAL_GPUS=4
 SFT_GPUS=4
-GRPO_INIT_GPUS=4
+GRPO_INIT_GPUS=3
 EVAL_GPUS=4
 GPU_FREE_MEM_THRESHOLD_MB=500
 FREE_GPUS=""

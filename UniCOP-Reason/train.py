@@ -91,10 +91,6 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
                 "device":     "cpu",
                 "pin_memory": True,
             },
-            "offload_param": {
-                "device":     "cpu",
-                "pin_memory": True,
-            },
         }
 
     return base
