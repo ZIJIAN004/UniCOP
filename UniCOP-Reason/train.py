@@ -65,15 +65,6 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
                 "weight_decay": "auto",
             },
         },
-        "scheduler": {
-            "type": "WarmupDecayLR",
-            "params": {
-                "warmup_min_lr":    0,
-                "warmup_max_lr":    "auto",
-                "warmup_num_steps": "auto",
-                "total_num_steps":  "auto",
-            },
-        },
     }
 
     if zero_stage == 2:
