@@ -201,6 +201,36 @@ class GRPOPRMTrainer(GRPOTrainer):
                 w_f * c["format"]
             )
 
+            # ── 诊断: 前 2 条 completion 打印解析详情,排查 coverage=0 根因 ──
+            if i < 2 and not getattr(self, '_coverage_diag_done', False):
+                from utils.parse import parse_single_route, parse_multi_route
+                n_inst = instances[i]["n"]
+                pt = problem_type_list[i]
+                is_multi = pt in ("cvrp", "vrptw")
+                if is_multi:
+                    parsed = parse_multi_route(completions_text[i], n_inst)
+                    if parsed:
+                        all_vis = [v for r in parsed for v in r if v != 0]
+                    else:
+                        all_vis = []
+                else:
+                    parsed = parse_single_route(completions_text[i], n_inst)
+                    all_vis = [v for v in parsed if v != 0] if parsed else []
+                # 只打答案段末尾 500 字符 + 解析结果
+                think_end = completions_text[i].rfind("</think>")
+                answer_tail = completions_text[i][think_end:think_end+500] if think_end != -1 else completions_text[i][-500:]
+                print(f"\n{'='*60}")
+                print(f"[DIAG coverage] completion[{i}] type={pt} n={n_inst}")
+                print(f"  parse={c['parse']} coverage={c['coverage']} constraint={c['constraint']:.3f}")
+                print(f"  parsed_route={parsed}")
+                print(f"  customer_visits({len(all_vis)}): {sorted(set(all_vis))}")
+                print(f"  missing: {sorted(set(range(1, n_inst+1)) - set(all_vis))}")
+                print(f"  duplicates: {len(all_vis) - len(set(all_vis))}")
+                print(f"  answer_tail: {answer_tail[:500]}")
+                print(f"{'='*60}\n")
+        if not getattr(self, '_coverage_diag_done', False):
+            self._coverage_diag_done = True
+
         # 组内归一化：每 num_gen 一组
         adv = torch.zeros(B, device=device)
         num_groups = B // num_gen
@@ -445,19 +475,21 @@ class GRPOPRMTrainer(GRPOTrainer):
         L_terminal = (loss_term_t * completion_mask).sum() \
                      / completion_mask.sum().clamp(min=1.0)
 
-        # PRM: 分母 = 该 instance 的 n（精神上等价 DAPO token-level，但用"期望 token 数"
-        # 而非实际 mask sum，让稀释强度跨 batch 一致可解释）
-        # 完整 rollout：~n 个 PRM token / n ≈ mean of advantages（满强度）
-        # 摆烂 5 客户：5 个 PRM token / n=20 = mean × 1/4（自然弱化）
-        # → 防 reward hack：摆烂没法靠"少几步好选择"得到与完整等价的 PRM 强度
+        # PRM: completion 长度加权 (DAPO token-level 精神)
+        # 原始设计: L_prm = mean_i[ sum_t(loss * pmask) / n_i ]
+        # 问题: ratio=1 时 loss_prm_t = -adv (线性), z-score 保证
+        #   Σ_i A[i,k] = 0 @ 每个 step k, 所以 Σ_i L_prm_per[i] ≡ 0。
+        # 修复: 乘以 completion 长度 T_i, 让
+        #   Σ_i L_prm_per[i] * T_i = Σ_k Σ_i (-A[i,k] * T_i) ≠ 0
+        #   (和 L_terminal 的 DAPO 加权同理: 长 completion 的 PRM 信号更强)
         pmask_sum = prm_mask.sum(-1)                                       # (B,)
         has_prm   = (pmask_sum > 0).float()                                # (B,)
+        comp_len  = completion_mask.sum(-1).clamp(min=1.0)                 # (B,)
         L_prm_per = (loss_prm_t * prm_mask).sum(-1) / prm_denom            # (B,)
-        L_prm_per = L_prm_per * has_prm                                    # 全 mask 0 → 0
+        L_prm_per = L_prm_per * has_prm * comp_len                        # 长度加权
 
-        # batch-level：仅有 PRM 信号的 completion 参与平均
-        num_with_prm = has_prm.sum().clamp(min=1.0)
-        L_prm = L_prm_per.sum() / num_with_prm
+        # batch-level：按有效 completion 的 token 总数归一（和 L_terminal 量纲对齐）
+        L_prm = L_prm_per.sum() / (has_prm * comp_len).sum().clamp(min=1.0)
 
         alpha = config.terminal_alpha
         beta_w = config.prm_beta
