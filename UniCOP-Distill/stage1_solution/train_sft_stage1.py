@@ -99,32 +99,36 @@ def _setup_pad_token(tokenizer):
     return True  # 需要 resize embedding
 
 
-def _verify_prompt_suffix(tokenizer):
-    """验证 chat_template 末尾是否带 <think>，确保与 Stage 2 格式一致。"""
+def _detect_think_suffix(tokenizer) -> str:
+    """
+    检测 chat_template add_generation_prompt 末尾是否带 <think>。
+    Stage 1 需要剥离它，使 prompt 止于 <|Assistant|>。
+    不碰 <think> 机制，避免压制推理模型的思维链能力。
+    """
     probe = tokenizer.apply_chat_template(
         [{"role": "system", "content": "p"}, {"role": "user", "content": "p"}],
         tokenize=False, add_generation_prompt=True,
     )
-    ends_with_think = probe.rstrip().endswith("<think>")
-    if ends_with_think:
-        print(f"  [OK] chat_template 末尾带 <think>，与 Stage 2 格式一致")
-    else:
-        print(f"  [WARN] chat_template 末尾无 <think>，将手动补充")
-    return ends_with_think
+    if probe.rstrip().endswith("<think>"):
+        idx = probe.rfind("<think>")
+        suffix = probe[idx:]
+        print(f"  chat_template 末尾带 <think>，Stage 1 将剥离（suffix={suffix!r}）")
+        return suffix
+    print(f"  chat_template 末尾无 <think>")
+    return ""
 
 
 def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
-                        probe_has_think: bool) -> Dataset:
+                        think_suffix: str) -> Dataset:
     """
     加载 solutions.jsonl，构建 Stage 1 训练集。
 
-    训练 text 结构（与 Stage 2 保持一致的 prompt + 空思维链 completion）:
-        prompt:     ...<|User|>[问题描述]<|Assistant|><think>\\n
-        completion: </think>\\n[solution]\\n<eos>
+    训练 text 结构（不含 <think>，不干扰推理模型的思维链机制）:
+        prompt:     ...<|User|>[问题描述]<|Assistant|>
+        completion: [solution]\\n<eos>
 
-    这样 Stage 1 → Stage 2 迁移时，prompt 格式完全相同，
-    completion 结构也一致（都是 ...\\n</think>\\n解），
-    只是 Stage 2 在 </think> 前面有实际推理内容。
+    Stage 1 只教模型"什么是合法的解"，完全不碰 <think> 相关 token。
+    Stage 2 再引入 <think>...\\n</think> 格式教推理链。
     """
     records = []
     skipped = 0
@@ -148,19 +152,23 @@ def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
                 skipped += 1
                 continue
 
-            # 1. 渲染 prompt，保留 <|Assistant|><think>\n（与 Stage 2 一致）
+            # 1. 渲染 prompt（chat_template 会加 <|Assistant|><think>\n）
             prompt_text = tokenizer.apply_chat_template(
                 [{"role": "system", "content": system},
                  {"role": "user", "content": user}],
                 tokenize=False, add_generation_prompt=True,
             )
 
-            # 2. 兜底：如果 chat_template 没自动加 <think>，手动补
-            if not probe_has_think:
-                prompt_text = prompt_text.rstrip() + "<think>\n"
+            # 2. 剥离 <think> 后缀，使 prompt 止于 <|Assistant|>
+            if think_suffix and prompt_text.endswith(think_suffix):
+                prompt_text = prompt_text[:-len(think_suffix)]
+            elif think_suffix:
+                idx = prompt_text.rstrip().rfind("<think>")
+                if idx != -1:
+                    prompt_text = prompt_text[:idx]
 
-            # 3. completion = </think> + solution + eos（空思维链）
-            completion_text = "</think>\n" + solution + "\n" + tokenizer.eos_token
+            # 3. completion = solution + eos（纯解，不含任何 think 标签）
+            completion_text = solution + "\n" + tokenizer.eos_token
 
             # 超长过滤
             total_len = len(tokenizer.encode(prompt_text + completion_text))
@@ -179,11 +187,11 @@ def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
         first = records[0]
         print(f"  [首条验证] prompt 末尾 80 字: {first['prompt'][-80:]!r}")
         print(f"              completion 前 120 字: {first['completion'][:120]!r}")
-        prompt_ok = first["prompt"].rstrip().endswith("<think>")
-        comp_ok = first["completion"].startswith("</think>")
-        print(f"  prompt 末尾 <think>: {prompt_ok}  completion 开头 </think>: {comp_ok}")
-        if not (prompt_ok and comp_ok):
-            print(f"  [WARN] 格式与 Stage 2 不一致，请检查!")
+        has_think = "<think>" in first["prompt"][-30:] or "<think>" in first["completion"]
+        if has_think:
+            print(f"  [WARN] 检测到残留 <think> 标签，Stage 1 不应包含!")
+        else:
+            print(f"  [OK] 无 <think> 标签，不干扰推理能力")
 
     if skipped:
         print(f"  跳过 {skipped} 条记录")
@@ -250,11 +258,11 @@ def main():
     tokenizer.padding_side = "right"
     assert tokenizer.pad_token_id != tokenizer.eos_token_id
 
-    probe_has_think = _verify_prompt_suffix(tokenizer)
+    think_suffix = _detect_think_suffix(tokenizer)
 
     # ── 数据 ─────────────────────────────────────────────────────────────
     print("加载训练数据...")
-    dataset = load_stage1_dataset(args.data, tokenizer, args.max_length, probe_has_think)
+    dataset = load_stage1_dataset(args.data, tokenizer, args.max_length, think_suffix)
 
     if args.val_ratio > 0 and len(dataset) > 10:
         split = dataset.train_test_split(test_size=args.val_ratio, seed=42)
