@@ -58,14 +58,34 @@ echo "============================================================"
 # ══════════════════════════════════════════════════════════════════
 # Step 1: 生成 50K TSP n=20 solver 解
 # ══════════════════════════════════════════════════════════════════
+SOLUTIONS_FILE="data/solutions_tsp20.jsonl"
+TARGET_SAMPLES=50000
+
 echo ""
-echo ">>> Step 1: 生成 TSP n=20 solutions (50000 条)..."
-python stage1_solution/generate_solutions.py \
-    --problems tsp \
-    --sizes 20 \
-    --num_samples 50000 \
-    --output data/solutions_tsp20.jsonl \
-    --workers 8
+echo ">>> Step 1: 生成 TSP n=20 solutions (${TARGET_SAMPLES} 条)..."
+if [ -f "$SOLUTIONS_FILE" ]; then
+    EXISTING=$(grep -c '^{' "$SOLUTIONS_FILE" 2>/dev/null || echo 0)
+    echo "  已有 $EXISTING 条样本"
+    if [ "$EXISTING" -ge "$TARGET_SAMPLES" ]; then
+        echo "  样本数已达标，跳过数据生成"
+    else
+        echo "  样本不足，继续生成 (断点续传)..."
+        python stage1_solution/generate_solutions.py \
+            --problems tsp \
+            --sizes 20 \
+            --num_samples $TARGET_SAMPLES \
+            --output "$SOLUTIONS_FILE" \
+            --workers 8
+    fi
+else
+    echo "  数据文件不存在，开始生成..."
+    python stage1_solution/generate_solutions.py \
+        --problems tsp \
+        --sizes 20 \
+        --num_samples $TARGET_SAMPLES \
+        --output "$SOLUTIONS_FILE" \
+        --workers 8
+fi
 notify "Step1 完成: TSP20 数据生成"
 
 # ══════════════════════════════════════════════════════════════════

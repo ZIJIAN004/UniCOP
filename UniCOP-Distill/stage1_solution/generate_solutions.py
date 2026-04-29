@@ -223,7 +223,8 @@ def main():
             print(f"    完成: 成功 {saved}/{len(tasks)}，失败 {failed}")
 
     elapsed = time.time() - t0
-    total_saved = sum(valid_counts.values()) + total_need
+    final_counts = count_samples(args.output)
+    total_saved = sum(final_counts.values())
     msg = f"Stage 1 数据生成完成: {total_saved} 条, 耗时 {elapsed:.0f}s"
     print(f"\n{msg}")
     _notify_serverchan(msg)
