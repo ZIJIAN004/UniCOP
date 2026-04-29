@@ -7,8 +7,15 @@
 
 set -euo pipefail
 
-# ── 配置 ──────────────────────────────────────────────────────────────────────
+# ── 自动日志 ─────────────────────────────────────────────────────────────────
 DISTILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG_DIR="$DISTILL_DIR/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/pipeline_tsp20_$(date '+%Y%m%d_%H%M%S').log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "日志文件: $LOG_FILE"
+
+# ── 配置 ──────────────────────────────────────────────────────────────────────
 REASON_DIR="$(cd "$DISTILL_DIR/../UniCOP-Reason" && pwd)"
 NUM_GPUS=4
 GPU_MEM_THRESHOLD=2000    # MB，低于此值视为空闲
