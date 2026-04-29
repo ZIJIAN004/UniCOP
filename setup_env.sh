@@ -36,9 +36,9 @@ python -c "import torch; print(f'torch {torch.__version__}  CUDA {torch.version.
 
 echo ""
 echo "=========================================="
-echo "Step 4: 安装 vLLM 0.6.6.post1 + 完整依赖"
+echo "Step 4: 安装 vLLM 0.7.3 + 完整依赖"
 echo "=========================================="
-pip install vllm==0.6.6.post1
+pip install vllm==0.7.3
 python -c "import vllm; print(f'vllm {vllm.__version__}')"
 
 echo ""

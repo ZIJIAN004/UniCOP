@@ -345,6 +345,7 @@ def main():
         gradient_checkpointing_kwargs={"use_reentrant": True},
         epsilon=config.clip_epsilon_low,
         epsilon_high=config.clip_epsilon_high,
+        max_prompt_length=config.max_prompt_length,
         use_vllm=True,
         vllm_server_host=args.vllm_server_host,
         vllm_server_port=args.vllm_server_port,

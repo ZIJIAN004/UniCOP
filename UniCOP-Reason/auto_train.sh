@@ -46,6 +46,7 @@ if [ "$VLLM_ENABLE_PREFIX_CACHING" = "True" ]; then
 else
     VLLM_PREFIX_CACHE_FLAG=""
 fi
+VLLM_NGRAM_SIZE=6        # no_repeat_ngram_size（V0 monkey-patch 注入）
 VLLM_STARTUP_TIMEOUT=300 # server 启动最长等待（秒）
 
 # ── 训练资源路径（POMO 路径需要自己填） ─────────────────────────
@@ -171,25 +172,19 @@ start_vllm_server() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 vLLM server | GPU=$vllm_gpu | port=$port"
     # 注意：TRL server 模式把 LoRA merge 进 base 后推完整权重，不走 vLLM 的
     # LoRA adapter 接口，所以不加 --enable-lora（加了反而触发 vLLM LoRA 模块 bug）
-    # $TRL_BIN 指向当前 env 的 trl binary（在脚本顶部定义）
+    # vllm_serve_ngram.py 内部调用 trl vllm-serve 入口
     # FLASHINFER_DISABLE_VERSION_CHECK=1: 绕过 flashinfer/flashinfer-cubin 版本不一致检查
     #
-    # ── 自定义 LogitsProcessor (n_gram=6) 注册方式 ──
-    # 走 vLLM entry point 机制,不通过 CLI flag 传递:
-    #   1. pyproject.toml 里声明 [project.entry-points."vllm.logits_processors"]
-    #   2. cd UniCOP-Reason && pip install -e .  (只需装一次)
-    #   3. vLLM 启动时自动 scan + load,无需任何 CLI 参数
-    # 为什么不用 --logits-processors flag:
-    #   trl vllm-serve 的 HfArgumentParser 不识别这个 flag (原生 vllm serve 才有),
-    #   会报 "Some specified arguments are not used by the HfArgumentParser"。
-    # 参考: https://docs.vllm.ai/en/stable/features/custom_logitsprocs/
-    #
-    # PYTHONPATH 保留为双保险,即使没 pip install -e . 也能让 Python 找到包路径。
+    # ── 自定义 LogitsProcessor (n_gram=6) ──
+    # vLLM 0.7.3 默认 V0 引擎,通过 monkey-patch SamplingParams.__init__
+    # 注入 NoRepeatNgramLogitsProcessor,对 TRL 透明。
+    # (V1 entry-point 方式需要 extra_args,vLLM 0.7.3 不支持)
     PYTHONPATH="$WORK_DIR:${PYTHONPATH:-}" \
     CUDA_VISIBLE_DEVICES="$vllm_gpu" \
     CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
     FLASHINFER_DISABLE_VERSION_CHECK=1 \
-        "$TRL_BIN" vllm-serve \
+        python "$WORK_DIR/utils/vllm_serve_ngram.py" \
+        --no_repeat_ngram_size "$VLLM_NGRAM_SIZE" \
         --model "$MODEL_BASE" \
         --tensor_parallel_size 1 \
         --port "$port" \
@@ -197,7 +192,6 @@ start_vllm_server() {
         --max_model_len "$VLLM_MAX_MODEL_LEN" \
         --dtype "$VLLM_DTYPE" \
         $VLLM_PREFIX_CACHE_FLAG \
-        --trust_remote_code True \
         > "$log_file" 2>&1 &
     VLLM_PID=$!
 
@@ -208,7 +202,7 @@ start_vllm_server() {
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ vLLM server 启动失败，详见 $log_file"
             return 1
         fi
-        if curl -s "http://localhost:${port}/health" > /dev/null 2>&1; then
+        if curl -s "http://localhost:${port}/health/" > /dev/null 2>&1; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ vLLM server 就绪 (pid=$VLLM_PID, 用时 ${waited}s)"
             return 0
         fi

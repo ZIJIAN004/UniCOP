@@ -266,7 +266,7 @@ start_vllm_server() {
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ vLLM server 启动失败，详见 $log_file"
             return 1
         fi
-        if curl -s "http://localhost:${port}/health" > /dev/null 2>&1; then
+        if curl -s "http://localhost:${port}/health/" > /dev/null 2>&1; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ vLLM server 就绪 (pid=$VLLM_PID, 用时 ${waited}s)"
             return 0
         fi

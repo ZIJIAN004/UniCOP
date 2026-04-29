@@ -36,22 +36,24 @@ def _patch_sampling_params(ngram_size: int):
     from vllm import SamplingParams
 
     class _NoRepeatNgramV0:
-        """vLLM V0 logits_processor: (token_ids, logits) -> logits。
-        token_ids = prompt + 已生成 token 拼接（V0 惯例）。"""
+        """vLLM V0 logits_processor: 3-arg signature (prompt_ids, output_ids, logits).
+        V0 uses inspect.signature to detect arg count; 3-arg gets separated lists."""
         __slots__ = ("n",)
 
         def __init__(self, n: int):
             self.n = n
 
-        def __call__(self, token_ids: list[int], logits: torch.Tensor) -> torch.Tensor:
+        def __call__(self, prompt_token_ids: list[int], output_token_ids: list[int],
+                     logits: torch.Tensor) -> torch.Tensor:
             n = self.n
-            if len(token_ids) < n:
+            all_ids = prompt_token_ids + output_token_ids
+            if len(all_ids) < n:
                 return logits
-            suffix = tuple(token_ids[-(n - 1) :])
+            suffix = tuple(all_ids[-(n - 1) :])
             banned = []
-            for i in range(len(token_ids) - n + 1):
-                if tuple(token_ids[i : i + n - 1]) == suffix:
-                    banned.append(token_ids[i + n - 1])
+            for i in range(len(all_ids) - n + 1):
+                if tuple(all_ids[i : i + n - 1]) == suffix:
+                    banned.append(all_ids[i + n - 1])
             if banned:
                 logits[banned] = float("-inf")
             return logits
