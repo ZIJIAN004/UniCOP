@@ -1,20 +1,20 @@
 """
-SFT 训练脚本：用蒸馏数据（Gemini 推理链）微调 DeepSeek-R1-Distill 模型。
+Stage 2 SFT：在 Stage 1 ckpt 上用 Gemini 推理链教 <think>...</think> 推理格式。
 
+基座模型：Stage 1 输出的 Qwen2.5-Instruct ckpt（已学会生成可行解）
 数据来源：generate_chains.py 生成的 chains.jsonl
-训练目标：模型根据原始问题描述，直接生成 <think>...</think> 推理链 + 格式化答案
+训练目标：模型根据原始问题描述，生成 <think>...</think> 推理链 + 格式化答案
 
-⚠️ 重要: 数据构造方式在 2026-04-21 后改为"绕开 chat_template 手动拼接",
-    原因是 R1-Distill 的 chat_template 会吃掉 assistant 消息里的 <think>...</think>
-    推理链(多轮对话优化的副作用),直接 apply_chat_template 会让 SFT 实际训练数据
-    丢失全部 thinking 内容,模型学不到推理链。详见技术配置库 LLM训练踩坑.md。
+⚠️ Qwen2.5-Instruct 的 chat_template 末尾不带 <think>，
+    脚本会自动检测并在 prompt 末尾手动补 <think>\n，无需手动处理。
+    （与 R1-Distill 的 chat_template 吃 think 链问题不同，Qwen2.5 无此坑。）
 
 单卡运行：
-    python train_sft.py
-    python train_sft.py --model /path/to/model --data data/chains.jsonl
+    python stage2_reasoning/train_sft_stage2.py
+    python stage2_reasoning/train_sft_stage2.py --model ./output_sft_stage1/final_model
 
 多卡运行：
-    accelerate launch --num_processes 3 train_sft.py --zero_stage 2 --gradient_checkpointing
+    accelerate launch --num_processes 3 stage2_reasoning/train_sft_stage2.py --zero_stage 2 --gradient_checkpointing
 """
 
 import argparse
@@ -120,30 +120,24 @@ def strip_posthoc_user(user: str) -> str:
 
 
 def load_sft_dataset(data_path: str, tokenizer, max_length: int,
-                     max_output_length: int = 4096) -> Dataset:
+                     max_output_length: int = 4096,
+                     filter_problems=None, filter_sizes=None) -> Dataset:
     """
-    从 chains.jsonl 加载数据，构建 SFT 训练集。
+    从 chains.jsonl 加载数据，构建 Stage 2 SFT 训练集。
 
-    ⚠️ 关键踩坑修复 (2026-04-21):
-        R1-Distill 的 chat_template 对 **所有** role='assistant' 的 content
-        自动执行 `content.split('</think>')[-1]`,把 <think>...</think> 推理链
-        整段吃掉。这是 R1 为多轮对话设计的"历史剥离",但在 SFT 场景下会让
-        模型看到的训练 text 里完全没有 <think>thinking</think>, 模型根本学
-        不到推理链,只学到"<Assistant> 后直接跟 Route:"这个空架子。
-        参见技术配置库: LLM 训练踩坑.md § R1 chat_template 吃 think 链。
-
-    正确做法:
-      - 用 apply_chat_template 只渲染 [system, user] 部分 + add_generation_prompt=True,
-        末尾天然得到 "...<|Assistant|><think>\\n" (chat_template 官方行为)
-      - 手动剥去 Gemini output 开头的 <think>\\n (避免和 prompt 末尾重复)
-      - 拼成完整 text + eos_token
+    基座模型为 Qwen2.5-Instruct（经 Stage 1 微调），其 chat_template 末尾
+    不带 <think>，需手动在 prompt 末尾补 <think>\\n。
+    Qwen2.5 不会吃 assistant 消息里的 <think>...</think>（无 R1-Distill 那个坑），
+    但仍用 prompt+completion 手动拼接方式，与 completion_only_loss=True 配合。
 
     每条样本渲染后的训练 text 结构:
-        <bos>...<|User|>Plan route...<|Assistant|><think>\\n
+        <|im_start|>system\\n...\\n<|im_end|>
+        <|im_start|>user\\nPlan route...\\n<|im_end|>
+        <|im_start|>assistant\\n<think>\\n
         I need to find the shortest route...
         </think>
         Route: 0 -> ... -> 0
-        <eos>
+        <|im_end|>
     """
     records = []
     skipped = 0
@@ -174,7 +168,11 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int,
                 skipped += 1
                 continue
 
-            # 还原原始 prompt
+            if filter_problems and r.get("problem_type") not in filter_problems:
+                continue
+            if filter_sizes and r.get("n") not in filter_sizes:
+                continue
+
             orig_system = strip_posthoc_system(r["prompt"]["system"])
             orig_user   = strip_posthoc_user(r["prompt"]["user"])
             output      = r["output"]
@@ -190,9 +188,10 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int,
                 tokenize=False, add_generation_prompt=True,
             )
 
-            # 2. 探针兜底: 如果 chat_template 没自动加 <think>,手动补
+            # 2. 探针兜底: Qwen2.5-Instruct 的 chat_template 末尾无 <think>,手动补
+            #    注意不能 rstrip()，否则会吃掉 ChatML 格式中 assistant 后的换行符
             if not probe_ends_with_think:
-                prompt_text = prompt_text.rstrip() + "<think>\n"
+                prompt_text += "<think>\n"
 
             # 3. Gemini output 开头必有 <think> (generate_chains.py 强制),
             #    和 prompt 末尾的 <think> 重复,剥掉
@@ -241,14 +240,12 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int,
     print(f"  问题类型分布: {dict(sorted(type_counts.items()))}")
     print(f"  规模分布:     {dict(sorted(size_counts.items()))}")
 
-    # 统计超长样本 (prompt + completion 合计)
-    num_over = 0
-    for r in records:
-        token_len = len(tokenizer.encode(r["prompt"])) + len(tokenizer.encode(r["completion"]))
-        if token_len > max_length:
-            num_over += 1
-    if num_over:
-        print(f"  WARNING: {num_over}/{len(records)} 条样本超过 max_length={max_length}，训练时将被截断")
+    before_filter = len(records)
+    records = [r for r in records
+               if len(tokenizer.encode(r["prompt"])) + len(tokenizer.encode(r["completion"])) <= max_length]
+    skipped_total_len = before_filter - len(records)
+    if skipped_total_len:
+        print(f"  过滤 {skipped_total_len} 条 prompt+completion 超过 max_length={max_length} 的样本")
 
     return Dataset.from_dict({
         "prompt":     [r["prompt"]     for r in records],
@@ -272,6 +269,10 @@ def main():
     # 数据
     parser.add_argument("--data",         type=str, default=DEFAULT_DATA,
                         help="chains.jsonl 文件路径")
+    parser.add_argument("--filter_problems", type=str, nargs="+", default=None,
+                        help="只训练指定问题类型，如 tsp cvrp")
+    parser.add_argument("--filter_sizes", type=int, nargs="+", default=None,
+                        help="只训练指定规模，如 20 50")
     parser.add_argument("--max_length", type=int, default=8192,
                         help="最大序列长度（prompt + completion）。COP 大规模问题"
                              "(CVRP/VRPTW n=50/100) 的 prompt 就有 2000-3000 token,"
@@ -357,7 +358,9 @@ def main():
 
     # ── 加载数据 ─────────────────────────────────────────────────────────
     print("加载训练数据...")
-    dataset = load_sft_dataset(args.data, tokenizer, args.max_length, args.max_output_length)
+    dataset = load_sft_dataset(args.data, tokenizer, args.max_length, args.max_output_length,
+                              filter_problems=args.filter_problems,
+                              filter_sizes=args.filter_sizes)
 
     # 划分训练集和验证集
     if args.val_ratio > 0 and len(dataset) > 10:
@@ -456,6 +459,21 @@ def main():
     save_path = os.path.join(args.output_dir, "final_model")
     trainer.save_model(save_path)
     tokenizer.save_pretrained(save_path)
+
+    if peft_config is not None:
+        if trainer.accelerator.is_main_process:
+            print("合并 LoRA adapter 到基座模型...")
+            from peft import PeftModel
+            base = AutoModelForCausalLM.from_pretrained(
+                args.model, torch_dtype=torch.bfloat16,
+                trust_remote_code=True, device_map="cpu",
+            )
+            merged = PeftModel.from_pretrained(base, save_path).merge_and_unload()
+            merged.save_pretrained(save_path)
+            del base, merged
+            torch.cuda.empty_cache()
+        trainer.accelerator.wait_for_everyone()
+
     print(f"\n模型已保存到: {save_path}")
 
 

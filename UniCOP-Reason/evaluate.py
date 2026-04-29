@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import random
+import re
 import time
 from datetime import datetime
 
@@ -43,6 +44,18 @@ from tqdm import tqdm
 
 from config import config
 from problems import get_problem, SUPPORTED_PROBLEMS
+from terminal_reward import compute_terminal_components
+
+
+def _strip_think_instructions(system: str) -> str:
+    """从 system prompt 中剥离 <think> 推理指令（instruct 模型不需要）。"""
+    system = re.sub(
+        r'Before answering, think through the problem in <think>\.\.\.</think>\.[^\n]*\n?',
+        '', system,
+    )
+    system = system.replace("After completing your analysis, output", "Output")
+    system = re.sub(r'\n{3,}', '\n\n', system).strip()
+    return system
 
 
 # ── 结构化提示词（仅 evaluate 使用，不影响训练） ──────────────────────────────
@@ -561,7 +574,8 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                     problem_size: int, num_samples: int, temperature: float,
                     max_completion_length: int, batch_size: int = 1,
                     save_dir: str | None = None,
-                    prompt_mode: str = "think"):
+                    prompt_mode: str = "think",
+                    model_type: str = "reasoning"):
     """
     评估单个 (problem_type, problem_size) 组合。
 
@@ -579,6 +593,8 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     instance_has_feas = 0
     best_dists       = []
     completion_lens  = []
+    all_coverage     = []
+    all_constraint   = []
 
     # 收集示例:按 "解析成功 / 解析失败" 各多条备选,最终各挑 3 个,
     # 不够的一类用另一类补,总计 6 个。便于定位 parse 逻辑是否出问题。
@@ -592,6 +608,12 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     for _ in range(num_test):
         instance = prob.generate_instance(problem_size, rng)
         prompt   = prob.build_prompt(instance)
+
+        # instruct 模型：剥离 system prompt 中的 <think> 指令
+        if model_type == "instruct":
+            for msg in prompt:
+                if msg["role"] == "system":
+                    msg["content"] = _strip_think_instructions(msg["content"])
 
         # structured 模式：替换 system prompt 和 user 末尾输出格式
         if prompt_mode == "structured":
@@ -630,6 +652,10 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             comp_len = num_tokens if num_tokens is not None else len(completion)
             completion_lens.append(comp_len)
 
+            tc = compute_terminal_components(completion, instance, problem_type)
+            all_coverage.append(tc["coverage"])
+            all_constraint.append(tc["constraint"])
+
             dist = prob.get_tour_distance(completion, instance)
             parsed = dist is not None
             if parsed:
@@ -653,6 +679,8 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
 
     # ── 计算指标 ──────────────────────────────────────────────────────
     parse_rate         = total_parsed / total_samples if total_samples else 0
+    coverage_rate      = float(np.mean(all_coverage)) if all_coverage else 0.0
+    constraint_rate    = float(np.mean(all_constraint)) if all_constraint else 0.0
     global_feas_rate   = total_feasible / total_samples if total_samples else 0
     instance_feas_rate = instance_has_feas / num_test
     truncation_rate    = total_truncated / total_samples if total_samples else 0
@@ -667,6 +695,8 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     print(f"  推理链长度:   avg={avg_comp_len:.0f}  min={min_comp_len}  max={max_comp_len} tokens")
     print(f"  截断率:       {truncation_rate:.2%}  ({total_truncated}/{total_samples})")
     print(f"  格式匹配率:   {parse_rate:.2%}  ({total_parsed}/{total_samples})")
+    print(f"  覆盖率:       {coverage_rate:.2%}")
+    print(f"  约束满足率:   {constraint_rate:.4f}")
     print(f"  全局可行率:   {global_feas_rate:.2%}  ({total_feasible}/{total_samples})")
     print(f"  实例可行率:   {instance_feas_rate:.2%}  ({instance_has_feas}/{num_test})")
     print(f"  最优距离均值: {avg_best_dist:.4f}  ({len(best_dists)} 个可行实例)")
@@ -743,6 +773,8 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
         "max_completion_tokens": max_comp_len,
         "truncation_rate":      round(truncation_rate, 4),
         "format_match_rate":    round(parse_rate, 4),
+        "coverage_rate":        round(coverage_rate, 4),
+        "constraint_rate":      round(constraint_rate, 4),
         "global_feasibility_rate":   round(global_feas_rate, 4),
         "instance_feasibility_rate": round(instance_feas_rate, 4),
         "avg_best_dist":        round(avg_best_dist, 4) if not np.isnan(avg_best_dist) else None,
@@ -915,26 +947,29 @@ def main():
             generate_fn, problem_type, args.num_test,
             problem_size, args.num_samples, args.temperature,
             max_completion_length, args.batch_size, args.save_dir,
-            prompt_mode,
+            prompt_mode, args.model_type,
         )
         results["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         all_results.append(results)
 
     # ── 汇总表格 ─────────────────────────────────────────────────────
     if len(all_results) > 1:
-        print(f"\n{'='*98}")
+        print(f"\n{'='*112}")
         print(f"{'Problem':<10} {'n':>4}  {'AvgTok':>7}  {'Trunc%':>7}  "
-              f"{'Parse%':>7}  {'GFeas%':>7}  {'IFeas%':>7}  {'AvgDist':>9}")
-        print(f"{'─'*98}")
+              f"{'Parse%':>7}  {'Cov%':>7}  {'Constr':>7}  "
+              f"{'GFeas%':>7}  {'IFeas%':>7}  {'AvgDist':>9}")
+        print(f"{'─'*112}")
         for r in all_results:
             dist_str = f"{r['avg_best_dist']:.4f}" if r['avg_best_dist'] is not None else "N/A"
             print(f"{r['problem_type']:<10} {r['problem_size']:>4}  "
                   f"{r['avg_completion_tokens']:>7.0f}  "
                   f"{r['truncation_rate']:>7.2%}  "
                   f"{r['format_match_rate']:>7.2%}  "
+                  f"{r['coverage_rate']:>7.2%}  "
+                  f"{r['constraint_rate']:>7.4f}  "
                   f"{r['global_feasibility_rate']:>7.2%}  {r['instance_feasibility_rate']:>7.2%}  "
                   f"{dist_str:>9}")
-        print(f"{'='*98}")
+        print(f"{'='*112}")
 
     # ── 保存结果 ──────────────────────────────────────────────────────
     if args.save_dir:

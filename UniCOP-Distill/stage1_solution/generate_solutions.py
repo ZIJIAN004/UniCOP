@@ -28,6 +28,7 @@ Stage 1 数据生成：用传统求解器批量生成 (问题, 解) 对。
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -52,6 +53,17 @@ from lkh_solver import solve as lkh_solve, LKH_BIN  # noqa: E402
 PROBLEM_TYPES = ["tsp", "cvrp", "tsptw", "vrptw"]
 NODE_SIZES = [20, 50, 100]
 _SCKEY = "SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
+
+
+def _strip_think_instructions(system: str) -> str:
+    """从 system prompt 中剥离 <think> 推理指令（Stage 1 不需要思维链引导）。"""
+    system = re.sub(
+        r'Before answering, think through the problem in <think>\.\.\.</think>\.[^\n]*\n?',
+        '', system,
+    )
+    system = system.replace("After completing your analysis, output", "Output")
+    system = re.sub(r'\n{3,}', '\n\n', system).strip()
+    return system
 
 
 def load_existing_ids(output_path: str) -> set:
@@ -110,7 +122,7 @@ def _solve_one(args_tuple):
     prompt_dict = {}
     for msg in orig_prompt:
         if msg["role"] == "system":
-            prompt_dict["system"] = msg["content"]
+            prompt_dict["system"] = _strip_think_instructions(msg["content"])
         elif msg["role"] == "user":
             prompt_dict["user"] = msg["content"]
 
@@ -131,7 +143,7 @@ def main():
     parser.add_argument("--problems", type=str, nargs="+", default=PROBLEM_TYPES,
                         choices=PROBLEM_TYPES)
     parser.add_argument("--sizes", type=int, nargs="+", default=NODE_SIZES)
-    parser.add_argument("--num_samples", type=int, default=500,
+    parser.add_argument("--num_samples", type=int, default=50000,
                         help="每个 (problem, n) 组合的样本数")
     parser.add_argument("--lkh_bin", type=str, default=os.environ.get("LKH_BIN", LKH_BIN))
     parser.add_argument("--lkh_timeout", type=int, default=60)
