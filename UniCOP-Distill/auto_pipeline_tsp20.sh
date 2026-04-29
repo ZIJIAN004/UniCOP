@@ -19,6 +19,9 @@ export CUDA_HOME=/home/ntu/anaconda3/envs/zjh
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
 
+# LKH 求解器
+export LKH_BIN=/home/ntu/LKH/LKH
+
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 notify() {
     local title="${1:0:100}"
