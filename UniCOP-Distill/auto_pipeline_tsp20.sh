@@ -97,7 +97,7 @@ notify "Step1 完成: TSP20 数据生成"
 echo ""
 echo ">>> Step 2: Stage 1 SFT..."
 wait_for_gpus $NUM_GPUS
-accelerate launch --num_processes $NUM_GPUS \
+accelerate launch --num_processes $NUM_GPUS --main_process_port 29600 \
     stage1_solution/train_sft_stage1.py \
     --data data/solutions_tsp20.jsonl \
     --output_dir ./output_sft_stage1_tsp20 \
@@ -164,7 +164,7 @@ if [ "$TSP20_COUNT" -lt 10 ]; then
 fi
 
 wait_for_gpus $NUM_GPUS
-accelerate launch --num_processes $NUM_GPUS \
+accelerate launch --num_processes $NUM_GPUS --main_process_port 29600 \
     stage2_reasoning/train_sft_stage2.py \
     --model ./output_sft_stage1_tsp20/final_model \
     --data "$CHAINS_FILE" \
