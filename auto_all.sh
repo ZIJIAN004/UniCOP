@@ -42,10 +42,10 @@ mkdir -p "$LOG_DIR" "$EVAL_RESULT_DIR"
 # ══════════════════════════════════════════════════════════════════════
 # GPU 调度参数
 # ══════════════════════════════════════════════════════════════════════
-TOTAL_GPUS=4
-SFT_GPUS=4
+TOTAL_GPUS=3
+SFT_GPUS=3
 GRPO_INIT_GPUS=3
-EVAL_GPUS=4
+EVAL_GPUS=3
 GPU_FREE_MEM_THRESHOLD_MB=500
 FREE_GPUS=""
 
@@ -55,7 +55,7 @@ SFT_INIT_BATCH_SIZE=4
 # ── GRPO 训练矩阵 ────────────────────────────────────────────────────
 GRPO_PROBLEMS=("tsptw" "cvrp")
 GRPO_SIZES=(20)
-GRPO_ZERO_STAGE=2
+GRPO_ZERO_STAGE=3
 
 # ── vLLM server 参数 ─────────────────────────────────────────────────
 VLLM_PORT_BASE=8000

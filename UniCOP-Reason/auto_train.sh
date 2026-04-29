@@ -100,7 +100,7 @@ notify() {
 # 完整矩阵 (TSP/VRPTW × 20/50/100) 待首轮验证通过后再恢复。
 PROBLEMS=("tsp")
 SIZES=(20)
-ZERO_STAGE=2
+ZERO_STAGE=3
 OUTPUT_DIR_BASE="$WORK_DIR/output"
 
 # ── 评估参数 ─────────────────────────────────────────────────────────
