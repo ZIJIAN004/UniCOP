@@ -108,11 +108,12 @@ accelerate launch --num_processes $NUM_GPUS --main_process_port 29600 \
     stage1_solution/train_sft_stage1.py \
     --data data/solutions_tsp20.jsonl \
     --output_dir ./output_sft_stage1_tsp20 \
-    --zero_stage 2 \
+    --lora_rank 64 --lora_alpha 128 \
+    --zero_stage 3 \
     --gradient_checkpointing \
-    --epochs 2 \
-    --batch_size 2 \
-    --grad_accum 4 \
+    --epochs 3 \
+    --batch_size 1 \
+    --grad_accum 8 \
     --lr 1e-4 \
     --save_steps 500
 notify "Step2 完成: Stage1 SFT"
@@ -177,14 +178,15 @@ accelerate launch --num_processes $NUM_GPUS --main_process_port 29600 \
     --data "$CHAINS_FILE" \
     --filter_problems tsp \
     --filter_sizes 20 \
+    --lora_rank 64 --lora_alpha 128 \
     --max_length 4096 \
     --output_dir ./output_sft_stage2_tsp20 \
-    --zero_stage 2 \
+    --zero_stage 3 \
     --gradient_checkpointing \
     --epochs 3 \
     --batch_size 1 \
     --grad_accum 8 \
-    --lr 5e-5 \
+    --lr 1e-4 \
     --save_steps 100
 notify "Step4 完成: Stage2 SFT"
 
