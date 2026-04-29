@@ -54,11 +54,21 @@ PROBLEM_TYPES = ["tsp", "cvrp", "tsptw", "vrptw"]
 NODE_SIZES = [20, 50, 100]
 _SCKEY = "SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
 
-# 按问题规模自动缩放求解器参数（runs 仅影响 LKH/TSP，timeout 影响所有求解器）
+# 按 (问题类型, 规模) 自动缩放求解器参数
+# runs 仅影响 LKH/TSP；timeout 影响所有求解器（PyVRP 用 MaxRuntime）
 _SOLVER_PARAMS = {
-    20:  {"runs": 5,  "timeout": 10},
-    50:  {"runs": 5,  "timeout": 30},
-    100: {"runs": 10, "timeout": 120},
+    ("tsp",   20):  {"runs": 5,  "timeout": 10},
+    ("tsp",   50):  {"runs": 5,  "timeout": 30},
+    ("tsp",  100):  {"runs": 10, "timeout": 120},
+    ("cvrp",  20):  {"runs": 1,  "timeout": 15},
+    ("cvrp",  50):  {"runs": 1,  "timeout": 60},
+    ("cvrp", 100):  {"runs": 1,  "timeout": 180},
+    ("tsptw", 20):  {"runs": 1,  "timeout": 15},
+    ("tsptw", 50):  {"runs": 1,  "timeout": 60},
+    ("tsptw",100):  {"runs": 1,  "timeout": 180},
+    ("vrptw", 20):  {"runs": 1,  "timeout": 20},
+    ("vrptw", 50):  {"runs": 1,  "timeout": 90},
+    ("vrptw",100):  {"runs": 1,  "timeout": 240},
 }
 _SOLVER_PARAMS_DEFAULT = {"runs": 10, "timeout": 120}
 
@@ -120,7 +130,7 @@ def _solve_one(args_tuple):
 
     instance = problem.generate_instance(n, rng)
 
-    params = _SOLVER_PARAMS.get(n, _SOLVER_PARAMS_DEFAULT)
+    params = _SOLVER_PARAMS.get((pt, n), _SOLVER_PARAMS_DEFAULT)
     solution = lkh_solve(pt, instance, lkh_bin=lkh_bin,
                          runs=params["runs"], seed=seed, timeout=params["timeout"])
     if solution is None:
@@ -193,7 +203,7 @@ def main():
     with open(args.output, "a", encoding="utf-8") as fout:
         for pt, n, gap in combos_need:
             current = valid_counts.get((pt, n), 0)
-            params = _SOLVER_PARAMS.get(n, _SOLVER_PARAMS_DEFAULT)
+            params = _SOLVER_PARAMS.get((pt, n), _SOLVER_PARAMS_DEFAULT)
             print(f"[{pt}_n{n}] 已有 {current}/{args.num_samples}，需补充 {gap} 条"
                   f"  (runs={params['runs']}, timeout={params['timeout']}s)")
 
