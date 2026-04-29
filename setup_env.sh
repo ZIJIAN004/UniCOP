@@ -45,7 +45,7 @@ echo ""
 echo "=========================================="
 echo "Step 5: 安装 TRL 0.16.0 + HuggingFace 生态"
 echo "=========================================="
-pip install 'trl==0.16.0' 'transformers>=4.46,<5.0' 'huggingface-hub>=0.27,<1.0'
+pip install 'trl==0.16.0' 'transformers>=4.46,<=4.51.3' 'huggingface-hub>=0.27,<1.0'
 python -c "from trl import GRPOConfig, GRPOTrainer; print('TRL OK')"
 
 echo ""

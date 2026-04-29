@@ -45,6 +45,9 @@ class GRPOPRMTrainer(GRPOTrainer):
                 f"当前 = {self.args.num_generations}"
             )
 
+    def _get_train_sampler(self, dataset=None):
+        return super()._get_train_sampler()
+
     # ── 多卡聚合工具 ──────────────────────────────────────────────────
 
     def _gather_mean(self, value) -> float:
