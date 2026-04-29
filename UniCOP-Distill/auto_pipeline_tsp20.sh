@@ -14,8 +14,8 @@ NUM_GPUS=4
 GPU_MEM_THRESHOLD=2000    # MB，低于此值视为空闲
 SCKEY="SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
 
-# CUDA（DeepSpeed 编译需要）
-export CUDA_HOME=/Data04/yangzhihan/envs/analog_env
+# CUDA（DeepSpeed 编译需要，与项目其他脚本保持一致）
+export CUDA_HOME=/home/ntu/anaconda3/envs/unicop
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
 
@@ -136,7 +136,7 @@ echo ">>> Step 4: Stage 2 SFT..."
 CHAINS_FILE="data/chains_v3_clean.jsonl"
 if [ ! -f "$CHAINS_FILE" ]; then
     echo "ERROR: $CHAINS_FILE 不存在"
-    echo "请先运行 generate_chains.py 生成 TSP n=20 的推理链数据"
+    echo "请将 chains_v3_clean.jsonl 复制到 $DISTILL_DIR/data/ 目录"
     notify "Pipeline 中止: 缺少 Stage2 chains 数据"
     exit 1
 fi
@@ -144,7 +144,7 @@ fi
 TSP20_COUNT=$(python -c "
 import json
 count = 0
-with open('$CHAINS_FILE') as f:
+with open('$CHAINS_FILE', encoding='utf-8') as f:
     for line in f:
         line = line.strip()
         if not line: continue
