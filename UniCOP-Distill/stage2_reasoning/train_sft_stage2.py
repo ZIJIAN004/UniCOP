@@ -25,7 +25,7 @@ import torch
 
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
-from trl import SFTConfig, SFTTrainer
+from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
 from peft import LoraConfig
 
 
@@ -431,15 +431,20 @@ def main():
         # 会报 "Recomputed values shape [0]"。社区 workaround 是强制 use_reentrant=True
         # (trl#2514, peft#1142)。与 UniCOP-Reason/train.py 保持一致。
         gradient_checkpointing_kwargs={"use_reentrant": True},
-        # 不再用 dataset_text_field="text" (language modeling 模式,会对 prompt 也做 loss)
-        # 改用 prompt+completion 格式,显式 completion_only_loss=True 只对 completion 做 loss。
-        # 这样 prompt (system/user/<|Assistant|><think>\n) 被 mask 成 -100,
-        # 梯度全部用在 thinking + </think> + Route + <eos> 上, 效率翻倍。
-        completion_only_loss=True,
         eval_strategy="steps" if eval_dataset else "no",
         eval_steps=args.save_steps if eval_dataset else None,
         lr_scheduler_type="cosine",
         weight_decay=0.01,
+    )
+
+    # ── Completion-only loss（TRL 0.16 不支持 SFTConfig.completion_only_loss）──
+    response_template_ids = tokenizer.encode(
+        "<|im_start|>assistant\n", add_special_tokens=False,
+    )
+    print(f"  response_template token IDs: {response_template_ids}")
+    data_collator = DataCollatorForCompletionOnlyLM(
+        response_template=response_template_ids,
+        tokenizer=tokenizer,
     )
 
     # ── 训练 ─────────────────────────────────────────────────────────────
@@ -450,6 +455,7 @@ def main():
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
         peft_config=peft_config,
+        data_collator=data_collator,
     )
 
     print("\n开始 SFT 训练...")

@@ -112,8 +112,8 @@ accelerate launch --num_processes $NUM_GPUS --main_process_port 29600 \
     --zero_stage 3 \
     --gradient_checkpointing \
     --epochs 3 \
-    --batch_size 1 \
-    --grad_accum 8 \
+    --batch_size 4 \
+    --grad_accum 2 \
     --lr 1e-4 \
     --save_steps 500
 notify "Step2 完成: Stage1 SFT"
