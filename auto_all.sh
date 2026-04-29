@@ -55,7 +55,7 @@ SFT_INIT_BATCH_SIZE=4
 # ── GRPO 训练矩阵 ────────────────────────────────────────────────────
 GRPO_PROBLEMS=("tsptw" "cvrp")
 GRPO_SIZES=(20)
-GRPO_ZERO_STAGE=3
+GRPO_ZERO_STAGE=2
 
 # ── vLLM server 参数 ─────────────────────────────────────────────────
 VLLM_PORT_BASE=8000
