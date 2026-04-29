@@ -37,6 +37,8 @@ from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 
+from tqdm import tqdm
+
 import numpy as np
 
 # ── 路径设置 ──────────────────────────────────────────────────────────────────
@@ -227,7 +229,11 @@ def main():
             failed = 0
             with ProcessPoolExecutor(max_workers=args.workers) as pool:
                 futures = {pool.submit(_solve_one, t): t for t in tasks}
-                for future in as_completed(futures):
+                pbar = tqdm(as_completed(futures), total=len(tasks),
+                            desc=f"    {pt}_n{n}", unit="sample",
+                            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] ok={postfix[0]} fail={postfix[1]}",
+                            postfix=[0, 0])
+                for future in pbar:
                     record = future.result()
                     if record is not None:
                         fout.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -236,10 +242,8 @@ def main():
                         saved += 1
                     else:
                         failed += 1
-
-                    total_done = saved + failed
-                    if total_done % 100 == 0:
-                        print(f"    进度: {total_done}/{len(tasks)}  (成功 {saved}, 失败 {failed})")
+                    pbar.postfix[0] = saved
+                    pbar.postfix[1] = failed
 
             print(f"    完成: 成功 {saved}/{len(tasks)}，失败 {failed}")
 
