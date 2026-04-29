@@ -84,7 +84,7 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "reduce_bucket_size":             "auto",
             "stage3_prefetch_bucket_size":    "auto",
             "stage3_param_persistence_threshold": 1_000_000,
-            "stage3_max_live_parameters":     1e9,
+            "stage3_max_live_parameters":     1e8,
             "stage3_max_reuse_distance":      1e9,
             "gather_16bit_weights_on_model_save": True,
             "offload_optimizer": {

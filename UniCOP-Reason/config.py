@@ -57,7 +57,7 @@ class Config:
     # ── POMO PRM ─────────────────────────────────────────────────────
     pomo_ckpt_dir: str      = ""    # POMO checkpoint 根目录，子目录格式: {type}_n{size}/MODEL_BEST.pt
     pomo_baseline_dir: str  = ""    # POMO-Baseline 项目根目录（用于导入模型/环境代码）
-    pomo_device: str        = "cuda"
+    pomo_device: str        = "cpu"
     # TSPTW 走 PIP-D (NeurIPS 2024) backbone,与 POMO 参数并存
     pipd_ckpt_dir: str      = ""    # 指向 {PIP-D baseline}/POMO+PIP/pretrained/TSPTW
     pipd_dir: str           = ""    # 指向 {PIP-D baseline}/POMO+PIP (代码目录,用于 sys.path 注入)
