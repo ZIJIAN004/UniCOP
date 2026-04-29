@@ -14,8 +14,8 @@ NUM_GPUS=4
 GPU_MEM_THRESHOLD=2000    # MB，低于此值视为空闲
 SCKEY="SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
 
-# CUDA（DeepSpeed 编译需要，与项目其他脚本保持一致）
-export CUDA_HOME=/home/ntu/anaconda3/envs/unicop
+# CUDA（DeepSpeed 编译需要，nvcc 在 zjh env 中）
+export CUDA_HOME=/home/ntu/anaconda3/envs/zjh
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
 
