@@ -271,9 +271,10 @@ def _write_par(par_f, prob_f, tour_f, runs, seed, timeout=60):
 
 
 def _run_lkh(lkh_bin, par_f, timeout):
+    # subprocess timeout 比 LKH TIME_LIMIT 宽裕 30s，防止 LKH 写 tour 文件时被 kill
     result = subprocess.run(
         [lkh_bin, par_f],
-        capture_output=True, text=True, timeout=timeout
+        capture_output=True, text=True, timeout=timeout + 30
     )
     if result.returncode != 0:
         raise RuntimeError(f"LKH 返回非零状态码: {result.returncode}\n{result.stderr[:500]}")

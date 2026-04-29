@@ -75,7 +75,7 @@ if [ -f "$SOLUTIONS_FILE" ]; then
             --sizes 20 \
             --num_samples $TARGET_SAMPLES \
             --output "$SOLUTIONS_FILE" \
-            --workers 8
+            --workers 32
     fi
 else
     echo "  数据文件不存在，开始生成..."
@@ -84,7 +84,7 @@ else
         --sizes 20 \
         --num_samples $TARGET_SAMPLES \
         --output "$SOLUTIONS_FILE" \
-        --workers 8
+        --workers 32
 fi
 notify "Step1 完成: TSP20 数据生成"
 
