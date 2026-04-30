@@ -87,6 +87,31 @@ check_model_state() {
     echo "none"
 }
 
+# 检测评估结果是否已存在（匹配 model_path 后缀 + problem + size + model_type）
+check_eval_exists() {
+    local eval_dir="$1"
+    local model_suffix="$2"
+    local problem="$3"
+    local size="$4"
+    local model_type="$5"
+    python -c "
+import json, glob, sys
+for f in sorted(glob.glob('${eval_dir}/*.json'), reverse=True):
+    try:
+        with open(f) as fp:
+            d = json.load(fp)
+        hp = d.get('hyperparams', {})
+        if hp.get('model_path','').endswith('${model_suffix}') \
+           and '${problem}' in hp.get('problems', []) \
+           and ${size} in hp.get('problem_sizes', []) \
+           and hp.get('model_type') == '${model_type}':
+            print(f)
+            sys.exit(0)
+    except: pass
+sys.exit(1)
+" 2>/dev/null
+}
+
 cd "$DISTILL_DIR"
 
 echo "============================================================"
@@ -177,20 +202,26 @@ esac
 # ══════════════════════════════════════════════════════════════════
 echo ""
 echo ">>> Step 3: 评估 Stage 1..."
-cd "$REASON_DIR"
-python evaluate.py \
-    --backend local \
-    --model_path "$DISTILL_DIR/$STAGE1_OUT/final_model" \
-    --problem $PROBLEM \
-    --problem_size $SIZE \
-    --model_type instruct \
-    --max_completion_length 512 \
-    --num_test 100 \
-    --num_samples 1 \
-    --batch_size 8 \
-    --save_dir "$DISTILL_DIR/eval_results"
-cd "$DISTILL_DIR"
-notify "Step3 完成: Stage1 评估"
+
+EVAL1_FILE=$(check_eval_exists "$DISTILL_DIR/eval_results" "$STAGE1_OUT/final_model" "$PROBLEM" "$SIZE" "instruct") || true
+if [ -n "$EVAL1_FILE" ]; then
+    echo "  已有评估结果: $EVAL1_FILE，跳过"
+else
+    cd "$REASON_DIR"
+    python evaluate.py \
+        --backend local \
+        --model_path "$DISTILL_DIR/$STAGE1_OUT/final_model" \
+        --problem $PROBLEM \
+        --problem_size $SIZE \
+        --model_type instruct \
+        --max_completion_length 512 \
+        --num_test 100 \
+        --num_samples 1 \
+        --batch_size 8 \
+        --save_dir "$DISTILL_DIR/eval_results"
+    cd "$DISTILL_DIR"
+    notify "Step3 完成: Stage1 评估"
+fi
 
 # ══════════════════════════════════════════════════════════════════
 # Step 4: Stage 2 SFT (学 <think> 推理链)
@@ -270,19 +301,25 @@ esac
 # ══════════════════════════════════════════════════════════════════
 echo ""
 echo ">>> Step 5: 评估 Stage 2..."
-cd "$REASON_DIR"
-python evaluate.py \
-    --backend local \
-    --model_path "$DISTILL_DIR/$STAGE2_OUT/final_model" \
-    --problem $PROBLEM \
-    --problem_size $SIZE \
-    --model_type reasoning \
-    --max_completion_length 4096 \
-    --num_test 100 \
-    --num_samples 1 \
-    --batch_size 4 \
-    --save_dir "$DISTILL_DIR/eval_results"
-cd "$DISTILL_DIR"
+
+EVAL2_FILE=$(check_eval_exists "$DISTILL_DIR/eval_results" "$STAGE2_OUT/final_model" "$PROBLEM" "$SIZE" "reasoning") || true
+if [ -n "$EVAL2_FILE" ]; then
+    echo "  已有评估结果: $EVAL2_FILE，跳过"
+else
+    cd "$REASON_DIR"
+    python evaluate.py \
+        --backend local \
+        --model_path "$DISTILL_DIR/$STAGE2_OUT/final_model" \
+        --problem $PROBLEM \
+        --problem_size $SIZE \
+        --model_type reasoning \
+        --max_completion_length 4096 \
+        --num_test 100 \
+        --num_samples 1 \
+        --batch_size 4 \
+        --save_dir "$DISTILL_DIR/eval_results"
+    cd "$DISTILL_DIR"
+fi
 notify "Pipeline 全部完成: Stage1+Stage2 ${PROBLEM^^}${SIZE}"
 
 echo ""
