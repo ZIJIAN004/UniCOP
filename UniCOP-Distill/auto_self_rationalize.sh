@@ -15,8 +15,13 @@
 
 set -euo pipefail
 
-# ── 配置 ──────────────────────────────────────────────────────────────────────
+# ── 自动 log ─────────────────────────────────────────────────────────────────
 DISTILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG_FILE="$DISTILL_DIR/self_rationalize_$(date '+%Y%m%d_%H%M%S').log"
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "日志文件: $LOG_FILE"
+
+# ── 配置 ──────────────────────────────────────────────────────────────────────
 
 MODEL_PATH="/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
 SOLUTIONS_FILE="data/solutions_cvrp20.jsonl"
