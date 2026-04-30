@@ -112,6 +112,9 @@ echo "============================================================"
 echo ""
 echo ">>> Step 1: 启动 $NUM_GPUS 个 vLLM 服务器..."
 
+VLLM_LOG_DIR="$DISTILL_DIR/vllm_logs"
+mkdir -p "$VLLM_LOG_DIR"
+
 for gpu in $(seq 0 $((NUM_GPUS - 1))); do
     port=$((VLLM_BASE_PORT + gpu))
     CUDA_VISIBLE_DEVICES=$gpu python "$DISTILL_DIR/vllm_serve_ngram.py" \
@@ -119,9 +122,12 @@ for gpu in $(seq 0 $((NUM_GPUS - 1))); do
         --port $port \
         --no_repeat_ngram_size $NGRAM_SIZE \
         --dtype bfloat16 \
-        --max-model-len $VLLM_MAX_MODEL_LEN &
+        --max-model-len $VLLM_MAX_MODEL_LEN \
+        --disable-log-requests \
+        --disable-log-stats \
+        > "$VLLM_LOG_DIR/gpu${gpu}.log" 2>&1 &
     VLLM_PIDS+=($!)
-    echo "  GPU $gpu → :${port} (PID=${VLLM_PIDS[-1]})"
+    echo "  GPU $gpu → :${port} (PID=${VLLM_PIDS[-1]}, log: vllm_logs/gpu${gpu}.log)"
 done
 
 echo "  等待所有服务器就绪..."
