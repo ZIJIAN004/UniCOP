@@ -112,6 +112,8 @@ def _parse_routes(text: str) -> tuple[list[list[int]], str]:
         if not customers or 0 in customers:
             return [], "BAD_DEPOT"
         routes.append(customers)
+    if not routes:
+        return [], "NO_ROUTES"
     return routes, "ok"
 
 
@@ -126,7 +128,7 @@ def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
     if len(think_content.strip()) < 100:
         return False, "THINK_TOO_SHORT"
 
-    if think_content.count("0 ->") > 1:
+    if re.search(r"Route\s+\d+\s*:", think_content, re.IGNORECASE):
         return False, "ROUTE_IN_THINK"
 
     think_lower = think_content.lower()
