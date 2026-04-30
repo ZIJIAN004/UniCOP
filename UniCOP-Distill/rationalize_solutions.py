@@ -93,16 +93,18 @@ def calc_max_model_len(solutions: list, max_tokens: int, tokenizer_path: str) ->
     return aligned
 
 
-def _parse_route_nodes(text: str) -> list[int] | None:
+def _parse_routes(text: str) -> list[list[int]] | None:
     import re
-    nodes = []
+    routes = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not re.match(r"Route\s+\d+", line, re.IGNORECASE):
             continue
         nums = [int(x) for x in re.findall(r"\d+", line.split(":", 1)[-1])]
-        nodes.extend(n for n in nums if n != 0)
-    return sorted(nodes) if nodes else None
+        route = [n for n in nums if n != 0]
+        if route:
+            routes.append(route)
+    return routes if routes else None
 
 
 def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
@@ -125,12 +127,12 @@ def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
             return False, f"LEAK:{pattern}"
 
     answer_part = output[think_end + len("</think>"):]
-    model_nodes = _parse_route_nodes(answer_part)
-    lkh_nodes = _parse_route_nodes(lkh_solution)
-    if model_nodes is None:
+    model_routes = _parse_routes(answer_part)
+    lkh_routes = _parse_routes(lkh_solution)
+    if model_routes is None:
         return False, "NO_ROUTES_IN_ANSWER"
-    if model_nodes != lkh_nodes:
-        return False, "NODES_MISMATCH"
+    if model_routes != lkh_routes:
+        return False, "ROUTES_MISMATCH"
 
     return True, "ok"
 
