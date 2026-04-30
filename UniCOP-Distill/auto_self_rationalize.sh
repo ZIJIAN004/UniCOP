@@ -185,7 +185,7 @@ python rationalize_solutions.py \
     --size $SIZE \
     --num_samples $NUM_SAMPLES \
     --max_tokens $SFT_MAX_TOKENS \
-    --concurrency $((NUM_GPUS * 8))
+    --concurrency $((NUM_GPUS * 16))
 
 ACTUAL_COUNT=$(grep -c '^{' "$CHAINS_FILE" 2>/dev/null || echo 0)
 echo "  实际生成: $ACTUAL_COUNT 条"
