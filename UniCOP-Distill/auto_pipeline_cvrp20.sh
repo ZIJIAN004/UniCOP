@@ -35,6 +35,7 @@ STAGE2_OUT="output_sft_stage2_cvrp20"
 export CUDA_HOME=/home/ntu/anaconda3/envs/unicop
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 notify() {

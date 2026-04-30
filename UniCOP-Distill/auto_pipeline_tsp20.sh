@@ -35,6 +35,7 @@ STAGE2_OUT="output_sft_stage2_tsp20"
 export CUDA_HOME=/home/ntu/anaconda3/envs/unicop
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # LKH 求解器
 export LKH_BIN=/home/ntu/LKH/LKH
