@@ -1,34 +1,33 @@
 """
 generate_chains.py
-后验推理蒸馏数据生成脚本：先用 LKH 求近最优解，再让 Gemini 给出简短推理链。
+后验推理蒸馏数据生成脚本：先用 LKH 求近最优解，再让 LLM 给出推理链（rationalization）。
+
+支持两种后端：
+  - gemini: Vertex AI Gemini（需 GCP 认证）
+  - vllm:   本地 vLLM 服务器（R1-Distill 自举 rationalization，零 API 成本）
 
 Pipeline：
   1. 生成 COP 实例
   2. LKH 求解 → 近最优答案
-  3. 构建后验推理 prompt：告知 Gemini 答案，要求简短解释推理
-  4. Gemini 输出 <think>...</think> + 答案
-  5. 保存数据
-
-输出格式（JSONL，每行一条）：
-  {
-    "id":            "tsp_n20_s42_i0",
-    "problem_type":  "tsp",
-    "n":             20,
-    "sample_idx":    0,
-    "prompt":        {"system": "...", "user": "..."},  <- 发给 Gemini 的后验推理 prompt
-    "lkh_answer":    "Route: 0 -> 3 -> ...",            <- LKH 原始答案（参考/校验用）
-    "output":        "<think>...</think>\nRoute: ...",  <- Gemini 完整输出，直接用于 SFT
-    "output_tokens": 360,
-    "prompt_tokens": 195,
-    "total_tokens":  555,
-    "timestamp":     "2026-03-25T10:00:00"
-  }
+  3. 构建后验推理 prompt：告知 LLM 答案，要求假装从零求解
+  4. LLM 输出 <think>...</think> + 答案
+  5. 质量过滤（格式 + 泄露检测）→ 保存数据
 
 运行示例：
-  python generate_chains.py \
-      --credentials /path/to/key.json --project my-gcp-project \
-      --lkh_bin /path/to/LKH3
-  python generate_chains.py ... --problems tsp --sizes 5 10 --num_samples 5
+  # Gemini 后端
+  python generate_chains.py --backend gemini \
+      --credentials /path/to/key.json --project my-gcp-project
+
+  # vLLM 后端（R1-Distill 自举）
+  # 先启动 vLLM 服务器（带 ngram 抑制）：
+  #   python vllm_serve_ngram.py \
+  #       --model /path/to/DeepSeek-R1-Distill-Qwen-7B \
+  #       --no_repeat_ngram_size 6 --dtype bfloat16
+  # 再运行本脚本：
+  python generate_chains.py --backend vllm \
+      --problems cvrp --sizes 20 --num_samples 1000 \
+      --output data/chains_self.jsonl
+
   python generate_chains.py --stats_only
 """
 
@@ -74,6 +73,18 @@ _POSTHOC_SUFFIX = (
     "4. After </think>, output the solution exactly in the required format.\n"
     "5. Do NOT output the solution before <think>. The solution ONLY appears after </think>."
 )
+
+_LEAK_PATTERNS = [
+    "given the solution", "given the answer", "given to me", "given this solution",
+    "provided to me", "provided the solution", "provided the answer",
+    "target solution", "target answer", "target route",
+    "reconstruct", "reverse engineer",
+    "pretend", "act as if", "fabricat",
+    "was told to", "asked to explain", "asked to justify",
+    "known answer", "know the answer", "already know",
+    "post-hoc", "posthoc", "post hoc",
+    "working backward", "work backward",
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -129,6 +140,7 @@ def _output_quality_check(output: str) -> tuple[bool, str]:
     检查输出质量：
     1. 必须有 <think>...</think> 标签
     2. think 内不能复制路线（0 -> 出现 <= 1 次）
+    3. think 内不能泄露"答案是给定的"等 rationalization 痕迹
     返回 (通过, 原因)
     """
     if "<think>" not in output or "</think>" not in output:
@@ -140,6 +152,11 @@ def _output_quality_check(output: str) -> tuple[bool, str]:
 
     if think_content.count("0 ->") > 1:
         return False, "ROUTE_IN_THINK"
+
+    think_lower = think_content.lower()
+    for pattern in _LEAK_PATTERNS:
+        if pattern in think_lower:
+            return False, f"LEAK:{pattern}"
 
     return True, "ok"
 
@@ -225,6 +242,39 @@ def call_gemini(client, system: str, user: str, model: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# vLLM 本地后端（OpenAI-compatible API）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_vllm_client(base_url: str):
+    from openai import OpenAI
+    return OpenAI(base_url=base_url, api_key="dummy")
+
+
+def call_vllm(vllm_client, system: str, user: str, model: str, max_tokens: int) -> dict:
+    """调用 vLLM 服务器。ngram 抑制由服务器端 monkey-patch 全局注入，无需在此传参。"""
+    response = vllm_client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=1.0,
+        max_tokens=max_tokens,
+    )
+    choice = response.choices[0]
+    usage = response.usage
+    raw = choice.message.content or ""
+    if not raw.lstrip().startswith("<think>"):
+        raw = "<think>\n" + raw
+    return {
+        "output":        raw,
+        "output_tokens": usage.completion_tokens if usage else None,
+        "prompt_tokens":  usage.prompt_tokens if usage else None,
+        "total_tokens":   usage.total_tokens if usage else None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 统计打印
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -267,9 +317,13 @@ def print_stats(output_path: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="后验推理蒸馏数据生成（LKH求解 + Gemini解释）")
+    parser = argparse.ArgumentParser(description="后验推理蒸馏数据生成（LKH求解 + LLM rationalization）")
 
-    # Vertex AI 认证
+    # 后端选择
+    parser.add_argument("--backend", type=str, default="gemini", choices=["gemini", "vllm"],
+                        help="生成后端: gemini (Vertex AI) 或 vllm (本地 vLLM 服务器)")
+
+    # Vertex AI 认证（backend=gemini 时使用）
     parser.add_argument("--credentials", type=str,
                         default=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", ""),
                         help="GCP 服务账号 JSON key 文件路径")
@@ -277,6 +331,12 @@ def main():
                         default=os.environ.get("GCP_PROJECT", ""),
                         help="GCP 项目 ID，如 keen-oasis-489308-m8")
     parser.add_argument("--location",    type=str, default="us-central1")
+
+    # vLLM（backend=vllm 时使用）
+    parser.add_argument("--vllm_base_url", type=str, default="http://localhost:8000/v1",
+                        help="vLLM OpenAI-compatible API base URL")
+    parser.add_argument("--vllm_model", type=str, default="",
+                        help="vLLM 模型名称（默认自动检测）")
 
     # LKH
     parser.add_argument("--lkh_bin",     type=str, default=os.environ.get("LKH_BIN", LKH_BIN),
@@ -286,7 +346,7 @@ def main():
     parser.add_argument("--lkh_timeout", type=int,   default=60,
                         help="LKH 单次求解超时秒数（默认 60）")
 
-    # Gemini
+    # 模型（backend=gemini 时为 Gemini 模型名）
     parser.add_argument("--model", type=str, default=GEMINI_MODEL)
 
     # 数据生成
@@ -327,13 +387,23 @@ def main():
 
 
 def _run(args):
-    # 参数检查
-    if not args.credentials:
-        raise ValueError("请通过 --credentials 或 GOOGLE_APPLICATION_CREDENTIALS 指定 GCP JSON key 路径")
-    if not os.path.isfile(args.credentials):
-        raise FileNotFoundError(f"找不到 credentials 文件：{args.credentials}")
-    if not args.project:
-        raise ValueError("请通过 --project 或 GCP_PROJECT 指定 GCP 项目 ID")
+    # 后端初始化
+    if args.backend == "gemini":
+        if not args.credentials:
+            raise ValueError("请通过 --credentials 或 GOOGLE_APPLICATION_CREDENTIALS 指定 GCP JSON key 路径")
+        if not os.path.isfile(args.credentials):
+            raise FileNotFoundError(f"找不到 credentials 文件：{args.credentials}")
+        if not args.project:
+            raise ValueError("请通过 --project 或 GCP_PROJECT 指定 GCP 项目 ID")
+        client = build_client(args.credentials, args.project, args.location)
+        backend_label = f"Gemini ({args.model})"
+    else:
+        client = build_vllm_client(args.vllm_base_url)
+        if not args.vllm_model:
+            models = client.models.list()
+            args.vllm_model = models.data[0].id
+            print(f"  vLLM 自动检测模型: {args.vllm_model}")
+        backend_label = f"vLLM ({args.vllm_model})"
 
     setup_problems_path(args.unicop_path)
     from problems import get_problem  # noqa: E402
@@ -364,7 +434,6 @@ def _run(args):
                     f.write(kl + "\n")
             print(f"  清理超长样本: 删除 {purged} 条 (output_tokens > {args.max_output_tokens})")
 
-    client       = build_client(args.credentials, args.project, args.location)
     existing_ids = load_existing_ids(args.output)
     valid_counts = count_valid_samples(args.output, args.max_output_tokens)
 
@@ -383,9 +452,8 @@ def _run(args):
     total_valid = sum(valid_counts.values())
 
     print(f"\n{'='*60}")
-    print(f"  后验推理蒸馏数据生成（LKH + Gemini）")
-    print(f"  模型:    {args.model}")
-    print(f"  项目:    {args.project}  ({args.location})")
+    print(f"  后验推理蒸馏数据生成（LKH + LLM rationalization）")
+    print(f"  后端:    {backend_label}")
     print(f"  目标:    每组合 {target_per_combo} 条合格样本（output_tokens <= {args.max_output_tokens}）")
     print(f"  现有合格: {total_valid} 条  |  需补充: {total_need} 条  |  涉及 {len(combos_need)} 个组合")
     print(f"  输出:    {args.output}")
@@ -412,14 +480,14 @@ def _run(args):
 
     write_lock = threading.Lock()
 
-    def _call_gemini_with_retry(client, system, user, model, sleep):
+    def _call_gemini_with_retry(system, user):
         """带限流重试的 Gemini 调用（线程安全）"""
         max_retries = 10
         base_wait = 30
         max_wait_time = 300
         for attempt in range(max_retries):
             try:
-                return call_gemini(client, system, user, model)
+                return call_gemini(client, system, user, args.model)
             except Exception as e:
                 err_str = str(e).lower()
                 is_rate_limit = any(k in err_str for k in [
@@ -436,8 +504,26 @@ def _run(args):
                     return None
         return None
 
+    def _call_vllm_with_retry(system, user):
+        """带简单重试的 vLLM 调用"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return call_vllm(client, system, user,
+                                 args.vllm_model, args.max_output_tokens)
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"  vLLM ERROR: {e}, 重试 ({attempt+1}/{max_retries})")
+                    time.sleep(5)
+                else:
+                    print(f"  vLLM ERROR: {e}")
+                    return None
+        return None
+
+    _call_model = _call_gemini_with_retry if args.backend == "gemini" else _call_vllm_with_retry
+
     def _process_single(task_info):
-        """处理单条数据：LKH 求解 + Gemini 调用 + 校验 + 长度检查"""
+        """处理单条数据：LKH 求解 + LLM 调用 + 校验 + 长度检查"""
         pt, n, i, sample_id, instance, problem, max_tok = task_info
 
         # Step 2: LKH 求解
@@ -454,12 +540,9 @@ def _run(args):
         orig_prompt = problem.build_prompt(instance)
         prompt_dict = build_posthoc_prompt(lkh_answer, orig_prompt)
 
-        # Step 4: Gemini 调用
+        # Step 4: LLM 调用
         t0 = time.time()
-        result = _call_gemini_with_retry(
-            client, prompt_dict["system"], prompt_dict["user"],
-            args.model, args.sleep
-        )
+        result = _call_model(prompt_dict["system"], prompt_dict["user"])
         if result is None:
             return None
         elapsed = time.time() - t0
@@ -473,11 +556,16 @@ def _run(args):
 
         # Step 6: 内容校验
         answer_ok = _answer_has_content(result["output"], pt)
-        status = "ok" if answer_ok else "NO_ANSWER"
-        print(f"    {sample_id}  output={output_tokens} tok  [{status}]  ({elapsed:.1f}s)")
-
         if not answer_ok:
+            print(f"    {sample_id}  output={output_tokens} tok  [NO_ANSWER]  ({elapsed:.1f}s)")
             return None
+
+        quality_ok, quality_reason = _output_quality_check(result["output"])
+        if not quality_ok:
+            print(f"    {sample_id}  output={output_tokens} tok  [{quality_reason}]  ({elapsed:.1f}s)")
+            return None
+
+        print(f"    {sample_id}  output={output_tokens} tok  [ok]  ({elapsed:.1f}s)")
 
         # Step 7: 构建 record
         return {
