@@ -345,8 +345,6 @@ def main():
 
     # ── 全量并发生成 ─────────────────────────────────────────────────
     total_tasks = len(tasks)
-    notify_interval = max(total_tasks // 10, 1)
-    next_notify_at = notify_interval
     print(f"\n开始生成 (并发={args.concurrency}, 服务器={len(clients)}, "
           f"总任务={total_tasks}, 每条最多重试={max_qr})...\n")
 
@@ -361,7 +359,7 @@ def main():
                     with write_lock:
                         fout.write(json.dumps(record, ensure_ascii=False) + "\n")
                         fout.flush()
-                if done_count % 500 == 0 or done_count == total_tasks:
+                if done_count % 100 == 0 or done_count == total_tasks:
                     elapsed_min = (time.time() - t_start) / 60
                     with stats_lock:
                         ok, fail = stats["ok"], stats["fail"]
@@ -369,17 +367,11 @@ def main():
                     rate = ok / max(ok + fail, 1) * 100
                     speed = done_count / max(elapsed_min, 0.01)
                     eta = (total_tasks - done_count) / max(speed, 0.01)
-                    msg = (f"进度: {done_count}/{total_tasks}  "
-                           f"合格: {ok}  失败: {fail}  重试成功: {retried}  "
-                           f"合格率: {rate:.0f}%  "
-                           f"速度: {speed:.0f}/min  "
-                           f"ETA: {eta:.0f}min")
-                    print(f"  {msg}")
-                    if done_count >= next_notify_at:
-                        pct = done_count * 100 // total_tasks
-                        _notify(f"Rationalize {pct}% ({done_count}/{total_tasks})",
-                                f"{msg}\n耗时: {elapsed_min:.1f}min")
-                        next_notify_at += notify_interval
+                    print(f"  进度: {done_count}/{total_tasks}  "
+                          f"合格: {ok}  失败: {fail}  重试成功: {retried}  "
+                          f"合格率: {rate:.0f}%  "
+                          f"速度: {speed:.0f}/min  "
+                          f"ETA: {eta:.0f}min")
 
     total = stats["ok"] + stats["fail"]
     elapsed_total = (time.time() - t_start) / 60
