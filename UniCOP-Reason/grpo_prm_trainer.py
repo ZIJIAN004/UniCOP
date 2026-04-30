@@ -522,7 +522,7 @@ class GRPOPRMTrainer(GRPOTrainer):
                 add_special_tokens=False,
             )
             offset_mapping = encoding.get("offset_mapping", [])
-            if offset_mapping and len(offset_mapping) == num_tokens:
+            if offset_mapping:
                 return offset_mapping
         except Exception:
             pass
