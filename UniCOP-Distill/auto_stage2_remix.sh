@@ -22,7 +22,7 @@ STAGE2_OUT="output_sft_stage2_cvrp20_v2"
 SOLUTIONS_FILE="data/solutions_cvrp${SIZE}.jsonl"
 CHAINS_FILE="data/chains_v3_clean.jsonl"
 MIXED_FILE="data/chains_v3_mixed.jsonl"
-NUM_REPLAY=500
+NUM_REPLAY=1000
 
 # CUDA
 export CUDA_HOME=/home/ntu/anaconda3/envs/unicop

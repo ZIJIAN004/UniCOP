@@ -58,7 +58,7 @@ def main():
     parser.add_argument("--output", default="data/chains_v3_mixed.jsonl")
     parser.add_argument("--problem", default="cvrp")
     parser.add_argument("--size", type=int, default=20)
-    parser.add_argument("--num_replay", type=int, default=500,
+    parser.add_argument("--num_replay", type=int, default=1000,
                         help="从 Stage 1 数据中采样的回放条数")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
