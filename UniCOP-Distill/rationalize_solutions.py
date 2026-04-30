@@ -93,7 +93,19 @@ def calc_max_model_len(solutions: list, max_tokens: int, tokenizer_path: str) ->
     return aligned
 
 
-def quality_check(output: str) -> tuple[bool, str]:
+def _parse_route_nodes(text: str) -> list[int] | None:
+    import re
+    nodes = []
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not re.match(r"Route\s+\d+", line, re.IGNORECASE):
+            continue
+        nums = [int(x) for x in re.findall(r"\d+", line.split(":", 1)[-1])]
+        nodes.extend(n for n in nums if n != 0)
+    return sorted(nodes) if nodes else None
+
+
+def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
     if "<think>" not in output or "</think>" not in output:
         return False, "NO_THINK_TAGS"
 
@@ -111,6 +123,14 @@ def quality_check(output: str) -> tuple[bool, str]:
     for pattern in _LEAK_PATTERNS:
         if pattern in think_lower:
             return False, f"LEAK:{pattern}"
+
+    answer_part = output[think_end + len("</think>"):]
+    model_nodes = _parse_route_nodes(answer_part)
+    lkh_nodes = _parse_route_nodes(lkh_solution)
+    if model_nodes is None:
+        return False, "NO_ROUTES_IN_ANSWER"
+    if model_nodes != lkh_nodes:
+        return False, "NODES_MISMATCH"
 
     return True, "ok"
 
@@ -286,7 +306,7 @@ def main():
             if output_tokens > args.max_tokens:
                 continue
 
-            ok, reason = quality_check(output)
+            ok, reason = quality_check(output, r["solution"])
             if not ok:
                 continue
 
