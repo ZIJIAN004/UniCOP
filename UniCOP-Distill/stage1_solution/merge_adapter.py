@@ -73,6 +73,12 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(base_model_path, trust_remote_code=True)
     tokenizer.save_pretrained(args.output_path)
 
+    for leftover in ["adapter_config.json", "adapter_model.safetensors", "adapter_model.bin"]:
+        p = os.path.join(args.output_path, leftover)
+        if os.path.exists(p):
+            os.remove(p)
+            print(f"  已删除残留 adapter 文件: {leftover}")
+
     print("合并完成")
 
 
