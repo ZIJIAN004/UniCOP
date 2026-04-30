@@ -148,6 +148,13 @@ def _constraint_score(problem_type: str, route_or_routes, instance: dict) -> flo
     return 1.0
 
 
+def is_fully_feasible(completion: str, instance: dict, problem_type: str) -> bool:
+    """parse + coverage + constraint + format 全部满足才算可行。"""
+    c = compute_terminal_components(completion, instance, problem_type)
+    return (c["parse"] == 1.0 and c["coverage"] == 1.0
+            and c["constraint"] == 1.0 and c["format"] == 1.0)
+
+
 def _format_score(completion: str, problem_type: str) -> float:
     """
     Route N 编号正确率：

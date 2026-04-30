@@ -62,16 +62,13 @@ class Config:
     pipd_ckpt_dir: str      = ""    # 指向 {PIP-D baseline}/POMO+PIP/pretrained/TSPTW
     pipd_dir: str           = ""    # 指向 {PIP-D baseline}/POMO+PIP (代码目录,用于 sys.path 注入)
 
-    # ── 双信号合成（terminal "对不对" + PRM "好不好"，都走 GRPO 组归一化） ────
-    # loss = α · L_terminal + β · L_prm
-    # 两个 loss 各自按"自己的有效 token 数"归一，量纲对齐，α=β=1.0 即平衡
-    terminal_alpha: float    = 1.0
-    prm_beta: float          = 1.0
-    # Terminal 4 维等权（parse + coverage + constraint + format），可单独调
-    terminal_w_parse: float      = 1.0
-    terminal_w_coverage: float   = 1.0
-    terminal_w_constraint: float = 1.0
-    terminal_w_format: float     = 1.0
+    # ── 三信号解耦奖励（feasibility gate + outcome + process） ─────
+    # 不可行 → A_total = 动态惩罚 (hist_min - margin)
+    # 可行   → A_total = A_out + proc_alpha · A_proc，广播到所有 token
+    disable_prm: bool              = False # ablation: 关闭 process reward，只用 outcome
+    proc_alpha: float              = 0.5   # process 信号权重（< 1，outcome 为主）
+    infeasible_margin: float       = 1.0   # 惩罚低于历史最小可行 advantage 的幅度
+    infeasible_default_penalty: float = -5.0  # 训练初始还没见过可行解时的 fallback
 
     # ── 输出 ─────────────────────────────────────────────────────────
     output_dir: str    = "./output"
