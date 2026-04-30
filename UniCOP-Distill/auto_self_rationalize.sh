@@ -126,6 +126,7 @@ for gpu in $(seq 0 $((NUM_GPUS - 1))); do
         --no_repeat_ngram_size $NGRAM_SIZE \
         --dtype bfloat16 \
         --max-model-len $VLLM_MAX_MODEL_LEN \
+        --enable-prefix-caching \
         --disable-log-requests \
         --disable-log-stats \
         > "$VLLM_LOG_DIR/gpu${gpu}.log" 2>&1 &
