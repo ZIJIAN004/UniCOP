@@ -21,6 +21,9 @@ LOG_FILE="$DISTILL_DIR/self_rationalize_$(date '+%Y%m%d_%H%M%S').log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "日志文件: $LOG_FILE"
 
+# Python stdout 不缓冲，确保 print 立即写入 log
+export PYTHONUNBUFFERED=1
+
 # ── 配置 ──────────────────────────────────────────────────────────────────────
 
 MODEL_PATH="/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
