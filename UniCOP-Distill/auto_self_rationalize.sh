@@ -7,6 +7,7 @@
 #   3. 停止所有 vLLM 服务器（释放 GPU）
 #   4. SFT 训练（R1-Distill + LoRA，4 卡 ZeRO-3）
 #   5. 合并 LoRA adapter
+#   6. 评估
 #
 # 使用方法：
 #   bash auto_self_rationalize.sh
@@ -204,11 +205,36 @@ echo ">>> Step 5: 合并 LoRA adapter..."
 python stage1_solution/merge_adapter.py \
     --adapter_path "$OUTPUT_DIR/final_model"
 
-notify "自举 Rationalize 全部完成" "模型: $OUTPUT_DIR, 数据: $ACTUAL_COUNT 条"
+notify "Step5 完成: adapter 合并"
+
+# ══════════════════════════════════════════════════════════════════
+# Step 6: 评估
+# ══════════════════════════════════════════════════════════════════
+echo ""
+echo ">>> Step 6: 评估..."
+
+REASON_DIR="$(cd "$DISTILL_DIR/../UniCOP-Reason" && pwd)"
+
+cd "$REASON_DIR"
+python evaluate.py \
+    --backend local \
+    --model_path "$DISTILL_DIR/$OUTPUT_DIR/final_model" \
+    --problem $PROBLEM \
+    --problem_size $SIZE \
+    --model_type reasoning \
+    --max_completion_length 4096 \
+    --num_test 100 \
+    --num_samples 1 \
+    --batch_size 4 \
+    --save_dir "$DISTILL_DIR/eval_results"
+cd "$DISTILL_DIR"
+
+notify "自举 Rationalize 全部完成" "模型: $OUTPUT_DIR, 数据: $ACTUAL_COUNT 条, 评估结果在 eval_results/"
 
 echo ""
 echo "============================================================"
 echo "  完成! $(date)"
 echo "  数据:   $CHAINS_FILE ($ACTUAL_COUNT 条)"
 echo "  模型:   $OUTPUT_DIR/final_model"
+echo "  评估:   eval_results/"
 echo "============================================================"
