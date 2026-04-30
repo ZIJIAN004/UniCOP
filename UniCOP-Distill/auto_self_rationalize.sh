@@ -40,8 +40,8 @@ CHAINS_FILE="data/chains_self_cvrp${SIZE}.jsonl"
 NUM_GPUS=4
 VLLM_BASE_PORT=8000
 NGRAM_SIZE=6
-# max-model-len = prompt + completion 的上限，设大一点保险；输出由 max_tokens=4096 限制
-VLLM_MAX_MODEL_LEN=8192
+# max-model-len = prompt(~1200) + completion(4096) ≈ 5300，设 6144 留余量
+VLLM_MAX_MODEL_LEN=6144
 
 # SFT 配置
 SFT_LR=2e-5
@@ -126,6 +126,7 @@ for gpu in $(seq 0 $((NUM_GPUS - 1))); do
         --no_repeat_ngram_size $NGRAM_SIZE \
         --dtype bfloat16 \
         --max-model-len $VLLM_MAX_MODEL_LEN \
+        --gpu-memory-utilization 0.95 \
         --enable-prefix-caching \
         --disable-log-requests \
         --disable-log-stats \
