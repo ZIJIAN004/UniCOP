@@ -94,7 +94,7 @@ def calc_max_model_len(solutions: list, max_tokens: int, tokenizer_path: str) ->
     return aligned
 
 
-def _parse_routes(text: str) -> list[list[int]] | None:
+def _parse_routes(text: str) -> tuple[list[list[int]], str]:
     routes = []
     for line in text.strip().splitlines():
         line = line.strip()
@@ -102,13 +102,17 @@ def _parse_routes(text: str) -> list[list[int]] | None:
             continue
         after_colon = line.split(":", 1)[-1]
         segments = [s.strip() for s in after_colon.split("->")]
-        route = []
+        nodes = []
         for s in segments:
-            if s.isdigit() and int(s) != 0:
-                route.append(int(s))
-        if route:
-            routes.append(route)
-    return routes if routes else None
+            if s.isdigit():
+                nodes.append(int(s))
+        if len(nodes) < 3 or nodes[0] != 0 or nodes[-1] != 0:
+            return [], "BAD_DEPOT"
+        customers = nodes[1:-1]
+        if not customers or 0 in customers:
+            return [], "BAD_DEPOT"
+        routes.append(customers)
+    return routes, "ok"
 
 
 def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
@@ -131,11 +135,11 @@ def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
             return False, f"LEAK:{pattern}"
 
     answer_part = output[think_end + len("</think>"):]
-    model_routes = _parse_routes(answer_part)
-    lkh_routes = _parse_routes(lkh_solution)
-    if model_routes is None:
-        return False, "NO_ROUTES_IN_ANSWER"
-    if model_routes != lkh_routes:
+    model_routes, model_err = _parse_routes(answer_part)
+    if not model_routes:
+        return False, model_err or "NO_ROUTES_IN_ANSWER"
+    lkh_routes, _ = _parse_routes(lkh_solution)
+    if sorted(model_routes) != sorted(lkh_routes):
         return False, "ROUTES_MISMATCH"
 
     return True, "ok"
