@@ -41,12 +41,15 @@ NUM_GPUS=4
 VLLM_BASE_PORT=8000
 NGRAM_SIZE=6
 
+# 生成配置
+GEN_MAX_TOKENS=2500
+
 # SFT 配置
 SFT_LR=2e-5
 SFT_EPOCHS=3
 SFT_LORA_RANK=64
 SFT_LORA_ALPHA=128
-MAX_TOKENS=4096
+SFT_MAX_TOKENS=4096
 
 # CUDA
 export CUDA_HOME=/home/ntu/anaconda3/envs/unicop
@@ -114,10 +117,18 @@ echo ">>> Step 0: 计算 max-model-len..."
 VLLM_MAX_MODEL_LEN=$(python rationalize_solutions.py \
     --solutions "$SOLUTIONS_FILE" \
     --problem $PROBLEM --size $SIZE \
-    --max_tokens $MAX_TOKENS \
+    --max_tokens $GEN_MAX_TOKENS \
     --tokenizer "$MODEL_PATH" \
     --calc_max_model_len)
-echo "  max-model-len = $VLLM_MAX_MODEL_LEN"
+echo "  vLLM max-model-len = $VLLM_MAX_MODEL_LEN (gen)"
+
+SFT_MAX_LENGTH=$(python rationalize_solutions.py \
+    --solutions "$SOLUTIONS_FILE" \
+    --problem $PROBLEM --size $SIZE \
+    --max_tokens $SFT_MAX_TOKENS \
+    --tokenizer "$MODEL_PATH" \
+    --calc_max_model_len)
+echo "  SFT  max-length    = $SFT_MAX_LENGTH"
 
 # ══════════════════════════════════════════════════════════════════
 # Step 1: 启动 4 个 vLLM 服务器
@@ -169,7 +180,7 @@ python rationalize_solutions.py \
     --problem $PROBLEM \
     --size $SIZE \
     --num_samples $NUM_SAMPLES \
-    --max_tokens $MAX_TOKENS \
+    --max_tokens $GEN_MAX_TOKENS \
     --concurrency $((NUM_GPUS * 16))
 
 ACTUAL_COUNT=$(grep -c '^{' "$CHAINS_FILE" 2>/dev/null || echo 0)
@@ -196,7 +207,7 @@ accelerate launch --num_processes $NUM_GPUS --main_process_port 29600 \
     --filter_problems $PROBLEM \
     --filter_sizes $SIZE \
     --lora_rank $SFT_LORA_RANK --lora_alpha $SFT_LORA_ALPHA \
-    --max_length $VLLM_MAX_MODEL_LEN \
+    --max_length $SFT_MAX_LENGTH \
     --output_dir "$OUTPUT_DIR" \
     --zero_stage 3 \
     --gradient_checkpointing \
