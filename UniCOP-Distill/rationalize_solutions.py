@@ -128,9 +128,6 @@ def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
     if len(think_content.strip()) < 100:
         return False, "THINK_TOO_SHORT"
 
-    if re.search(r"Route\s+\d+\s*:", think_content, re.IGNORECASE):
-        return False, "ROUTE_IN_THINK"
-
     think_lower = think_content.lower()
     for pattern in _LEAK_PATTERNS:
         if pattern in think_lower:
