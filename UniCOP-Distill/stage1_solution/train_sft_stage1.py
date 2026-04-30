@@ -378,16 +378,8 @@ def main():
 
     if peft_config is not None:
         if trainer.accelerator.is_main_process:
-            print("合并 LoRA adapter 到基座模型...")
-            from peft import PeftModel
-            base = AutoModelForCausalLM.from_pretrained(
-                args.model, torch_dtype=torch.bfloat16,
-                trust_remote_code=True, device_map="cpu",
-            )
-            merged = PeftModel.from_pretrained(base, save_path).merge_and_unload()
-            merged.save_pretrained(save_path)
-            del base, merged
-            torch.cuda.empty_cache()
+            print(f"LoRA adapter 已保存到: {save_path}")
+            print("请在训练结束后单独运行 merge_adapter.py 合并到基座模型")
         trainer.accelerator.wait_for_everyone()
 
     print(f"\n模型已保存到: {save_path}")
