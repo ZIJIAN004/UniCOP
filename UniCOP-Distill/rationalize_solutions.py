@@ -21,6 +21,7 @@ import itertools
 import json
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -94,14 +95,17 @@ def calc_max_model_len(solutions: list, max_tokens: int, tokenizer_path: str) ->
 
 
 def _parse_routes(text: str) -> list[list[int]] | None:
-    import re
     routes = []
     for line in text.strip().splitlines():
         line = line.strip()
         if not re.match(r"Route\s+\d+", line, re.IGNORECASE):
             continue
-        nums = [int(x) for x in re.findall(r"\d+", line.split(":", 1)[-1])]
-        route = [n for n in nums if n != 0]
+        after_colon = line.split(":", 1)[-1]
+        segments = [s.strip() for s in after_colon.split("->")]
+        route = []
+        for s in segments:
+            if s.isdigit() and int(s) != 0:
+                route.append(int(s))
         if route:
             routes.append(route)
     return routes if routes else None
