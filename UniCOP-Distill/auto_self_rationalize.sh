@@ -40,8 +40,6 @@ CHAINS_FILE="data/chains_self_cvrp${SIZE}.jsonl"
 NUM_GPUS=4
 VLLM_BASE_PORT=8000
 NGRAM_SIZE=6
-# max-model-len = prompt(~1200) + completion(4096) ≈ 5300，设 6144 留余量
-VLLM_MAX_MODEL_LEN=6144
 
 # SFT 配置
 SFT_LR=2e-5
@@ -108,6 +106,19 @@ echo "  并行 GPU:   $NUM_GPUS"
 echo "  输出:       $OUTPUT_DIR"
 echo "  时间:       $(date)"
 echo "============================================================"
+
+# ══════════════════════════════════════════════════════════════════
+# Step 0: 动态计算 max-model-len
+# ══════════════════════════════════════════════════════════════════
+echo ""
+echo ">>> Step 0: 计算 max-model-len..."
+VLLM_MAX_MODEL_LEN=$(python rationalize_solutions.py \
+    --solutions "$SOLUTIONS_FILE" \
+    --problem $PROBLEM --size $SIZE \
+    --max_tokens $SFT_MAX_TOKENS \
+    --tokenizer "$MODEL_PATH" \
+    --calc_max_model_len)
+echo "  max-model-len = $VLLM_MAX_MODEL_LEN"
 
 # ══════════════════════════════════════════════════════════════════
 # Step 1: 启动 4 个 vLLM 服务器

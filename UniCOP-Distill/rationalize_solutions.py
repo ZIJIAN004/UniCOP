@@ -21,6 +21,7 @@ import itertools
 import json
 import os
 import random
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -60,6 +61,7 @@ _LEAK_PATTERNS = [
 ]
 
 _SCKEY = "SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
+_CALC_SAMPLE_COUNT = 20
 
 
 def build_posthoc_prompt(solution: str, system: str, user: str) -> dict:
@@ -72,6 +74,23 @@ def build_posthoc_prompt(solution: str, system: str, user: str) -> dict:
           "Solve this problem step by step, then output the target solution after </think>."
     )
     return {"system": system_posthoc, "user": user_posthoc}
+
+
+def calc_max_model_len(solutions: list, max_tokens: int, tokenizer_path: str) -> int:
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+    sample = random.sample(solutions, min(_CALC_SAMPLE_COUNT, len(solutions)))
+    max_prompt_tokens = 0
+    for r in sample:
+        p = build_posthoc_prompt(r["solution"], r["prompt"]["system"], r["prompt"]["user"])
+        text = p["system"] + "\n" + p["user"]
+        n_tokens = len(tok.encode(text))
+        max_prompt_tokens = max(max_prompt_tokens, n_tokens)
+
+    total = max_prompt_tokens + max_tokens
+    aligned = ((total + 255) // 256) * 256
+    return aligned
 
 
 def quality_check(output: str) -> tuple[bool, str]:
@@ -144,8 +163,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--solutions", required=True,
                         help="LKH solutions JSONL 文件路径")
-    parser.add_argument("--vllm_urls", nargs="+", required=True,
+    parser.add_argument("--vllm_urls", nargs="+", default=[],
                         help="vLLM 服务器 URL 列表")
+    parser.add_argument("--calc_max_model_len", action="store_true",
+                        help="采样 20 条计算 max-model-len 后退出")
+    parser.add_argument("--tokenizer", default=None,
+                        help="tokenizer 路径（--calc_max_model_len 时必填）")
     parser.add_argument("--output", default="data/chains_self.jsonl")
     parser.add_argument("--problem", default="cvrp")
     parser.add_argument("--size", type=int, default=20)
@@ -174,11 +197,23 @@ def main():
             if r.get("problem_type") == args.problem and r.get("n") == args.size:
                 all_solutions.append(r)
 
+    if len(all_solutions) == 0:
+        print("ERROR: 没有找到匹配的 solutions", file=sys.stderr)
+        sys.exit(1)
+
+    if args.calc_max_model_len:
+        if not args.tokenizer:
+            print("ERROR: --calc_max_model_len 需要 --tokenizer", file=sys.stderr)
+            sys.exit(1)
+        result = calc_max_model_len(all_solutions, args.max_tokens, args.tokenizer)
+        print(result)
+        return
+
     print(f"Solutions ({args.problem} n={args.size}): {len(all_solutions)} 条")
 
-    if len(all_solutions) == 0:
-        print("ERROR: 没有找到匹配的 solutions")
-        return
+    if not args.vllm_urls:
+        print("ERROR: 需要 --vllm_urls", file=sys.stderr)
+        sys.exit(1)
 
     if args.num_samples <= 0:
         sampled = all_solutions
