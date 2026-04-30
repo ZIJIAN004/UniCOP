@@ -159,22 +159,8 @@ for gpu in $(seq 0 $((NUM_GPUS - 1))); do
     VLLM_URLS="$VLLM_URLS http://localhost:$((VLLM_BASE_PORT + gpu))/v1"
 done
 
-# Step 2a: 先生成 5 条预览，打印详情供事后检查
 echo ""
-echo ">>> Step 2a: 预览生成 (前 5 条)..."
-
-python rationalize_solutions.py \
-    --solutions "$SOLUTIONS_FILE" \
-    --vllm_urls $VLLM_URLS \
-    --output "$CHAINS_FILE" \
-    --problem $PROBLEM \
-    --size $SIZE \
-    --num_samples $NUM_SAMPLES \
-    --max_tokens $MAX_TOKENS \
-    --preview 5
-
-echo ""
-echo ">>> Step 2b: 全量生成 rationalization 数据 ($NUM_GPUS 路并行)..."
+echo ">>> Step 2: 全量生成 rationalization 数据 ($NUM_GPUS 路并行)..."
 
 python rationalize_solutions.py \
     --solutions "$SOLUTIONS_FILE" \
