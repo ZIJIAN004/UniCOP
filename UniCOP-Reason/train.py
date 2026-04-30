@@ -366,6 +366,9 @@ def main():
         processing_class=tokenizer,
     )
 
+    pomo_prm.device = trainer.accelerator.device
+    print(f"POMO PRM device: {pomo_prm.device}")
+
     print("\n开始 GRPO 训练...")
 
     # ── 诊断: 在 trainer.train() 之前打印 DeepSpeed 实际生效的 ZeRO 配置 ────
