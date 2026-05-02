@@ -27,13 +27,13 @@ export PYTHONUNBUFFERED=1
 # ── 配置 ──────────────────────────────────────────────────────────────────────
 
 MODEL_PATH="/Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-SOLUTIONS_FILE="data/solutions_tsp20.jsonl"
 SCKEY="SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
 
 PROBLEM="tsp"
 SIZE=20
 NUM_SAMPLES=0
-OUTPUT_DIR="output_sft_self_rationalize_tsp20"
+SOLUTIONS_FILE="data/solutions_${PROBLEM}${SIZE}.jsonl"
+OUTPUT_DIR="output_sft_self_rationalize_${PROBLEM}${SIZE}"
 CHAINS_FILE="data/chains_self_${PROBLEM}${SIZE}.jsonl"
 
 # vLLM 配置
