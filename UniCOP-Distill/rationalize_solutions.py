@@ -94,19 +94,47 @@ def calc_max_model_len(solutions: list, max_tokens: int, tokenizer_path: str) ->
     return aligned
 
 
-def _parse_routes(text: str) -> tuple[list[list[int]], str]:
+def _parse_route_line(line: str) -> list[int] | None:
+    """解析单行 Route 行，返回节点列表（含首尾 depot）。"""
+    after_colon = line.split(":", 1)[-1]
+    segments = [s.strip() for s in after_colon.split("->")]
+    nodes = [int(s) for s in segments if s.isdigit()]
+    return nodes if len(nodes) >= 3 else None
+
+
+_RE_MULTI_ROUTE = re.compile(r"Route\s+\d+\s*:", re.IGNORECASE)
+_RE_SINGLE_ROUTE = re.compile(r"Route\s*:", re.IGNORECASE)
+
+
+def _parse_single_route(text: str) -> tuple[list[int], str]:
+    """TSP: 单条路线 'Route: 0 -> 3 -> ... -> 0'，返回客户节点序列。"""
+    for line in text.strip().splitlines():
+        line = line.strip()
+        if not _RE_SINGLE_ROUTE.match(line):
+            continue
+        nodes = _parse_route_line(line)
+        if nodes is None:
+            return [], "BAD_FORMAT"
+        if nodes[0] != 0 or nodes[-1] != 0:
+            return [], "BAD_DEPOT"
+        customers = nodes[1:-1]
+        if not customers or 0 in customers:
+            return [], "BAD_DEPOT"
+        return customers, "ok"
+    return [], "NO_ROUTE"
+
+
+def _parse_multi_routes(text: str) -> tuple[list[list[int]], str]:
+    """CVRP/VRPTW: 多条路线 'Route 1: 0 -> ... -> 0'，返回各路线的客户节点序列。"""
     routes = []
     for line in text.strip().splitlines():
         line = line.strip()
-        if not re.match(r"Route\s*\d*\s*:", line, re.IGNORECASE):
+        if not _RE_MULTI_ROUTE.match(line):
             continue
-        after_colon = line.split(":", 1)[-1]
-        segments = [s.strip() for s in after_colon.split("->")]
-        nodes = []
-        for s in segments:
-            if s.isdigit():
-                nodes.append(int(s))
-        if len(nodes) < 3 or nodes[0] != 0 or nodes[-1] != 0:
+        nodes = _parse_route_line(line)
+        if nodes is None:
+            return [], "BAD_FORMAT"
+        if nodes[0] != 0 or nodes[-1] != 0:
             return [], "BAD_DEPOT"
         customers = nodes[1:-1]
         if not customers or 0 in customers:
@@ -115,6 +143,10 @@ def _parse_routes(text: str) -> tuple[list[list[int]], str]:
     if not routes:
         return [], "NO_ROUTES"
     return routes, "ok"
+
+
+def _is_multi_route(text: str) -> bool:
+    return bool(_RE_MULTI_ROUTE.search(text))
 
 
 def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
@@ -134,12 +166,22 @@ def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
             return False, f"LEAK:{pattern}"
 
     answer_part = output[think_end + len("</think>"):]
-    model_routes, model_err = _parse_routes(answer_part)
-    if not model_routes:
-        return False, model_err or "NO_ROUTES_IN_ANSWER"
-    lkh_routes, _ = _parse_routes(lkh_solution)
-    if sorted(model_routes) != sorted(lkh_routes):
-        return False, "ROUTES_MISMATCH"
+    multi = _is_multi_route(lkh_solution)
+
+    if multi:
+        model_routes, model_err = _parse_multi_routes(answer_part)
+        if not model_routes:
+            return False, model_err
+        lkh_routes, _ = _parse_multi_routes(lkh_solution)
+        if sorted(model_routes) != sorted(lkh_routes):
+            return False, "ROUTES_MISMATCH"
+    else:
+        model_seq, model_err = _parse_single_route(answer_part)
+        if not model_seq:
+            return False, model_err
+        lkh_seq, _ = _parse_single_route(lkh_solution)
+        if sorted(model_seq) != sorted(lkh_seq):
+            return False, "ROUTE_MISMATCH"
 
     return True, "ok"
 
