@@ -37,7 +37,7 @@ OUTPUT_DIR="output_sft_self_rationalize_tsp20"
 CHAINS_FILE="data/chains_self_${PROBLEM}${SIZE}.jsonl"
 
 # vLLM 配置
-VLLM_BASE_PORT=8000
+VLLM_BASE_PORT=8100
 NGRAM_SIZE=6
 
 # 生成配置
