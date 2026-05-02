@@ -40,15 +40,11 @@ CHAINS_FILE="data/chains_self_${PROBLEM}${SIZE}.jsonl"
 VLLM_BASE_PORT=8100
 NGRAM_SIZE=6
 
-# 生成配置
-GEN_MAX_TOKENS=2500
-
 # SFT 配置
 SFT_LR=2e-5
 SFT_EPOCHS=3
 SFT_LORA_RANK=64
 SFT_LORA_ALPHA=128
-SFT_MAX_TOKENS=4096
 
 # LKH 求解器（TSP 解生成）
 export LKH_BIN=/Data04/yangzhihan/lzj/LKH-3.0.9/LKH
@@ -124,6 +120,49 @@ wait_for_vllm_port() {
     echo "    GPU $((port - VLLM_BASE_PORT)) (:${port}) 就绪 (${waited}s)"
 }
 
+start_vllm_servers() {
+    local model_len=$1
+    FREE_GPU_LIST=($(get_free_gpus))
+    NUM_GPUS=${#FREE_GPU_LIST[@]}
+    if [ "$NUM_GPUS" -eq 0 ]; then
+        echo "ERROR: 没有空闲 GPU，无法启动 vLLM"
+        exit 1
+    fi
+    echo "  检测到 $NUM_GPUS 张空闲 GPU (${FREE_GPU_LIST[*]})"
+
+    VLLM_LOG_DIR="$DISTILL_DIR/vllm_logs"
+    mkdir -p "$VLLM_LOG_DIR"
+
+    for i in $(seq 0 $((NUM_GPUS - 1))); do
+        gpu=${FREE_GPU_LIST[$i]}
+        port=$((VLLM_BASE_PORT + i))
+        CUDA_VISIBLE_DEVICES=$gpu python "$DISTILL_DIR/vllm_serve_ngram.py" \
+            --model "$MODEL_PATH" \
+            --port $port \
+            --no_repeat_ngram_size $NGRAM_SIZE \
+            --dtype bfloat16 \
+            --max-model-len "$model_len" \
+            --gpu-memory-utilization 0.95 \
+            --enable-prefix-caching \
+            --disable-log-requests \
+            --disable-log-stats \
+            > "$VLLM_LOG_DIR/gpu${gpu}.log" 2>&1 &
+        VLLM_PIDS+=($!)
+        echo "  GPU $gpu → :${port} (PID=${VLLM_PIDS[-1]})"
+    done
+
+    echo "  等待所有服务器就绪..."
+    for i in $(seq 0 $((NUM_GPUS - 1))); do
+        wait_for_vllm_port $((VLLM_BASE_PORT + i))
+    done
+    echo "  全部就绪!"
+
+    VLLM_URLS=""
+    for i in $(seq 0 $((NUM_GPUS - 1))); do
+        VLLM_URLS="$VLLM_URLS http://localhost:$((VLLM_BASE_PORT + i))/v1"
+    done
+}
+
 cd "$DISTILL_DIR"
 
 echo "============================================================"
@@ -170,75 +209,72 @@ fi
 notify "Step0a 完成: ${PROBLEM^^}${SIZE} 数据生成"
 
 # ══════════════════════════════════════════════════════════════════
-# Step 0b: 动态计算 max-model-len
+# Step 0b: 计算 max prompt length
 # ══════════════════════════════════════════════════════════════════
 echo ""
-echo ">>> Step 0b: 计算 max-model-len..."
-VLLM_MAX_MODEL_LEN=$(python rationalize_solutions.py \
+echo ">>> Step 0b: 计算 max prompt length..."
+MAX_PROMPT_LEN=$(python rationalize_solutions.py \
     --solutions "$SOLUTIONS_FILE" \
     --problem $PROBLEM --size $SIZE \
-    --max_tokens $GEN_MAX_TOKENS \
+    --max_tokens 0 \
     --tokenizer "$MODEL_PATH" \
     --calc_max_model_len)
-echo "  vLLM max-model-len = $VLLM_MAX_MODEL_LEN (gen)"
+echo "  max prompt length (aligned 256) = $MAX_PROMPT_LEN"
 
-SFT_MAX_LENGTH=$(python rationalize_solutions.py \
+# ══════════════════════════════════════════════════════════════════
+# Step 1: Pilot — 生成 30 条校准 output 长度
+# ══════════════════════════════════════════════════════════════════
+PILOT_SAMPLES=30
+PILOT_MODEL_LEN=$((MAX_PROMPT_LEN + 4096))
+PILOT_FILE="data/chains_pilot_${PROBLEM}${SIZE}.jsonl"
+
+echo ""
+echo ">>> Step 1: Pilot 生成 $PILOT_SAMPLES 条 (max-model-len=$PILOT_MODEL_LEN)..."
+start_vllm_servers $PILOT_MODEL_LEN
+
+python rationalize_solutions.py \
     --solutions "$SOLUTIONS_FILE" \
-    --problem $PROBLEM --size $SIZE \
-    --max_tokens $SFT_MAX_TOKENS \
-    --tokenizer "$MODEL_PATH" \
-    --calc_max_model_len)
-echo "  SFT  max-length    = $SFT_MAX_LENGTH"
+    --vllm_urls $VLLM_URLS \
+    --output "$PILOT_FILE" \
+    --problem $PROBLEM \
+    --size $SIZE \
+    --num_samples $PILOT_SAMPLES \
+    --max_tokens 4096 \
+    --concurrency $((NUM_GPUS * 4))
+
+echo "  停止 pilot vLLM..."
+cleanup_all_vllm
+
+P95_OUTPUT=$(python -c "
+import json, math
+tokens = []
+with open('$PILOT_FILE') as f:
+    for line in f:
+        if not line.strip(): continue
+        r = json.loads(line)
+        t = r.get('output_tokens', 0)
+        if t: tokens.append(t)
+if not tokens:
+    print(4096)
+else:
+    tokens.sort()
+    idx = min(int(math.ceil(0.95 * len(tokens))) - 1, len(tokens) - 1)
+    print(tokens[idx])
+")
+echo "  Pilot P95 output tokens = $P95_OUTPUT"
+
+VLLM_MAX_MODEL_LEN=$(( ((MAX_PROMPT_LEN + P95_OUTPUT + 255) / 256) * 256 ))
+SFT_MAX_LENGTH=$VLLM_MAX_MODEL_LEN
+echo "  校准后 vLLM max-model-len = $VLLM_MAX_MODEL_LEN"
+echo "  SFT max-length            = $SFT_MAX_LENGTH"
+notify "Step1 完成: P95=$P95_OUTPUT, model_len=$VLLM_MAX_MODEL_LEN"
 
 # ══════════════════════════════════════════════════════════════════
-# Step 1: 检测空闲 GPU 并启动 vLLM 服务器
+# Step 2: 全量生成 rationalization 数据
 # ══════════════════════════════════════════════════════════════════
 echo ""
-FREE_GPU_LIST=($(get_free_gpus))
-NUM_GPUS=${#FREE_GPU_LIST[@]}
-if [ "$NUM_GPUS" -eq 0 ]; then
-    echo "ERROR: 没有空闲 GPU，无法启动 vLLM"
-    exit 1
-fi
-echo ">>> Step 1: 检测到 $NUM_GPUS 张空闲 GPU (${FREE_GPU_LIST[*]})，启动 vLLM 服务器..."
-
-VLLM_LOG_DIR="$DISTILL_DIR/vllm_logs"
-mkdir -p "$VLLM_LOG_DIR"
-
-for i in $(seq 0 $((NUM_GPUS - 1))); do
-    gpu=${FREE_GPU_LIST[$i]}
-    port=$((VLLM_BASE_PORT + i))
-    CUDA_VISIBLE_DEVICES=$gpu python "$DISTILL_DIR/vllm_serve_ngram.py" \
-        --model "$MODEL_PATH" \
-        --port $port \
-        --no_repeat_ngram_size $NGRAM_SIZE \
-        --dtype bfloat16 \
-        --max-model-len $VLLM_MAX_MODEL_LEN \
-        --gpu-memory-utilization 0.95 \
-        --enable-prefix-caching \
-        --disable-log-requests \
-        --disable-log-stats \
-        > "$VLLM_LOG_DIR/gpu${gpu}.log" 2>&1 &
-    VLLM_PIDS+=($!)
-    echo "  GPU $gpu → :${port} (PID=${VLLM_PIDS[-1]}, log: vllm_logs/gpu${gpu}.log)"
-done
-
-echo "  等待所有服务器就绪..."
-for i in $(seq 0 $((NUM_GPUS - 1))); do
-    wait_for_vllm_port $((VLLM_BASE_PORT + i))
-done
-echo "  全部就绪!"
-
-# ══════════════════════════════════════════════════════════════════
-# Step 2: 并行生成 rationalization 数据
-# ══════════════════════════════════════════════════════════════════
-VLLM_URLS=""
-for gpu in $(seq 0 $((NUM_GPUS - 1))); do
-    VLLM_URLS="$VLLM_URLS http://localhost:$((VLLM_BASE_PORT + gpu))/v1"
-done
-
-echo ""
-echo ">>> Step 2: 全量生成 rationalization 数据 ($NUM_GPUS 路并行)..."
+echo ">>> Step 2: 全量生成 rationalization 数据 (max-model-len=$VLLM_MAX_MODEL_LEN)..."
+start_vllm_servers $VLLM_MAX_MODEL_LEN
 
 python rationalize_solutions.py \
     --solutions "$SOLUTIONS_FILE" \
@@ -247,7 +283,7 @@ python rationalize_solutions.py \
     --problem $PROBLEM \
     --size $SIZE \
     --num_samples $NUM_SAMPLES \
-    --max_tokens $GEN_MAX_TOKENS \
+    --max_tokens $P95_OUTPUT \
     --concurrency $((NUM_GPUS * 16))
 
 ACTUAL_COUNT=$(grep -c '^{' "$CHAINS_FILE" 2>/dev/null || echo 0)
