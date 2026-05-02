@@ -98,7 +98,7 @@ def _parse_routes(text: str) -> tuple[list[list[int]], str]:
     routes = []
     for line in text.strip().splitlines():
         line = line.strip()
-        if not re.match(r"Route\s+\d+", line, re.IGNORECASE):
+        if not re.match(r"Route\s*\d*\s*:", line, re.IGNORECASE):
             continue
         after_colon = line.split(":", 1)[-1]
         segments = [s.strip() for s in after_colon.split("->")]
