@@ -120,6 +120,15 @@ wait_for_vllm_port() {
     echo "    GPU $((port - VLLM_BASE_PORT)) (:${port}) 就绪 (${waited}s)"
 }
 
+find_free_port() {
+    local port=$1
+    while ss -tlnp 2>/dev/null | grep -q ":${port} " || \
+          curl -s "http://localhost:${port}/v1/models" > /dev/null 2>&1; do
+        port=$((port + 1))
+    done
+    echo $port
+}
+
 start_vllm_servers() {
     local model_len=$1
     FREE_GPU_LIST=($(get_free_gpus))
@@ -133,12 +142,15 @@ start_vllm_servers() {
     VLLM_LOG_DIR="$DISTILL_DIR/vllm_logs"
     mkdir -p "$VLLM_LOG_DIR"
 
+    VLLM_PORTS=()
+    local next_port=$VLLM_BASE_PORT
     for i in $(seq 0 $((NUM_GPUS - 1))); do
         gpu=${FREE_GPU_LIST[$i]}
-        port=$((VLLM_BASE_PORT + i))
+        next_port=$(find_free_port $next_port)
+        VLLM_PORTS+=($next_port)
         CUDA_VISIBLE_DEVICES=$gpu python "$DISTILL_DIR/vllm_serve_ngram.py" \
             --model "$MODEL_PATH" \
-            --port $port \
+            --port $next_port \
             --no_repeat_ngram_size $NGRAM_SIZE \
             --dtype bfloat16 \
             --max-model-len "$model_len" \
@@ -148,18 +160,19 @@ start_vllm_servers() {
             --disable-log-stats \
             > "$VLLM_LOG_DIR/gpu${gpu}.log" 2>&1 &
         VLLM_PIDS+=($!)
-        echo "  GPU $gpu → :${port} (PID=${VLLM_PIDS[-1]})"
+        echo "  GPU $gpu → :${next_port} (PID=${VLLM_PIDS[-1]})"
+        next_port=$((next_port + 1))
     done
 
     echo "  等待所有服务器就绪..."
-    for i in $(seq 0 $((NUM_GPUS - 1))); do
-        wait_for_vllm_port $((VLLM_BASE_PORT + i))
+    for port in "${VLLM_PORTS[@]}"; do
+        wait_for_vllm_port $port
     done
     echo "  全部就绪!"
 
     VLLM_URLS=""
-    for i in $(seq 0 $((NUM_GPUS - 1))); do
-        VLLM_URLS="$VLLM_URLS http://localhost:$((VLLM_BASE_PORT + i))/v1"
+    for port in "${VLLM_PORTS[@]}"; do
+        VLLM_URLS="$VLLM_URLS http://localhost:${port}/v1"
     done
 }
 
