@@ -38,7 +38,7 @@ _POSTHOC_SUFFIX = (
     "2. In <think>, show your step-by-step decision process for "
     "constructing the route from scratch. At each step, state where you are, "
     "which nearby nodes are candidates, and why you pick the next one "
-    "(e.g. nearest distance, tightest time window, capacity constraint). "
+    "(e.g. nearest distance, problem-specific constraints). "
     "Write as if you are solving this problem yourself for the first time.\n"
     "3. Keep <think> concise (a few hundred words at most). "
     "Do NOT mention that a solution was provided or given to you. "
@@ -180,7 +180,7 @@ def quality_check(output: str, lkh_solution: str) -> tuple[bool, str]:
         if not model_seq:
             return False, model_err
         lkh_seq, _ = _parse_single_route(lkh_solution)
-        if sorted(model_seq) != sorted(lkh_seq):
+        if model_seq != lkh_seq:
             return False, "ROUTE_MISMATCH"
 
     return True, "ok"
