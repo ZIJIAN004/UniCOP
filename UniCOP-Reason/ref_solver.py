@@ -82,6 +82,7 @@ def _solve_cvrp(coords, demands, capacity):
     while unvisited:
         cur = 0
         remaining = capacity
+        added_any = False
 
         while True:
             best_d, best_j = float('inf'), -1
@@ -96,8 +97,18 @@ def _solve_cvrp(coords, demands, capacity):
             remaining -= demands[best_j]
             unvisited.remove(best_j)
             cur = best_j
+            added_any = True
 
         total += _dist(coords, cur, 0)
+
+        if not added_any and unvisited:
+            best_d, best_j = float('inf'), -1
+            for j in unvisited:
+                d = _dist(coords, 0, j)
+                if d < best_d:
+                    best_d, best_j = d, j
+            total += best_d + _dist(coords, best_j, 0)
+            unvisited.remove(best_j)
 
     return total
 
@@ -148,6 +159,7 @@ def _solve_vrptw(coords, time_windows):
     while unvisited:
         cur = 0
         cur_time = 0.0
+        added_any = False
 
         while True:
             best_d, best_j = float('inf'), -1
@@ -162,8 +174,18 @@ def _solve_vrptw(coords, time_windows):
             cur_time = max(arrive, time_windows[best_j][0])
             unvisited.remove(best_j)
             cur = best_j
+            added_any = True
 
         total += _dist(coords, cur, 0)
+
+        if not added_any and unvisited:
+            best_d, best_j = float('inf'), -1
+            for j in unvisited:
+                d = _dist(coords, 0, j)
+                if d < best_d:
+                    best_d, best_j = d, j
+            total += best_d + _dist(coords, best_j, 0)
+            unvisited.remove(best_j)
 
     return total
 
