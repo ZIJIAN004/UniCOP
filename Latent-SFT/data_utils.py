@@ -3,7 +3,7 @@
 
 每条样本需要拆分为：
   - teacher: prompt + <think>CoT</think> + solution  (完整显式推理)
-  - student: prompt + <bot> + [latent placeholder] + <eot> + solution  (隐式推理)
+  - student: prompt + <think> + [latent]*K + </think> + solution  (隐式推理)
   - align_token: solution 部分第一个 token 的位置 (对齐点)
 """
 
@@ -16,11 +16,9 @@ from torch.utils.data import Dataset
 _POSTHOC_SYSTEM_MARKER = "\n\nYour output MUST start with <think>"
 _POSTHOC_USER_MARKER = "\n\nTarget solution ("
 
-BOT_TOKEN = "<bot>"
-EOT_TOKEN = "<eot>"
 LATENT_TOKEN = "<latent>"
 
-SPECIAL_TOKENS = [BOT_TOKEN, EOT_TOKEN, LATENT_TOKEN]
+SPECIAL_TOKENS = [LATENT_TOKEN]
 
 
 def strip_posthoc(text: str, marker: str) -> str:
@@ -32,11 +30,9 @@ def add_special_tokens(tokenizer):
     added = tokenizer.add_special_tokens(
         {"additional_special_tokens": SPECIAL_TOKENS}
     )
-    bot_id = tokenizer.convert_tokens_to_ids(BOT_TOKEN)
-    eot_id = tokenizer.convert_tokens_to_ids(EOT_TOKEN)
     latent_id = tokenizer.convert_tokens_to_ids(LATENT_TOKEN)
-    print(f"  添加特殊 token: {BOT_TOKEN}={bot_id}, {EOT_TOKEN}={eot_id}, {LATENT_TOKEN}={latent_id}")
-    return added, bot_id, eot_id, latent_id
+    print(f"  添加特殊 token: {LATENT_TOKEN}={latent_id}")
+    return added, latent_id
 
 
 @dataclass
@@ -55,12 +51,12 @@ class CODIDataset(Dataset):
     构建 CODI 训练对：teacher (显式 CoT) + student (latent tokens)。
 
     Teacher 序列:
-      [prompt_tokens] [think_tokens] [solution_tokens]
-                                      ^--- align position
+      ...<|Assistant|><think>[CoT]</think>[solution]
+                                           ^--- align position
 
     Student 序列:
-      [prompt_tokens] [<bot>] [<latent>]*K [<eot>] [solution_tokens]
-                                                    ^--- align position
+      ...<|Assistant|><think>[<latent>]*K</think>[solution]
+                                                  ^--- align position
     """
 
     def __init__(self, data_path: str, tokenizer, num_latent_tokens: int,
@@ -71,8 +67,6 @@ class CODIDataset(Dataset):
         self.max_length = max_length
         self.samples = []
 
-        bot_id = tokenizer.convert_tokens_to_ids(BOT_TOKEN)
-        eot_id = tokenizer.convert_tokens_to_ids(EOT_TOKEN)
         latent_id = tokenizer.convert_tokens_to_ids(LATENT_TOKEN)
 
         skipped = 0
@@ -97,7 +91,7 @@ class CODIDataset(Dataset):
                     skipped += 1
                     continue
 
-                sample = self._build_sample(r, bot_id, eot_id, latent_id)
+                sample = self._build_sample(r, latent_id)
                 if sample is not None:
                     self.samples.append(sample)
 
@@ -105,7 +99,7 @@ class CODIDataset(Dataset):
             print(f"  跳过 {skipped} 条无效记录")
         print(f"  成功加载 {len(self.samples)} 条 CODI 训练样本")
 
-    def _build_sample(self, record, bot_id, eot_id, latent_id):
+    def _build_sample(self, record, latent_id):
         tokenizer = self.tokenizer
         orig_system = strip_posthoc(record["prompt"]["system"], _POSTHOC_SYSTEM_MARKER)
         orig_user = strip_posthoc(record["prompt"]["user"], _POSTHOC_USER_MARKER)
@@ -138,7 +132,7 @@ class CODIDataset(Dataset):
             return None
 
         # ── Teacher 序列 ──
-        # prompt + <think>\n + cot + </think>\n + solution + eos
+        # ...<|Assistant|><think>\n + cot + </think>\n + solution + eos
         teacher_text = prompt_text + cot_text + "</think>\n" + solution_text + tokenizer.eos_token
         teacher_ids = tokenizer.encode(teacher_text, add_special_tokens=False)
 
@@ -161,38 +155,28 @@ class CODIDataset(Dataset):
         teacher_labels = [-100] * teacher_align_pos + teacher_ids[teacher_align_pos:]
 
         # ── Student 序列 ──
-        # Student 用 <bot> + latent + <eot> 替代 <think>...CoT...</think>
-        # R1-Distill 的 add_generation_prompt 会加 <think>\n，student 需要去掉
-        prompt_base = tokenizer.apply_chat_template(
-            [{"role": "system", "content": orig_system},
-             {"role": "user", "content": orig_user}],
-            tokenize=False, add_generation_prompt=True,
-        )
-        prompt_base_stripped = prompt_base.rstrip()
-        if prompt_base_stripped.endswith("<think>"):
-            prompt_base = prompt_base[:prompt_base.rfind("<think>")]
-        prompt_ids = tokenizer.encode(prompt_base, add_special_tokens=False)
+        # ...<|Assistant|><think>\n + <latent>*K + </think>\n + solution + eos
+        # prompt_text 已经以 <think>\n 结尾，直接复用
+        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
 
-        # <bot> + K 个 <latent> + <eot>
-        latent_block = [bot_id] + [latent_id] * self.num_latent_tokens + [eot_id]
-
-        # solution 部分
+        latent_block = [latent_id] * self.num_latent_tokens
+        think_close_with_nl = tokenizer.encode("</think>\n", add_special_tokens=False)
         solution_with_eos = solution_text + tokenizer.eos_token
         solution_ids = tokenizer.encode(solution_with_eos, add_special_tokens=False)
 
-        student_ids = prompt_ids + latent_block + solution_ids
+        student_ids = prompt_ids + latent_block + think_close_with_nl + solution_ids
 
         if len(student_ids) > self.max_length:
             return None
 
-        # Student 对齐位置: latent block 之后的第一个 solution token
-        student_align_pos = len(prompt_ids) + len(latent_block)
+        # Student 对齐位置: </think>\n 之后的第一个 solution token
+        student_align_pos = len(prompt_ids) + len(latent_block) + len(think_close_with_nl)
 
         # Student labels: 只在 solution 部分计算 loss
         student_labels = [-100] * student_align_pos + solution_ids
 
         # Latent positions: <latent> tokens 在 student 序列中的绝对位置
-        latent_start = len(prompt_ids) + 1  # +1 跳过 <bot>
+        latent_start = len(prompt_ids)
         latent_positions = list(range(latent_start, latent_start + self.num_latent_tokens))
 
         return CODISample(

@@ -106,8 +106,7 @@ def train(cfg: LatentSFTConfig):
 
     tokenizer.padding_side = "right"
 
-    # 添加 CODI 特殊 token
-    num_added, bot_id, eot_id, latent_id = add_special_tokens(tokenizer)
+    num_added, latent_id = add_special_tokens(tokenizer)
 
     # ── 模型 ──
     model = AutoModelForCausalLM.from_pretrained(
