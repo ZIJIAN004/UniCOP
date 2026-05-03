@@ -104,7 +104,7 @@ def compute_codi_loss(
 
         h_t_batch = torch.stack(h_t_list)
         h_s_batch = torch.stack(h_s_list)
-        std = h_t_batch.std().clamp(min=1e-6)
+        std = h_t_batch.std(dim=-1).mean().clamp(min=1e-6)
         layer_loss = (h_t_batch - h_s_batch).abs().mean() / std
 
         align_loss = align_loss + layer_loss

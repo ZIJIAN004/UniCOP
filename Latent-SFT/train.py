@@ -120,7 +120,7 @@ def train(cfg: LatentSFTConfig):
         model.resize_token_embeddings(len(tokenizer))
 
     if cfg.gradient_checkpointing:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
 
@@ -167,6 +167,12 @@ def train(cfg: LatentSFTConfig):
         {"params": latent_emb.parameters(), "lr": cfg.latent_lr, "weight_decay": 0.0},
     ])
 
+    # ── Accelerate prepare（先 prepare，再用 sharded dataloader 长度算 scheduler）──
+    model, optimizer, dataloader = accelerator.prepare(
+        model, optimizer, dataloader
+    )
+    latent_emb = latent_emb.to(accelerator.device)
+
     num_training_steps = math.ceil(
         len(dataloader) / cfg.gradient_accumulation_steps
     ) * cfg.num_epochs
@@ -177,12 +183,7 @@ def train(cfg: LatentSFTConfig):
         num_warmup_steps=num_warmup_steps,
         num_training_steps=num_training_steps,
     )
-
-    # ── Accelerate prepare ──
-    model, optimizer, dataloader, scheduler = accelerator.prepare(
-        model, optimizer, dataloader, scheduler
-    )
-    latent_emb = latent_emb.to(accelerator.device)
+    scheduler = accelerator.prepare(scheduler)
 
     # ── 训练循环 ──
     global_step = 0
@@ -211,11 +212,11 @@ def train(cfg: LatentSFTConfig):
 
                 accelerator.backward(total_loss)
 
-                # 多卡同步 latent_emb 梯度
-                if accelerator.num_processes > 1 and latent_emb.embeddings.grad is not None:
-                    torch.distributed.all_reduce(latent_emb.embeddings.grad, op=torch.distributed.ReduceOp.AVG)
-
                 if accelerator.sync_gradients:
+                    # 多卡同步 latent_emb 梯度（仅在梯度累积完成时）
+                    if accelerator.num_processes > 1 and latent_emb.embeddings.grad is not None:
+                        torch.distributed.all_reduce(latent_emb.embeddings.grad, op=torch.distributed.ReduceOp.AVG)
+
                     accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
                     torch.nn.utils.clip_grad_norm_(latent_emb.parameters(), cfg.max_grad_norm)
 

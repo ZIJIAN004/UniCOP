@@ -61,16 +61,34 @@ class LatentInferenceEngine:
         """
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.model.device)
 
+        # 预填充 KV cache（处理 prompt），避免第一步 latent 浪费在 prompt 编码上
+        prefill_out = self.model(
+            input_ids=input_ids, use_cache=True, output_hidden_states=True,
+        )
+        past_key_values = prefill_out.past_key_values
+        last_hidden = prefill_out.hidden_states[-1][:, -1, :]
+
         generated_tokens = []
-        past_key_values = None
         entropy_history = []
-        current_input = input_ids
 
         in_latent = start_latent
         latent_step_count = 0
 
+        # 非 latent 启动时，用 prefill logits 采样第一个 token
+        if not start_latent:
+            first_logits = prefill_out.logits[:, -1, :]
+            first_id = self._sample(first_logits, temperature)
+            generated_tokens.append(first_id)
+            current_input = torch.tensor([[first_id]], device=self.model.device)
+            if first_id == self.tokenizer.eos_token_id:
+                return self.tokenizer.decode(generated_tokens, skip_special_tokens=True), {
+                    "num_tokens": 1, "entropy_history": [],
+                }
+        else:
+            current_input = None
+
         for step in range(max_new_tokens):
-            if in_latent and past_key_values is not None:
+            if in_latent:
                 # COCONUT 式: 用上一步的 hidden state 作为输入，shape (1, 1, hidden)
                 outputs = self.model(
                     inputs_embeds=last_hidden.unsqueeze(1),

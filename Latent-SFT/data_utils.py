@@ -145,13 +145,14 @@ class CODIDataset(Dataset):
         if len(teacher_ids) > self.max_length:
             return None
 
-        # 找 teacher 的对齐位置: </think>\n 之后的第一个 solution token
-        # 在完整编码序列中搜索 </think> token，避免 BPE 非可加性导致位置偏移
-        think_close_id = tokenizer.convert_tokens_to_ids("</think>")
+        # 找 teacher 的对齐位置: </think> 子序列之后的第一个 solution token
+        # Qwen2.5 中 </think> 会被切分为多个 sub-token，需要做子序列匹配
+        think_close_ids = tokenizer.encode("</think>", add_special_tokens=False)
+        tc_len = len(think_close_ids)
         teacher_align_pos = None
-        for idx in range(len(teacher_ids) - 1, -1, -1):
-            if teacher_ids[idx] == think_close_id:
-                teacher_align_pos = idx + 1  # </think> 之后的位置
+        for idx in range(len(teacher_ids) - tc_len, -1, -1):
+            if teacher_ids[idx:idx + tc_len] == think_close_ids:
+                teacher_align_pos = idx + tc_len
                 break
         if teacher_align_pos is None or teacher_align_pos >= len(teacher_ids):
             return None
