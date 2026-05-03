@@ -117,7 +117,7 @@ class CODIDataset(Dataset):
              {"role": "user", "content": orig_user}],
             tokenize=False, add_generation_prompt=True,
         )
-        # Qwen2.5 需要手动补 <think>
+        # R1-Distill 的 add_generation_prompt 末尾带 <think>\n，兜底手动补
         if not prompt_text.rstrip().endswith("<think>"):
             prompt_text += "<think>\n"
 
@@ -146,7 +146,7 @@ class CODIDataset(Dataset):
             return None
 
         # 找 teacher 的对齐位置: </think> 子序列之后的第一个 solution token
-        # Qwen2.5 中 </think> 会被切分为多个 sub-token，需要做子序列匹配
+        # R1-Distill tokenizer 中 </think> 被切分为多个 sub-token，需要做子序列匹配
         think_close_ids = tokenizer.encode("</think>", add_special_tokens=False)
         tc_len = len(think_close_ids)
         teacher_align_pos = None
@@ -161,13 +161,16 @@ class CODIDataset(Dataset):
         teacher_labels = [-100] * teacher_align_pos + teacher_ids[teacher_align_pos:]
 
         # ── Student 序列 ──
-        # prompt 部分（去掉末尾的 <think>\n，换成 <bot> + latent + <eot>）
-        # 先渲染不带 <think> 的 prompt
+        # Student 用 <bot> + latent + <eot> 替代 <think>...CoT...</think>
+        # R1-Distill 的 add_generation_prompt 会加 <think>\n，student 需要去掉
         prompt_base = tokenizer.apply_chat_template(
             [{"role": "system", "content": orig_system},
              {"role": "user", "content": orig_user}],
             tokenize=False, add_generation_prompt=True,
         )
+        prompt_base_stripped = prompt_base.rstrip()
+        if prompt_base_stripped.endswith("<think>"):
+            prompt_base = prompt_base[:prompt_base.rfind("<think>")]
         prompt_ids = tokenizer.encode(prompt_base, add_special_tokens=False)
 
         # <bot> + K 个 <latent> + <eot>
