@@ -43,6 +43,8 @@ def get_version(pkg_name: str) -> str | None:
         return getattr(mod, "__version__", "installed (no __version__)")
     except ImportError:
         return None
+    except Exception as e:
+        return f"import error: {e}"
 
 
 def get_cuda_info() -> dict:
