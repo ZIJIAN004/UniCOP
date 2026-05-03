@@ -131,6 +131,9 @@ def main():
     parser.add_argument("--model",        type=str, default=config.model_name)
     parser.add_argument("--num_train",    type=int, default=config.num_train)
     parser.add_argument("--output_dir",   type=str, default=config.output_dir)
+    parser.add_argument("--reward_mode",  type=str, default=config.reward_mode,
+                        choices=["prm", "foarl"],
+                        help="奖励模式：prm=三信号解耦+POMO PRM | foarl=FOARL 无 PRM")
     parser.add_argument("--no_lora",      action="store_true")
     parser.add_argument("--num_gpus",     type=int, default=config.num_gpus,
                         help="使用的 GPU 数量，需与 accelerate launch --num_processes 一致")
@@ -180,19 +183,23 @@ def main():
     config.no_repeat_ngram_size   = args.no_repeat_ngram_size
     config.clip_epsilon_low       = args.clip_epsilon_low
     config.clip_epsilon_high      = args.clip_epsilon_high
+    config.reward_mode            = args.reward_mode
     config.pomo_ckpt_dir          = args.pomo_ckpt_dir
     config.pomo_baseline_dir      = args.pomo_baseline_dir
     config.pipd_ckpt_dir          = args.pipd_ckpt_dir
     config.pipd_dir               = args.pipd_dir
 
-    # ── 早期检查：所有问题类型必须在 POMO PRM 支持列表内 ───────────
-    unsupported = [pt for pt in problem_types if pt not in POMOPRM.SUPPORTED]
-    if unsupported:
-        raise ValueError(
-            f"以下问题类型不在 POMO PRM 支持列表 {sorted(POMOPRM.SUPPORTED)}: "
-            f"{unsupported}。vanilla reward 模式已删除，请仅使用 POMO 支持的类型。"
-        )
+    # ── 早期检查：PRM 模式下所有问题类型必须在 POMO PRM 支持列表内 ──
+    if config.reward_mode == "prm":
+        unsupported = [pt for pt in problem_types if pt not in POMOPRM.SUPPORTED]
+        if unsupported:
+            raise ValueError(
+                f"以下问题类型不在 POMO PRM 支持列表 {sorted(POMOPRM.SUPPORTED)}: "
+                f"{unsupported}。请使用 --reward_mode foarl 或仅使用 POMO 支持的类型。"
+            )
 
+    print(f"奖励模式:  {config.reward_mode}"
+          f"{'（三信号解耦 + POMO PRM）' if config.reward_mode == 'prm' else '（FOARL 无 PRM）'}")
     print(f"问题类型:  {problem_types}{'（混合模式）' if is_mixed else ''}")
     print(f"问题规模:  n={config.problem_size}")
     print(f"模型:      {config.model_name}")
@@ -346,15 +353,18 @@ def main():
         vllm_server_port=args.vllm_server_port,
     )
 
-    # ── 初始化 POMO PRM + 训练 ─────────────────────────────────────────
-    pomo_prm = POMOPRM(
-        pomo_ckpt_dir=config.pomo_ckpt_dir,
-        pomo_baseline_dir=config.pomo_baseline_dir,
-        device=config.pomo_device,
-        pipd_ckpt_dir=config.pipd_ckpt_dir or None,
-        pipd_dir=config.pipd_dir or None,
-    )
-    pomo_prm.check_checkpoints(problem_types, [config.problem_size])
+    # ── 初始化奖励模块 + 训练 ──────────────────────────────────────────
+    if config.reward_mode == "prm":
+        pomo_prm = POMOPRM(
+            pomo_ckpt_dir=config.pomo_ckpt_dir,
+            pomo_baseline_dir=config.pomo_baseline_dir,
+            device=config.pomo_device,
+            pipd_ckpt_dir=config.pipd_ckpt_dir or None,
+            pipd_dir=config.pipd_dir or None,
+        )
+        pomo_prm.check_checkpoints(problem_types, [config.problem_size])
+    else:
+        pomo_prm = None
 
     trainer = GRPOPRMTrainer(
         pomo_prm=pomo_prm,
@@ -366,8 +376,9 @@ def main():
         processing_class=tokenizer,
     )
 
-    pomo_prm.device = trainer.accelerator.device
-    print(f"POMO PRM device: {pomo_prm.device}")
+    if pomo_prm is not None:
+        pomo_prm.device = trainer.accelerator.device
+        print(f"POMO PRM device: {pomo_prm.device}")
 
     print("\n开始 GRPO 训练...")
 

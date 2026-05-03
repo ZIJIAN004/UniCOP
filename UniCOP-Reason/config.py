@@ -63,13 +63,28 @@ class Config:
     pipd_ckpt_dir: str      = ""    # 指向 {PIP-D baseline}/POMO+PIP/pretrained/TSPTW
     pipd_dir: str           = ""    # 指向 {PIP-D baseline}/POMO+PIP (代码目录,用于 sys.path 注入)
 
-    # ── 三信号解耦奖励（feasibility gate + outcome + process） ─────
+    # ── 奖励模式 ──────────────────────────────────────────────────────
+    # prm:   三信号解耦（feasibility gate + outcome + POMO PRM process）
+    # foarl: Feasibility-and-Optimality-Aware RL（无 PRM，纯 completion 级奖励）
+    #        参考: Jiang et al., NeurIPS 2025, arXiv:2509.16865
+    reward_mode: str               = "prm"  # "prm" | "foarl"
+
+    # ── 三信号解耦奖励（reward_mode=prm） ────────────────────────────
     # 不可行 → A_total = 动态惩罚 (hist_min - margin)
     # 可行   → A_total = A_out + proc_alpha · A_proc，广播到所有 token
     disable_prm: bool              = False # ablation: 关闭 process reward，只用 outcome
     proc_alpha: float              = 0.5   # process 信号权重（< 1，outcome 为主）
     infeasible_margin: float       = 1.0   # 惩罚低于历史最小可行 advantage 的幅度
     infeasible_default_penalty: float = -5.0  # 训练初始还没见过可行解时的 fallback
+
+    # ── FOARL 奖励（reward_mode=foarl） ──────────────────────────────
+    # R = R_f + R_o
+    # R_f = omega 加权的约束满足度，R_o = alpha / (1 + optimality_gap)
+    foarl_alpha: float             = 0.5   # optimality reward scaling
+    foarl_omega_parse: float       = 0.2   # 格式可解析权重
+    foarl_omega_coverage: float    = 0.3   # 客户覆盖权重
+    foarl_omega_constraint: float  = 0.3   # 约束满足权重
+    foarl_omega_format: float      = 0.2   # Route 编号正确性权重
 
     # ── 输出 ─────────────────────────────────────────────────────────
     output_dir: str    = "./output"

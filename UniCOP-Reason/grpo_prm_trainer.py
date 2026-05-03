@@ -20,6 +20,8 @@ from trl import GRPOTrainer
 
 from pomo_prm import POMOPRM, StepRewards
 from terminal_reward import compute_terminal_components, is_fully_feasible
+from foarl_reward import compute_foarl_reward
+from ref_solver import solve_reference
 from config import config
 
 from problems.tsp import TSP
@@ -36,10 +38,10 @@ _PROBLEM_OBJS = {
 
 class GRPOPRMTrainer(GRPOTrainer):
 
-    def __init__(self, pomo_prm: POMOPRM, problem_types: list[str], **kwargs):
+    def __init__(self, pomo_prm=None, problem_types: list[str] = None, **kwargs):
         super().__init__(**kwargs)
         self.pomo_prm = pomo_prm
-        self.problem_types = problem_types
+        self.problem_types = problem_types or []
         self._hist_min = float('inf')
 
         if self.args.num_generations < 2:
@@ -110,33 +112,39 @@ class GRPOPRMTrainer(GRPOTrainer):
         )
         instances = [self._deserialize_instance(pd) for pd in problem_data_list]
 
-        # 可行性重采样：每组至少 2 条可行解
-        self._resample_infeasible(
-            batch, completions_text, instances, problem_type_list, num_gen
-        )
-
-        # PRM step rewards（ablation 模式下跳过）
-        if config.disable_prm:
-            all_step_rewards = [None] * B
+        if config.reward_mode == "foarl":
+            advantages = self._build_foarl_advantages(
+                completions_text, instances, problem_type_list,
+                B, num_gen, device=completion_ids.device,
+            )
         else:
-            all_step_rewards = []
-            for i in range(B):
-                pt = problem_type_list[i]
-                if pt not in POMOPRM.SUPPORTED:
-                    raise ValueError(
-                        f"Problem type '{pt}' 不在 POMO PRM 支持列表 "
-                        f"{sorted(POMOPRM.SUPPORTED)}。"
-                    )
-                sr = self.pomo_prm.compute_step_rewards(
-                    completions_text[i], instances[i], pt
-                )
-                all_step_rewards.append(sr)
+            # 可行性重采样：每组至少 2 条可行解
+            self._resample_infeasible(
+                batch, completions_text, instances, problem_type_list, num_gen
+            )
 
-        # 三信号解耦 → 统一 advantage (B,)
-        advantages = self._build_unified_advantages(
-            completions_text, instances, problem_type_list,
-            all_step_rewards, B, num_gen, device=completion_ids.device,
-        )
+            # PRM step rewards（ablation 模式下跳过）
+            if config.disable_prm:
+                all_step_rewards = [None] * B
+            else:
+                all_step_rewards = []
+                for i in range(B):
+                    pt = problem_type_list[i]
+                    if pt not in POMOPRM.SUPPORTED:
+                        raise ValueError(
+                            f"Problem type '{pt}' 不在 POMO PRM 支持列表 "
+                            f"{sorted(POMOPRM.SUPPORTED)}。"
+                        )
+                    sr = self.pomo_prm.compute_step_rewards(
+                        completions_text[i], instances[i], pt
+                    )
+                    all_step_rewards.append(sr)
+
+            # 三信号解耦 → 统一 advantage (B,)
+            advantages = self._build_unified_advantages(
+                completions_text, instances, problem_type_list,
+                all_step_rewards, B, num_gen, device=completion_ids.device,
+            )
 
         batch["advantages"] = advantages
         # 清理旧字段，避免父类或后续代码误用
@@ -390,6 +398,59 @@ class GRPOPRMTrainer(GRPOTrainer):
         })
 
         return A_total
+
+    # ══════════════════════════════════════════════════════════════════
+    #  FOARL Advantage
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_foarl_advantages(self, completions_text, instances,
+                                 problem_type_list, B, num_gen, device):
+        eps = 1e-8
+        rewards = torch.zeros(B, device=device)
+        all_components = []
+        num_groups = B // num_gen
+
+        for g in range(num_groups):
+            s = g * num_gen
+            pt = problem_type_list[s]
+            inst = instances[s]
+            ref_dist = solve_reference(inst, pt)
+
+            for j in range(num_gen):
+                i = s + j
+                r, comp = compute_foarl_reward(
+                    completions_text[i], inst, pt, ref_dist,
+                    alpha=config.foarl_alpha,
+                    omega_parse=config.foarl_omega_parse,
+                    omega_coverage=config.foarl_omega_coverage,
+                    omega_constraint=config.foarl_omega_constraint,
+                    omega_format=config.foarl_omega_format,
+                )
+                rewards[i] = r
+                all_components.append(comp)
+
+        advantages = torch.zeros(B, device=device)
+        for g in range(num_groups):
+            s, e = g * num_gen, (g + 1) * num_gen
+            group_r = rewards[s:e]
+            advantages[s:e] = (group_r - group_r.mean()) / (group_r.std() + eps)
+
+        r_f_vals = [c["R_f"] for c in all_components]
+        r_o_vals = [c["R_o"] for c in all_components]
+        gaps = [c["gap"] for c in all_components if c["gap"] is not None]
+        self.log({
+            "foarl/R_total_mean":    self._gather_mean(rewards.mean()),
+            "foarl/R_f_mean":        self._gather_mean(np.mean(r_f_vals)),
+            "foarl/R_o_mean":        self._gather_mean(np.mean(r_o_vals)),
+            "foarl/gap_mean":        self._gather_mean(np.mean(gaps) if gaps else 0.0),
+            "foarl/parse_rate":      self._gather_mean(np.mean([c["parse"] for c in all_components])),
+            "foarl/coverage_rate":   self._gather_mean(np.mean([c["coverage"] for c in all_components])),
+            "foarl/constraint_mean": self._gather_mean(np.mean([c["constraint"] for c in all_components])),
+            "foarl/format_mean":     self._gather_mean(np.mean([c["format"] for c in all_components])),
+            "foarl/A_mean":          self._gather_mean(advantages.mean()),
+        })
+
+        return advantages
 
     # ══════════════════════════════════════════════════════════════════
     #  Loss 计算（单一 DAPO token-level）
