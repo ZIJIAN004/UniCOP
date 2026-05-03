@@ -337,6 +337,11 @@ def main():
     print("加载 tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
 
+    # chat_template 已在文本开头渲染 BOS，禁止 tokenizer 再自动加一个
+    if getattr(tokenizer, "add_bos_token", False):
+        tokenizer.add_bos_token = False
+        print("  ✓ 已设置 add_bos_token = False (防止双 BOS)")
+
     # ⚠️ 关键坑: 不能 pad_token = eos_token
     #    原因: collator 会把所有 pad_token 位置 label 置 -100 (不参与 loss),
     #    如果 pad_token == eos_token, 则所有 eos 位置也被一起 mask,

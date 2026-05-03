@@ -288,6 +288,11 @@ def main():
     # ── Tokenizer ────────────────────────────────────────────────────────
     print("加载 tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+
+    if getattr(tokenizer, "add_bos_token", False):
+        tokenizer.add_bos_token = False
+        print("  ✓ 已设置 add_bos_token = False (防止双 BOS)")
+
     need_resize = _setup_pad_token(tokenizer)
     tokenizer.padding_side = "right"
     assert tokenizer.pad_token_id != tokenizer.eos_token_id
