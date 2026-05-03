@@ -29,7 +29,7 @@ elif [ -d "/Data04/yangzhihan/lzj" ]; then
     PIPD_DIR="/Data04/yangzhihan/lzj/PIP-D baseline"
     PIPD_CKPT_DIR=""  # 待补充
     # ── 环境 ──
-    CUDA_HOME="/Data04/yangzhihan/envs/lzj_env"
+    CUDA_HOME="/Data04/yangzhihan/envs/unicop"
     LKH_BIN="/Data04/yangzhihan/lzj/LKH-3.0.9/LKH"
     # ── 模型 ──
     BASE_MODEL="/Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"

@@ -22,6 +22,6 @@
 | 项目主目录 | `/Data04/yangzhihan/lzj/UniCOP` |
 | POMO 预训练求解器 | `/Data04/yangzhihan/lzj/POMO-Baseline` |
 | PIP-D TSPTW 求解器 | `/Data04/yangzhihan/lzj/PIP-D baseline` |
-| Conda 环境 / CUDA_HOME | `/Data04/yangzhihan/envs/lzj_env` |
+| Conda 环境 / CUDA_HOME | `/Data04/yangzhihan/envs/unicop` |
 | LKH 求解器 | `/Data04/yangzhihan/lzj/LKH-3.0.9/LKH` |
 | 基座模型 | `/Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` |
