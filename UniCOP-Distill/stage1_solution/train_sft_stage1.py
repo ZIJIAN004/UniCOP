@@ -131,6 +131,18 @@ def _detect_think_suffix(tokenizer) -> str:
     return ""
 
 
+def _detect_response_template(tokenizer) -> str:
+    """从 chat_template 探测 assistant 标记，适配 ChatML / DeepSeek / Llama 3 等格式。"""
+    msgs = [{"role": "user", "content": "Hi"}]
+    without_gp = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+    with_gp    = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    gen_prompt = with_gp[len(without_gp):]
+    think_idx = gen_prompt.find("<think>")
+    if think_idx > 0:
+        gen_prompt = gen_prompt[:think_idx]
+    return gen_prompt
+
+
 def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
                         think_suffix: str,
                         filter_problems=None, filter_sizes=None) -> Dataset:
@@ -223,8 +235,7 @@ def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
     print(f"  规模分布: {dict(sorted(size_counts.items()))}")
 
     return Dataset.from_dict({
-        "prompt": [r["prompt"] for r in records],
-        "completion": [r["completion"] for r in records],
+        "text": [r["prompt"] + r["completion"] for r in records],
     })
 
 
@@ -349,10 +360,9 @@ def main():
     )
 
     # ── Completion-only loss（TRL 0.16 不支持 SFTConfig.completion_only_loss）──
-    response_template_ids = tokenizer.encode(
-        "<|im_start|>assistant\n", add_special_tokens=False,
-    )
-    print(f"  response_template token IDs: {response_template_ids}")
+    response_template_str = _detect_response_template(tokenizer)
+    response_template_ids = tokenizer.encode(response_template_str, add_special_tokens=False)
+    print(f"  response_template: {response_template_str!r} → IDs: {response_template_ids}")
     data_collator = DataCollatorForCompletionOnlyLM(
         response_template=response_template_ids,
         tokenizer=tokenizer,
