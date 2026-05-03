@@ -16,8 +16,8 @@
 set -euo pipefail
 
 # ── 自动 log ─────────────────────────────────────────────────────────────────
-DISTILL_DIR="$(cd "$(dirname "$0")" && pwd)"
-LOG_FILE="$DISTILL_DIR/self_rationalize_$(date '+%Y%m%d_%H%M%S').log"
+_SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG_FILE="$_SELF_DIR/self_rationalize_$(date '+%Y%m%d_%H%M%S').log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "日志文件: $LOG_FILE"
 
@@ -25,7 +25,7 @@ echo "日志文件: $LOG_FILE"
 export PYTHONUNBUFFERED=1
 
 # ── 路径（从 paths.sh 获取） ──────────────────────────────────────────────────
-source "$(dirname "$DISTILL_DIR")/paths.sh"
+source "$(dirname "$_SELF_DIR")/paths.sh"
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
 
