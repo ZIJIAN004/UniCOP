@@ -1,15 +1,18 @@
 #!/bin/bash
 # auto_eval.sh — 等待 4 张 GPU 完全空闲后依次评估 3 个模型，OOM 自动减半 batch_size 重试
 
-WORK_DIR="/home/ntu/lzj/UniCOP/UniCOP-Reason"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$(dirname "$SCRIPT_DIR")/paths.sh"
+
+WORK_DIR="$REASON_DIR"
 SAVE_DIR="$WORK_DIR/eval_results"
 LOG_DIR="$WORK_DIR/eval_logs"
 mkdir -p "$SAVE_DIR" "$LOG_DIR"
 
 MODELS=(
-    "/home/ntu/lzj/UniCOP/UniCOP-Reason/model/Qwen3-4B/"
-    "/home/ntu/lzj/UniCOP/UniCOP-Reason/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-1___5B/"
-    "/home/ntu/lzj/UniCOP/UniCOP-Reason/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/"
+    "$WORK_DIR/model/Qwen3-4B/"
+    "$WORK_DIR/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-1___5B/"
+    "$WORK_DIR/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B/"
 )
 
 INIT_BATCH_SIZE=8

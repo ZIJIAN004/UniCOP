@@ -18,18 +18,16 @@ set +e  # 单项失败不立刻退出,累积报告
 FAIL=0
 WARN=0
 
-# 复用 auto_train.sh 的路径 (如果你改了路径,先改 auto_train.sh 再跑这个)
-WORK_DIR="/home/ntu/lzj/UniCOP/UniCOP-Reason"
-MODEL_BASE=$(ls -d /home/ntu/lzj/UniCOP/UniCOP-Distill/output/*/final_model 2>/dev/null | sort -r | head -1)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$(dirname "$SCRIPT_DIR")/paths.sh"
+
+WORK_DIR="$REASON_DIR"
+MODEL_BASE=$(ls -d "$DISTILL_DIR/output/*/final_model" 2>/dev/null | sort -r | head -1)
 if [ -z "$MODEL_BASE" ]; then
-    MODEL_BASE="/home/ntu/lzj/UniCOP/UniCOP-Distill/output/NOT_FOUND/final_model"
+    MODEL_BASE="$DISTILL_DIR/output/NOT_FOUND/final_model"
 fi
 echo "[MODEL_BASE] $MODEL_BASE"
-POMO_CKPT_DIR="/home/ntu/lzj/POMO-Baseline/result"
-POMO_BASELINE_DIR="/home/ntu/lzj/POMO-Baseline"
-PIPD_CKPT_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
-PIPD_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP"
-CUDA_HOME_PATH="/home/ntu/anaconda3/envs/unicop"
+CUDA_HOME_PATH="$CUDA_HOME"
 
 # 当前训练矩阵: 自动从 auto_train.sh 读取,避免两边手动对齐
 AUTO_TRAIN_SH="$(dirname "$0")/auto_train.sh"

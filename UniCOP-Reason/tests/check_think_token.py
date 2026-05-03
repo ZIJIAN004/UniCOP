@@ -3,8 +3,9 @@
 import sys
 from transformers import AutoTokenizer
 
+import os
 MODEL_PATH = sys.argv[1] if len(sys.argv) > 1 else \
-    "/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
+    os.environ.get("BASE_MODEL", "")
 
 tok = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 

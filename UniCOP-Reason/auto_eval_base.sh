@@ -6,16 +6,19 @@
 #   - 2 张卡空闲且仅剩 1.5B 任务：两张卡各跑一个 1.5B 任务（并行）
 #   - 大模型优先级：4B > 7B
 
-EVAL_DIR="/home/ntu/lzj/UniCOP/UniCOP-Reason"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$(dirname "$SCRIPT_DIR")/paths.sh"
+
+EVAL_DIR="$REASON_DIR"
 LOG_DIR="$EVAL_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 TOTAL_GPUS=4
 
 # 模型列表
-MODEL_1_5B="/home/ntu/lzj/UniCOP/UniCOP-Reason/model/DeepSeek-R1-Distill-Qwen-1.5B"
-MODEL_4B="/home/ntu/lzj/UniCOP/UniCOP-Reason/model/Qwen3-4B-Thinking-2507"
-MODEL_7B="/home/ntu/lzj/UniCOP/UniCOP-Reason/model/DeepSeek-R1-Distill-Qwen-7B"
+MODEL_1_5B="$EVAL_DIR/model/DeepSeek-R1-Distill-Qwen-1.5B"
+MODEL_4B="$EVAL_DIR/model/Qwen3-4B-Thinking-2507"
+MODEL_7B="$EVAL_DIR/model/DeepSeek-R1-Distill-Qwen-7B"
 
 # 全局日志
 exec > >(tee -a "$LOG_DIR/auto_eval_base_$(date '+%Y%m%d_%H%M%S').log") 2>&1
@@ -65,7 +68,7 @@ run_eval() {
         local log_file="$LOG_DIR/eval_${label}_${prompt_mode}_bs${bs}.log"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Evaluate | model=$label | mode=$prompt_mode | max_len=$max_len | bs=$bs | GPU=$gpu_ids"
 
-        CUDA_HOME=/home/ntu/anaconda3/envs/unicop CUDA_VISIBLE_DEVICES="$gpu_ids" \
+        CUDA_HOME="$CUDA_HOME" CUDA_VISIBLE_DEVICES="$gpu_ids" \
             python "$EVAL_DIR/evaluate.py" \
             --model_path "$model_path" \
             --problem tsp cvrp tsptw vrptw \

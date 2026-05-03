@@ -24,9 +24,12 @@ echo "日志文件: $LOG_FILE"
 # Python stdout 不缓冲，确保 print 立即写入 log
 export PYTHONUNBUFFERED=1
 
+# ── 路径（从 paths.sh 获取） ──────────────────────────────────────────────────
+source "$(dirname "$DISTILL_DIR")/paths.sh"
+
 # ── 配置 ──────────────────────────────────────────────────────────────────────
 
-MODEL_PATH="/Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+MODEL_PATH="$BASE_MODEL"
 SCKEY="SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
 
 PROBLEM="tsp"
@@ -46,13 +49,7 @@ SFT_EPOCHS=3
 SFT_LORA_RANK=64
 SFT_LORA_ALPHA=128
 
-# LKH 求解器（TSP 解生成）
-export LKH_BIN=/Data04/yangzhihan/lzj/LKH-3.0.9/LKH
-
-# CUDA
-export CUDA_HOME=/Data04/yangzhihan/envs/lzj_env
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
+# LKH / CUDA 已由 paths.sh export
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────

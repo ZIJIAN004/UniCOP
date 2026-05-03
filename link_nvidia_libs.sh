@@ -2,8 +2,11 @@
 # 把 pip 安装的 nvidia-* 包的 .so 库软链到 conda env 的 lib/ 下
 # 解决 DeepSpeed/flash-attn 等编译时找不到 -lcurand/-lcublas 等问题
 
-ENV_LIB="/home/ntu/anaconda3/envs/unicop/lib"
-NVIDIA_DIR="/home/ntu/anaconda3/envs/unicop/lib/python3.12/site-packages/nvidia"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/paths.sh"
+
+ENV_LIB="$CUDA_HOME/lib"
+NVIDIA_DIR="$CUDA_HOME/lib/python3.12/site-packages/nvidia"
 
 count=0
 for lib in "$NVIDIA_DIR"/*/lib/lib*.so*; do

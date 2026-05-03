@@ -18,9 +18,12 @@
 
 set -euo pipefail
 
-# ── 路径 ─────────────────────────────────────────────────────────────
-WORK_DIR="/home/ntu/lzj/UniCOP/UniCOP-Reason/openrlhf"
-MODEL_BASE="/home/ntu/lzj/UniCOP/UniCOP-Distill/output/merged_model"
+# ── 路径（从 paths.sh 获取） ──────────────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")/paths.sh"
+
+WORK_DIR="$REASON_DIR/openrlhf"
+MODEL_BASE="$DISTILL_DIR/output/merged_model"
 if [ ! -d "$MODEL_BASE" ]; then
     echo "❌ SFT merged model 不存在: $MODEL_BASE"
     exit 1
@@ -51,10 +54,7 @@ CLIP_EPS_HIGH=0.28               # DAPO clip-higher
 LORA_RANK=64
 LORA_ALPHA=128
 
-# ── CUDA_HOME (DeepSpeed 编译/检查需要) ──────────────────────────────
-export CUDA_HOME=/home/ntu/anaconda3/envs/unicop
-export PATH=$CUDA_HOME/bin:$PATH
-export LD_LIBRARY_PATH=$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}
+# ── CUDA_HOME (paths.sh 已 export，此处确保显式) ─────────────────────
 
 # ── NoRepeatNgram: 通过环境变量传参 ─────────────────────────────────
 export NO_REPEAT_NGRAM_SIZE=6

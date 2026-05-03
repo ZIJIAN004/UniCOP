@@ -20,7 +20,7 @@ from typing import Optional
 import numpy as np
 
 # ── 二进制路径（在此处修改，或通过环境变量覆盖）────────────────────────────────
-LKH_BIN  = os.environ.get("LKH_BIN", "/home/ntu/LKH/LKH")
+LKH_BIN  = os.environ.get("LKH_BIN", "")
 LKH3_BIN = LKH_BIN  # 保持向后兼容，两者指向同一二进制
 
 # 坐标缩放系数：LKH/PyVRP 使用整数距离，原始坐标在 [0,1]，放大以保留精度

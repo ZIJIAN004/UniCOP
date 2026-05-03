@@ -6,13 +6,14 @@
 """
 
 import argparse
+import os
 from transformers import AutoTokenizer
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str,
-                        default="/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B")
+                        default=os.environ.get("BASE_MODEL", ""))
     args = parser.parse_args()
 
     print(f"加载 tokenizer: {args.model}")

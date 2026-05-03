@@ -240,9 +240,9 @@ def main():
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--pomo_ckpt_dir", type=str,
-                        default="/home/ntu/lzj/POMO-Baseline/result")
+                        default=os.environ.get("POMO_CKPT_DIR", ""))
     parser.add_argument("--pomo_baseline_dir", type=str,
-                        default="/home/ntu/lzj/POMO-Baseline")
+                        default=os.environ.get("POMO_BASELINE_DIR", ""))
     parser.add_argument("--pipd_ckpt_dir", type=str, default=None,
                         help="TSPTW 用 PIP-D ckpt 根目录 (仅 TSPTW 需要)")
     parser.add_argument("--pipd_dir", type=str, default=None,

@@ -60,10 +60,8 @@ def _ensure_loaded():
                 _INSTANCES_CACHE.update(json.load(f))
 
     _POMO_PRM = POMOPRM(
-        pomo_ckpt_dir=os.environ.get(
-            "POMO_CKPT_DIR", "/home/ntu/lzj/POMO-Baseline/result"),
-        pomo_baseline_dir=os.environ.get(
-            "POMO_BASELINE_DIR", "/home/ntu/lzj/POMO-Baseline"),
+        pomo_ckpt_dir=os.environ.get("POMO_CKPT_DIR", ""),
+        pomo_baseline_dir=os.environ.get("POMO_BASELINE_DIR", ""),
         device="cuda",
         pipd_ckpt_dir=os.environ.get("PIPD_CKPT_DIR"),
         pipd_dir=os.environ.get("PIPD_DIR"),

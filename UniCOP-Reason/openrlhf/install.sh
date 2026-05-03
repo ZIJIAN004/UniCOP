@@ -30,8 +30,11 @@
 
 set -euo pipefail
 
-ENV_PATH=/home/ntu/anaconda3/envs/unicop
-CUDA_HOME_SRC=/home/ntu/anaconda3/envs/unicop
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$(dirname "$(dirname "$SCRIPT_DIR")")/paths.sh"
+
+ENV_PATH="$CUDA_HOME"
+CUDA_HOME_SRC="$CUDA_HOME"
 # 注意: 必须用 env 根目录, 不是 targets/x86_64-linux
 #   targets/x86_64-linux 路径对运行时 (libcudart) 够用,
 #   但对编译时的 nvcc 不够: nvcc 编译时要调 $CUDA_HOME/bin/cudafe++,

@@ -14,20 +14,15 @@
 set -uo pipefail
 
 # ══════════════════════════════════════════════════════════════════════
-# 路径配置
+# 路径配置（从 paths.sh 获取）
 # ══════════════════════════════════════════════════════════════════════
-MONO_DIR="/home/ntu/lzj/UniCOP"
-DISTILL_DIR="$MONO_DIR/UniCOP-Distill"
-REASON_DIR="$MONO_DIR/UniCOP-Reason"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/paths.sh"
+
+MONO_DIR="$UNICOP_ROOT"
 TOOLS_DIR="$MONO_DIR/tools"
 
-BASE_MODEL="/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
 SFT_DATA="$DISTILL_DIR/data/chains_v3_clean.jsonl"
-
-POMO_CKPT_DIR="/home/ntu/lzj/POMO-Baseline/result"
-POMO_BASELINE_DIR="/home/ntu/lzj/POMO-Baseline"
-PIPD_CKPT_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP/pretrained/TSPTW"
-PIPD_DIR="/home/ntu/lzj/PIP-D baseline/POMO+PIP"
 
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 # 使用已有的 SFT 产物,跳过 SFT 训练
@@ -175,7 +170,7 @@ run_sft() {
 
     PYTHONPATH="$DISTILL_DIR:${PYTHONPATH:-}" \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
-    CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
+    CUDA_HOME="$CUDA_HOME" \
     CUDA_VISIBLE_DEVICES="$gpus" \
         python -m accelerate.commands.launch --num_processes "$num_proc" \
         "$DISTILL_DIR/train_sft.py" \
@@ -218,7 +213,7 @@ run_sft_merge() {
     fi
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 阶段 2: 合并 SFT LoRA → $SFT_MERGED"
-    CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
+    CUDA_HOME="$CUDA_HOME" \
     python "$TOOLS_DIR/merge_lora.py" \
         --adapter "$adapter" \
         --base "$BASE_MODEL" \
@@ -246,7 +241,7 @@ start_vllm_server() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 vLLM server | GPU=$vllm_gpu | port=$port | ngram=$VLLM_NGRAM_SIZE"
     PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
     CUDA_VISIBLE_DEVICES="$vllm_gpu" \
-    CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
+    CUDA_HOME="$CUDA_HOME" \
     FLASHINFER_DISABLE_VERSION_CHECK=1 \
         python "$REASON_DIR/utils/vllm_serve_ngram.py" \
         --no_repeat_ngram_size "$VLLM_NGRAM_SIZE" \
@@ -315,7 +310,7 @@ run_grpo() {
 
     PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
+    CUDA_HOME="$CUDA_HOME" \
     CUDA_VISIBLE_DEVICES="$TRAIN_GPUS" \
         python -m accelerate.commands.launch --num_processes "$train_proc" "$REASON_DIR/train.py" \
         --problem "$problem" \
@@ -370,7 +365,7 @@ run_eval() {
     while [ "$bs" -ge 1 ]; do
         echo "===== batch_size=$bs  $(date '+%Y-%m-%d %H:%M:%S')  GPUs=$gpus =====" >> "$log_file"
         PYTHONPATH="$REASON_DIR:${PYTHONPATH:-}" \
-        CUDA_HOME=/home/ntu/anaconda3/envs/unicop \
+        CUDA_HOME="$CUDA_HOME" \
         PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,garbage_collection_threshold:0.8 \
             CUDA_VISIBLE_DEVICES="$gpus" \
             python "$REASON_DIR/evaluate.py" \

@@ -11,7 +11,10 @@
 
 set -e
 
-MERGED="/home/ntu/lzj/UniCOP/UniCOP-Distill/output/merged_model"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$(dirname "$SCRIPT_DIR")/paths.sh"
+
+MERGED="$DISTILL_DIR/output/merged_model"
 CFG="$MERGED/tokenizer_config.json"
 BAK="$MERGED/tokenizer_config.json.bak"
 

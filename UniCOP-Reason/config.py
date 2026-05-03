@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 
 
@@ -11,7 +12,7 @@ class Config:
     problem_size: int  = 10      # 客户节点数（不含 depot）
 
     # ── 模型 ─────────────────────────────────────────────────────────
-    model_name: str   = "/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
+    model_name: str   = os.environ.get("BASE_MODEL", "")
     use_lora: bool    = True
     lora_rank: int    = 64
     lora_alpha: int   = 128

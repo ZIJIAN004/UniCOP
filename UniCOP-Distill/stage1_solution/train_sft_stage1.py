@@ -27,7 +27,7 @@ from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
 from peft import LoraConfig
 
 
-DEFAULT_MODEL = "/home/ntu/lzj/Model/model/Qwen2.5-7B-Instruct"
+DEFAULT_MODEL = os.environ.get("BASE_MODEL", "")
 DEFAULT_DATA = "data/solutions.jsonl"
 
 
