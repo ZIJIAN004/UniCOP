@@ -151,8 +151,9 @@ class CODIDataset(Dataset):
         if teacher_align_pos is None or teacher_align_pos >= len(teacher_ids):
             return None
 
-        # Teacher labels: 只在 solution 部分计算 loss
-        teacher_labels = [-100] * teacher_align_pos + teacher_ids[teacher_align_pos:]
+        # Teacher labels: 只在 solution 部分计算 loss（align_pos 指向 \n，solution 从 +1 开始）
+        teacher_label_start = teacher_align_pos + 1
+        teacher_labels = [-100] * teacher_label_start + teacher_ids[teacher_label_start:]
 
         # ── Student 序列 ──
         # ...<|Assistant|><think>\n + <latent>*K + </think>\n + solution + eos
@@ -169,8 +170,9 @@ class CODIDataset(Dataset):
         if len(student_ids) > self.max_length:
             return None
 
-        # Student 对齐位置: </think>\n 之后的第一个 solution token
-        student_align_pos = len(prompt_ids) + len(latent_block) + len(think_close_with_nl)
+        # Student 对齐位置: </think>\n 的最后一个 token（与 teacher 的 \n 位置对齐）
+        # causal LM 中 hidden[i] 预测 token[i+1]，对齐点应在「预测第一个 solution token」的位置
+        student_align_pos = len(prompt_ids) + len(latent_block) + len(think_close_with_nl) - 1
 
         # Student labels: 只在 solution 部分计算 loss
         student_labels = [-100] * student_align_pos + solution_ids
