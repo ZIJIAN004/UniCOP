@@ -34,8 +34,22 @@ elif [ -d "/Data04/yangzhihan/lzj" ]; then
     # ── 模型 ──
     BASE_MODEL="/Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 
+elif [ -d "/homes/zhuoyi/zijianliu" ]; then
+    HOST_ID="astar-zhuoyi"
+    # ── 项目 ──
+    UNICOP_ROOT="/homes/zhuoyi/zijianliu/UniCOP"
+    POMO_BASELINE_DIR="/homes/zhuoyi/zijianliu/POMO-Baseline"
+    POMO_CKPT_DIR="$POMO_BASELINE_DIR/result"
+    PIPD_DIR="/homes/zhuoyi/zijianliu/PIP-D baseline"
+    PIPD_CKPT_DIR=""  # TODO
+    # ── 环境 ──
+    CUDA_HOME="/homes/zhuoyi/miniforge3/envs/unicop"
+    LKH_BIN="/homes/zhuoyi/zijianliu/LKH-3.0.9/LKH"
+    # ── 模型 ──
+    BASE_MODEL="/homes/zhuoyi/zijianliu/models/DeepSeek-R1-Distill-Qwen-7B"
+
 else
-    echo "❌ 无法识别当前主机（/home/ntu/lzj 和 /Data04/yangzhihan/lzj 均不存在）"
+    echo "❌ 无法识别当前主机（/home/ntu/lzj、/Data04/yangzhihan/lzj、/homes/zhuoyi/zijianliu 均不存在）"
     exit 1
 fi
 

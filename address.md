@@ -25,3 +25,16 @@
 | Conda 环境 / CUDA_HOME | `/Data04/yangzhihan/envs/unicop` |
 | LKH 求解器 | `/Data04/yangzhihan/lzj/LKH-3.0.9/LKH` |
 | 基座模型 | `/Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B` |
+
+## A*STAR-Zhuoyi 主机
+
+工作目录：`/homes/zhuoyi/zijianliu/`
+
+| 用途 | 路径 |
+|---|---|
+| 项目主目录 | `/homes/zhuoyi/zijianliu/UniCOP` |
+| POMO 预训练求解器 | `/homes/zhuoyi/zijianliu/POMO-Baseline` |
+| PIP-D TSPTW 求解器 | `/homes/zhuoyi/zijianliu/PIP-D baseline` |
+| Conda 环境 / CUDA_HOME | `/homes/zhuoyi/miniforge3/envs/unicop` |
+| LKH 求解器 | `/homes/zhuoyi/zijianliu/LKH-3.0.9/LKH` |
+| 基座模型 | `/homes/zhuoyi/zijianliu/models/DeepSeek-R1-Distill-Qwen-7B` |
