@@ -25,9 +25,9 @@ SCKEY="SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
 PROBLEM="cvrp"
 SIZE=20
 SOLUTIONS_FILE="data/solutions_${PROBLEM}${SIZE}.jsonl"
-CHAINS_FILE="data/chains_detailed_${PROBLEM}${SIZE}.jsonl"
-CHAINS_FILTERED="data/chains_detailed_${PROBLEM}${SIZE}_filtered.jsonl"
-FILTERED_IDS="data/chains_detailed_${PROBLEM}${SIZE}_filtered_ids.txt"
+CHAINS_FILE="data/chains_self_${PROBLEM}${SIZE}.jsonl"
+CHAINS_FILTERED="data/chains_self_${PROBLEM}${SIZE}_filtered.jsonl"
+FILTERED_IDS="data/chains_self_${PROBLEM}${SIZE}_filtered_ids.txt"
 
 S1_OUTPUT_DIR="output_two_stage_s1_${PROBLEM}${SIZE}"
 S2_OUTPUT_DIR="output_two_stage_s2_${PROBLEM}${SIZE}"
