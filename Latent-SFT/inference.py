@@ -1,15 +1,14 @@
 """
-Latent-SFT 推理脚本：COCONUT 式 hidden state 回传 + 熵趋势动态切换。
+Latent-SFT 推理脚本：entropy-based 动态切换 latent/explicit 模式。
 
 推理流程:
-  1. 模型读取问题 prompt
-  2. 进入 latent 模式（默认从 latent 开始）
-  3. latent 模式: hidden state 直接回传为下一步输入，
+  1. 模型读取问题 prompt，默认以显式模式开始
+  2. 显式模式: 正常自回归，监控熵
+  3. 熵连续 K 步上升 → 进入 latent 模式
+  4. latent 模式: hidden state 直接回传为下一步输入（COCONUT 式），
      同时过 LM head 算熵（仅监控，不采样）
-  4. 熵连续 K 步下降 → 退出 latent，用当前 LM head 输出采样 token
-  5. 显式模式: 正常自回归
-  6. 熵连续 K 步上升 → 重新进入 latent
-  7. latent 步数达到上限 → 强制退出
+  5. 熵连续 K 步下降 → 退出 latent，用当前 logits 采样 token
+  6. latent 步数达到上限 → 强制退出转显式
 """
 
 import torch
@@ -33,9 +32,8 @@ class LatentInferenceEngine:
         self.latent_emb = None
         if latent_emb_path:
             hidden_size = self.model.config.hidden_size
+            self.latent_emb = LatentEmbeddings(hidden_size)
             state = torch.load(latent_emb_path, map_location="cpu")
-            num_tokens = state["embeddings"].shape[0]
-            self.latent_emb = LatentEmbeddings(num_tokens, hidden_size)
             self.latent_emb.load_state_dict(state)
             self.latent_emb = self.latent_emb.to(self.model.device)
 
@@ -49,7 +47,7 @@ class LatentInferenceEngine:
 
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens: int = 512,
-                 temperature: float = 0.0, start_latent: bool = True):
+                 temperature: float = 0.0, start_latent: bool = False):
         """
         生成解，支持 latent/显式动态切换。
 

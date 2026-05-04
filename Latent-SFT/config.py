@@ -4,8 +4,8 @@ Latent-SFT 配置：CODI 式隐式推理训练。
 Pipeline 定位：
   ① UniCOP-Distill (SFT) → ② GRPO (显式 CoT) → ③ Latent-SFT (本阶段) → ④ Latent-GRPO (待定)
 
-本阶段目标：让模型学会用 latent token 替代显式 <think> 链，
-           通过 hidden state 对齐保证隐式推理编码了等价信息。
+本阶段目标：让模型学会用 latent token 替代 CoT 中高熵段，
+           保留低熵段的显式推理，通过多点 hidden state 对齐保证等价信息编码。
 """
 
 from dataclasses import dataclass, field
@@ -27,7 +27,8 @@ class LatentSFTConfig:
     max_length: int = 8192
 
     # ── Latent 配置 ──
-    num_latent_tokens: int = 16
+    latent_compression_ratio: int = 4
+    min_latent_segment: int = 8
     latent_init_std: float = 0.02
 
     # ── CODI Loss 权重 ──

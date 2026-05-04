@@ -80,7 +80,7 @@ def train(cfg: LatentSFTConfig):
         print(f"  Latent-SFT (CODI) 训练")
         print(f"  模型:          {cfg.model_name}")
         print(f"  数据:          {cfg.data_path}")
-        print(f"  Latent tokens: {cfg.num_latent_tokens}")
+        print(f"  压缩比:        {cfg.latent_compression_ratio}:1")
         print(f"  Loss 权重:     α={cfg.alpha} β={cfg.beta} γ={cfg.gamma}")
         print(f"  ZeRO:          {cfg.zero_stage}")
         print(f"{'=' * 60}\n")
@@ -140,12 +140,13 @@ def train(cfg: LatentSFTConfig):
 
     # ── Latent embeddings ──
     hidden_size = model.config.hidden_size if hasattr(model.config, "hidden_size") else model.config.to_dict().get("hidden_size", 3584)
-    latent_emb = LatentEmbeddings(cfg.num_latent_tokens, hidden_size, cfg.latent_init_std)
+    latent_emb = LatentEmbeddings(hidden_size, cfg.latent_init_std)
 
     # ── 数据 ──
     dataset = CODIDataset(
-        cfg.data_path, tokenizer, cfg.num_latent_tokens,
+        cfg.data_path, tokenizer,
         max_length=cfg.max_length,
+        latent_compression_ratio=cfg.latent_compression_ratio,
         filter_problems=cfg.filter_problems,
         filter_sizes=cfg.filter_sizes,
     )
@@ -202,8 +203,7 @@ def train(cfg: LatentSFTConfig):
                     student_attention_mask=batch["student_attention_mask"],
                     student_labels=batch["student_labels"],
                     latent_positions=batch["latent_positions"],
-                    teacher_align_pos=batch["teacher_align_pos"],
-                    student_align_pos=batch["student_align_pos"],
+                    align_pairs=batch["align_pairs"],
                     alpha=cfg.alpha,
                     beta=cfg.beta,
                     gamma=cfg.gamma,
@@ -213,8 +213,8 @@ def train(cfg: LatentSFTConfig):
 
                 if accelerator.sync_gradients:
                     # 多卡同步 latent_emb 梯度（仅在梯度累积完成时）
-                    if accelerator.num_processes > 1 and latent_emb.embeddings.grad is not None:
-                        torch.distributed.all_reduce(latent_emb.embeddings.grad, op=torch.distributed.ReduceOp.AVG)
+                    if accelerator.num_processes > 1 and latent_emb.embedding.grad is not None:
+                        torch.distributed.all_reduce(latent_emb.embedding.grad, op=torch.distributed.ReduceOp.AVG)
 
                     accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
                     torch.nn.utils.clip_grad_norm_(latent_emb.parameters(), cfg.max_grad_norm)
@@ -270,7 +270,7 @@ def main():
 
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--data", type=str, default=None)
-    parser.add_argument("--num_latent_tokens", type=int, default=None)
+    parser.add_argument("--compression_ratio", type=int, default=None)
     parser.add_argument("--alpha", type=float, default=None)
     parser.add_argument("--beta", type=float, default=None)
     parser.add_argument("--gamma", type=float, default=None)
@@ -291,7 +291,7 @@ def main():
     # 命令行覆盖
     if args.model is not None: cfg.model_name = args.model
     if args.data is not None: cfg.data_path = args.data
-    if args.num_latent_tokens is not None: cfg.num_latent_tokens = args.num_latent_tokens
+    if args.compression_ratio is not None: cfg.latent_compression_ratio = args.compression_ratio
     if args.alpha is not None: cfg.alpha = args.alpha
     if args.beta is not None: cfg.beta = args.beta
     if args.gamma is not None: cfg.gamma = args.gamma

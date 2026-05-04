@@ -1,13 +1,14 @@
 """
-数据加载：从 UniCOP-Distill 的 chains.jsonl 构建 CODI 训练数据。
+数据加载：从 profiled jsonl 构建 CODI 混合训练数据。
 
-每条样本需要拆分为：
+每条样本拆分为：
   - teacher: prompt + <think>CoT</think> + solution  (完整显式推理)
-  - student: prompt + <think> + [latent]*K + </think> + solution  (隐式推理)
-  - align_token: solution 部分第一个 token 的位置 (对齐点)
+  - student: prompt + <think>[混合 latent/explicit CoT]</think> + solution
+  - align_pairs: 每个 latent→explicit 边界 + solution 边界的 (teacher, student) 位置对
 """
 
 import json
+import math
 from dataclasses import dataclass
 
 import torch
@@ -42,29 +43,26 @@ class CODISample:
     student_input_ids: torch.Tensor
     student_labels: torch.Tensor
     latent_positions: list[int]
-    teacher_align_pos: int
-    student_align_pos: int
+    align_pairs: list[tuple[int, int]]
 
 
 class CODIDataset(Dataset):
     """
-    构建 CODI 训练对：teacher (显式 CoT) + student (latent tokens)。
+    从 profiled jsonl 构建 CODI 混合训练对。
 
-    Teacher 序列:
-      ...<|Assistant|><think>[CoT]</think>[solution]
-                                           ^--- align position
+    Teacher: ...<|Assistant|><think>[完整 CoT]</think>[solution]
+    Student: ...<|Assistant|><think>[混合 latent/explicit]</think>[solution]
 
-    Student 序列:
-      ...<|Assistant|><think>[<latent>]*K</think>[solution]
-                                                  ^--- align position
+    对齐点: 每个 latent 段出口 + solution 入口
     """
 
-    def __init__(self, data_path: str, tokenizer, num_latent_tokens: int,
+    def __init__(self, data_path: str, tokenizer,
                  max_length: int = 8192,
+                 latent_compression_ratio: int = 4,
                  filter_problems=None, filter_sizes=None):
         self.tokenizer = tokenizer
-        self.num_latent_tokens = num_latent_tokens
         self.max_length = max_length
+        self.compression_ratio = latent_compression_ratio
         self.samples = []
 
         latent_id = tokenizer.convert_tokens_to_ids(LATENT_TOKEN)
@@ -101,21 +99,19 @@ class CODIDataset(Dataset):
 
     def _build_sample(self, record, latent_id):
         tokenizer = self.tokenizer
+
         orig_system = strip_posthoc(record["prompt"]["system"], _POSTHOC_SYSTEM_MARKER)
         orig_user = strip_posthoc(record["prompt"]["user"], _POSTHOC_USER_MARKER)
         output = record["output"]
 
-        # 渲染 prompt（到 assistant 标记为止）
         prompt_text = tokenizer.apply_chat_template(
             [{"role": "system", "content": orig_system},
              {"role": "user", "content": orig_user}],
             tokenize=False, add_generation_prompt=True,
         )
-        # R1-Distill 的 add_generation_prompt 末尾带 <think>\n，兜底手动补
         if not prompt_text.rstrip().endswith("<think>"):
             prompt_text += "<think>\n"
 
-        # 分离 CoT 和 solution
         output_stripped = output.lstrip()
         if output_stripped.startswith("<think>"):
             output_stripped = output_stripped[len("<think>"):].lstrip("\n")
@@ -125,61 +121,98 @@ class CODIDataset(Dataset):
             return None
 
         cot_text = output_stripped[:think_end]
-        solution_text = output_stripped[think_end + len("</think>"):]
-        solution_text = solution_text.lstrip("\n")
-
+        solution_text = output_stripped[think_end + len("</think>"):].lstrip("\n")
         if not solution_text.strip():
             return None
 
         # ── Teacher 序列 ──
-        # ...<|Assistant|><think>\n + cot + </think>\n + solution + eos
-        teacher_text = prompt_text + cot_text + "</think>\n" + solution_text + tokenizer.eos_token
+        teacher_text = (
+            prompt_text + cot_text + "</think>\n"
+            + solution_text + tokenizer.eos_token
+        )
         teacher_ids = tokenizer.encode(teacher_text, add_special_tokens=False)
 
         if len(teacher_ids) > self.max_length:
             return None
 
-        # 找 teacher 的对齐位置: </think> 子序列之后的第一个 solution token
-        # R1-Distill tokenizer 中 </think> 被切分为多个 sub-token，需要做子序列匹配
-        think_close_ids = tokenizer.encode("</think>", add_special_tokens=False)
-        tc_len = len(think_close_ids)
-        teacher_align_pos = None
+        # Teacher: 找 </think> 后的 \n 位置 (solution 对齐基准)
+        think_close_search = tokenizer.encode("</think>", add_special_tokens=False)
+        tc_len = len(think_close_search)
+        teacher_solution_align = None
         for idx in range(len(teacher_ids) - tc_len, -1, -1):
-            if teacher_ids[idx:idx + tc_len] == think_close_ids:
-                teacher_align_pos = idx + tc_len
+            if teacher_ids[idx : idx + tc_len] == think_close_search:
+                teacher_solution_align = idx + tc_len
                 break
-        if teacher_align_pos is None or teacher_align_pos >= len(teacher_ids):
+        if teacher_solution_align is None or teacher_solution_align >= len(teacher_ids):
             return None
 
-        # Teacher labels: 只在 solution 部分计算 loss（align_pos 指向 \n，solution 从 +1 开始）
-        teacher_label_start = teacher_align_pos + 1
+        # Teacher labels: solution 部分
+        teacher_label_start = teacher_solution_align + 1
         teacher_labels = [-100] * teacher_label_start + teacher_ids[teacher_label_start:]
 
-        # ── Student 序列 ──
-        # ...<|Assistant|><think>\n + <latent>*K + </think>\n + solution + eos
-        # prompt_text 已经以 <think>\n 结尾，直接复用
+        # ── Student 序列：混合 latent/explicit ──
         prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+        cot_ids = tokenizer.encode(cot_text, add_special_tokens=False)
+        think_close_nl = tokenizer.encode("</think>\n", add_special_tokens=False)
+        solution_ids = tokenizer.encode(
+            solution_text + tokenizer.eos_token, add_special_tokens=False
+        )
 
-        latent_block = [latent_id] * self.num_latent_tokens
-        think_close_with_nl = tokenizer.encode("</think>\n", add_special_tokens=False)
-        solution_with_eos = solution_text + tokenizer.eos_token
-        solution_ids = tokenizer.encode(solution_with_eos, add_special_tokens=False)
+        teacher_cot_start = len(prompt_ids)
+        latent_segments = record.get("latent_segments", [])
 
-        student_ids = prompt_ids + latent_block + think_close_with_nl + solution_ids
+        student_ids = list(prompt_ids)
+        student_labels = [-100] * len(prompt_ids)
+        latent_positions = []
+        align_pairs = []
+
+        cot_cursor = 0
+        for seg in latent_segments:
+            seg_start = seg["start"]
+            seg_end = seg["end"]
+            orig_len = seg_end - seg_start + 1
+            num_latent = max(1, math.ceil(orig_len / self.compression_ratio))
+
+            # 段前的 explicit tokens
+            if seg_start > cot_cursor:
+                explicit = cot_ids[cot_cursor:seg_start]
+                student_ids.extend(explicit)
+                student_labels.extend(explicit)
+
+            # Latent tokens
+            latent_start = len(student_ids)
+            student_ids.extend([latent_id] * num_latent)
+            student_labels.extend([-100] * num_latent)
+            latent_positions.extend(range(latent_start, latent_start + num_latent))
+
+            # 对齐: student 最后一个 latent ↔ teacher CoT seg_end
+            teacher_pos = teacher_cot_start + seg_end
+            student_pos = latent_start + num_latent - 1
+            if teacher_pos < len(teacher_ids):
+                align_pairs.append((teacher_pos, student_pos))
+
+            cot_cursor = seg_end + 1
+
+        # 最后一段 latent 之后的 explicit CoT
+        if cot_cursor < len(cot_ids):
+            remaining = cot_ids[cot_cursor:]
+            student_ids.extend(remaining)
+            student_labels.extend(remaining)
+
+        # </think>\n (不计 loss)
+        student_ids.extend(think_close_nl)
+        student_labels.extend([-100] * len(think_close_nl))
+
+        # Solution 边界对齐
+        student_solution_align = len(student_ids) - 1
+        align_pairs.append((teacher_solution_align, student_solution_align))
+
+        # Solution + EOS (计 loss)
+        student_ids.extend(solution_ids)
+        student_labels.extend(solution_ids)
 
         if len(student_ids) > self.max_length:
             return None
-
-        # Student 对齐位置: </think>\n 的最后一个 token（与 teacher 的 \n 位置对齐）
-        # causal LM 中 hidden[i] 预测 token[i+1]，对齐点应在「预测第一个 solution token」的位置
-        student_align_pos = len(prompt_ids) + len(latent_block) + len(think_close_with_nl) - 1
-
-        # Student labels: 只在 solution 部分计算 loss
-        student_labels = [-100] * student_align_pos + solution_ids
-
-        # Latent positions: <latent> tokens 在 student 序列中的绝对位置
-        latent_start = len(prompt_ids)
-        latent_positions = list(range(latent_start, latent_start + self.num_latent_tokens))
 
         return CODISample(
             teacher_input_ids=torch.tensor(teacher_ids, dtype=torch.long),
@@ -187,8 +220,7 @@ class CODIDataset(Dataset):
             student_input_ids=torch.tensor(student_ids, dtype=torch.long),
             student_labels=torch.tensor(student_labels, dtype=torch.long),
             latent_positions=latent_positions,
-            teacher_align_pos=teacher_align_pos,
-            student_align_pos=student_align_pos,
+            align_pairs=align_pairs,
         )
 
     def __len__(self):
@@ -206,22 +238,18 @@ def collate_codi(batch: list[CODISample], pad_token_id: int):
         padded = torch.full((len(tensors), max_len), pad_value, dtype=tensors[0].dtype)
         masks = torch.zeros(len(tensors), max_len, dtype=torch.long)
         for i, t in enumerate(tensors):
-            padded[i, :t.size(0)] = t
-            masks[i, :t.size(0)] = 1
+            padded[i, : t.size(0)] = t
+            masks[i, : t.size(0)] = 1
         return padded, masks
 
     teacher_ids, teacher_masks = pad_tensors(
         [s.teacher_input_ids for s in batch], pad_token_id
     )
-    teacher_labels, _ = pad_tensors(
-        [s.teacher_labels for s in batch], -100
-    )
+    teacher_labels, _ = pad_tensors([s.teacher_labels for s in batch], -100)
     student_ids, student_masks = pad_tensors(
         [s.student_input_ids for s in batch], pad_token_id
     )
-    student_labels, _ = pad_tensors(
-        [s.student_labels for s in batch], -100
-    )
+    student_labels, _ = pad_tensors([s.student_labels for s in batch], -100)
 
     return {
         "teacher_input_ids": teacher_ids,
@@ -231,6 +259,5 @@ def collate_codi(batch: list[CODISample], pad_token_id: int):
         "student_attention_mask": student_masks,
         "student_labels": student_labels,
         "latent_positions": [s.latent_positions for s in batch],
-        "teacher_align_pos": [s.teacher_align_pos for s in batch],
-        "student_align_pos": [s.student_align_pos for s in batch],
+        "align_pairs": [s.align_pairs for s in batch],
     }
