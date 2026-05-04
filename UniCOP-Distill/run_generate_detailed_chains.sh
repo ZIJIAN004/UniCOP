@@ -180,22 +180,28 @@ PILOT_SAMPLES=30
 PILOT_MODEL_LEN=$((MAX_PROMPT_LEN + 4096))
 PILOT_FILE="data/chains_pilot_${PROBLEM}${SIZE}.jsonl"
 
-echo ""
-echo ">>> Step 2: Pilot 生成 $PILOT_SAMPLES 条 (max-model-len=$PILOT_MODEL_LEN)..."
-start_vllm_servers $PILOT_MODEL_LEN
+PILOT_COUNT=$(grep -c '^{' "$PILOT_FILE" 2>/dev/null || echo 0)
+if [ "$PILOT_COUNT" -ge 10 ]; then
+    echo ""
+    echo ">>> Step 2: Pilot 已存在 ($PILOT_COUNT 条)，跳过生成，直接计算 P95..."
+else
+    echo ""
+    echo ">>> Step 2: Pilot 生成 $PILOT_SAMPLES 条 (max-model-len=$PILOT_MODEL_LEN)..."
+    start_vllm_servers $PILOT_MODEL_LEN
 
-python rationalize_solutions.py \
-    --solutions "$SOLUTIONS_FILE" \
-    --vllm_urls $VLLM_URLS \
-    --output "$PILOT_FILE" \
-    --problem $PROBLEM --size $SIZE \
-    --num_samples $PILOT_SAMPLES \
-    --max_tokens 4096 \
-    --prompt_style detailed \
-    --concurrency $((NUM_GPUS * 4))
+    python rationalize_solutions.py \
+        --solutions "$SOLUTIONS_FILE" \
+        --vllm_urls $VLLM_URLS \
+        --output "$PILOT_FILE" \
+        --problem $PROBLEM --size $SIZE \
+        --num_samples $PILOT_SAMPLES \
+        --max_tokens 4096 \
+        --prompt_style detailed \
+        --concurrency $((NUM_GPUS * 4))
 
-echo "  停止 pilot vLLM..."
-cleanup_all_vllm
+    echo "  停止 pilot vLLM..."
+    cleanup_all_vllm
+fi
 
 P95_OUTPUT=$(python -c "
 import json, math
