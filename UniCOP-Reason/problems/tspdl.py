@@ -122,7 +122,23 @@ Rules:
 - The vehicle departs fully loaded (initial load = total capacity); load decreases as cargo is unloaded at each customer
 - Upon arriving at a node (before unloading), current load must be <= that node's draft_limit
 - Objective: minimize total travel distance
-Key insight: A node with a smaller draft_limit requires a lower load upon arrival, so it must be visited after enough cargo has already been unloaded. Visit high draft_limit nodes first, most constrained nodes last.
-Before answering, think through the problem in <think>...</think>. Consider how the order in which nodes are visited determines the load level upon arrival, and how draft limits interact with that progression. Monotone constraint ordering or greedy sequencing by limit may be relevant.
-After completing your analysis, output in the following format:
+Key insight: A node with a smaller draft_limit requires a lower load upon arrival, so it must be visited after enough cargo has already been unloaded.
+
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
+
+1. **Strategy**: Analyze draft limits and node positions. Identify which nodes have tight draft limits (must be visited late) vs loose limits (can be visited early), and how you will balance draft-limit ordering with distance minimization. Reference specific node IDs.
+
+2. **Step-by-step construction**: Build the route one node at a time. Each step format:
+   [step] at N → M (d=X.XXX, unload=X, load:X→X, dl=X, #feas=X) | alt: A(X.XX,dl=X), B(X.XX,dl=X)
+   - d = distance from current to chosen node
+   - unload = cargo unloaded at M
+   - load = current load before→after unloading at M
+   - dl = draft_limit of M (must satisfy: load_before <= dl)
+   - #feas = number of remaining unvisited nodes feasible at current load
+   - alt = 2-3 nearest feasible alternatives with distance and draft_limit
+   Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+
+3. **Final route**: Write the complete route in "Route: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final route (copied from think):
 Route: 0 -> A -> B -> C -> ... -> 0"""

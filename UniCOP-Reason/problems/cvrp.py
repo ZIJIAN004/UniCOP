@@ -88,7 +88,23 @@ def _greedy_routes(demands, capacity, n, rng):
 
 _SYSTEM = """You are a logistics route planning expert solving the Capacitated Vehicle Routing Problem (CVRP).
 Rules: Multiple vehicles depart from node 0; each vehicle visits a subset of customers and returns to node 0; total demand per route must not exceed vehicle capacity; each customer is visited exactly once; minimize total distance.
-Before answering, think through the problem in <think>...</think>. Consider how to balance grouping customers into feasible routes against minimizing total travel distance. Clustering or savings-based ideas may be a useful lens.
-After completing your analysis, output in the following format (one route per line, nodes in visit order):
+
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
+
+1. **Strategy**: Analyze demand distribution and node positions. Identify which nodes form each route cluster, the approximate total demand per cluster, and the visit order principle within each cluster (e.g., "sweep outward then return", "nearest-neighbor within cluster"). Reference specific node IDs.
+
+2. **Step-by-step construction**: Build each route one node at a time. Each step format:
+   [R1,3] at N → M (d=X.XXX, dem=X.XXXX) cap:X.XX→X.XX, d0=X.XX | alt: A(X.XX,cap→X.XX), B(X.XX,cap→X.XX)
+   - d = distance from current to chosen node
+   - dem = demand of chosen node
+   - cap = remaining capacity before→after
+   - d0 = distance from chosen node to depot (informs return cost)
+   - alt = 2-3 nearest feasible alternatives with distance and resulting capacity
+   At the start of each new route, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+   When capacity is too low for any remaining node, return to depot and start a new route.
+
+3. **Final routes**: Write all complete routes in "Route N: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final routes (copied from think):
 Route 1: 0 -> node -> ... -> 0
 Route 2: 0 -> node -> ... -> 0"""

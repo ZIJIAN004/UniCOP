@@ -63,17 +63,21 @@ def _strip_think_instructions(system: str) -> str:
 _STRUCTURED_SYSTEM = {
     "tsp": """You are a route planning expert solving the Travelling Salesman Problem (TSP).
 Rules: Starting from node 0, visit all customer nodes exactly once and return to node 0, minimizing total distance.
-Before answering, think through the problem step by step in <think>...</think>. Inside <think>, you MUST follow this structured format:
 
-Strategy: [1-2 sentences]
-Step 1: → [node_id] ([reason in a few words])
-Step 2: → [node_id] ([reason])
-...
-Step 10: → [node_id] ([reason])
-  Remaining: [list of unvisited node ids]
-(continue; output Remaining every 10 steps)
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
 
-After </think>, output ONLY the final route:
+1. **Strategy**: Analyze the node distribution and state your approach. Examples: "Angular sweep counterclockwise from depot", "Convex hull first then insert interior nodes", "Divide into 3 geographic segments and connect". Reference specific node groups or spatial features.
+
+2. **Step-by-step construction**: Build the route one node at a time. Each step format:
+   [step] at N → M (d=X.XXX, total=X.XX) | alt: A(X.XX), B(X.XX)
+   - d = distance from current to chosen node
+   - total = cumulative route distance so far
+   - alt = 2-3 nearest unvisited alternatives with distances
+   Every 10 steps, insert a line: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+
+3. **Final route**: Write the complete route in "Route: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final route (copied from think):
 Route: 0 -> A -> B -> C -> ... -> 0""",
 
     "tsptw": """You are a route planning expert solving the Travelling Salesman Problem with Time Windows (TSPTW).
@@ -83,17 +87,24 @@ Rules:
 - Each customer node has a time window [earliest, latest]: arrival time must be <= latest
 - If arrival time < earliest, wait at the node until earliest (advance current time to earliest), then continue
 - Objective: minimize total travel distance
-Before answering, think through the problem step by step in <think>...</think>. Inside <think>, you MUST follow this structured format:
 
-Strategy: [1-2 sentences]
-Step 1: → [node_id] ([reason]) | arr=[value] tw=[earliest,latest]
-Step 2: → [node_id] ([reason]) | arr=[value] tw=[earliest,latest]
-...
-Step 10: → [node_id] ([reason]) | arr=[value] tw=[earliest,latest]
-  Remaining: [list of unvisited node ids]
-(continue; output Remaining every 10 steps)
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
 
-After </think>, output ONLY the final route:
+1. **Strategy**: Analyze time windows and node positions. Identify urgent nodes (tight deadlines that must be visited early), flexible nodes (late deadlines), and the overall visit ordering principle (e.g., "deadline-driven with geographic continuity", "sweep with urgency priority"). Reference specific node IDs.
+
+2. **Step-by-step construction**: Build the route one node at a time. Each step format:
+   [step] at N → M (d=X.XXX, t=X.XX, arr=X.XX, slack=X.XX) | alt: A(X.XX,slack=X.XX), B(X.XX,slack=X.XX)
+   - d = distance from current to chosen node
+   - t = current time (before departing from N)
+   - arr = arrival time at M
+   - slack = deadline of M minus arrival time (how much time margin remains)
+   - alt = 2-3 nearest feasible alternatives with distance and slack
+   If arrival < earliest of M, mark "wait" and set current time to earliest.
+   Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+
+3. **Final route**: Write the complete route in "Route: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final route (copied from think):
 Route: 0 -> A -> B -> C -> ... -> 0""",
 
     "tspdl": """You are a logistics route planning expert solving the Travelling Salesman Problem with Draft Limits (TSPDL).
@@ -103,34 +114,47 @@ Rules:
 - The vehicle departs fully loaded (initial load = total capacity); load decreases as cargo is unloaded at each customer
 - Upon arriving at a node (before unloading), current load must be <= that node's draft_limit
 - Objective: minimize total travel distance
-Before answering, think through the problem step by step in <think>...</think>. Inside <think>, you MUST follow this structured format:
+Key insight: A node with a smaller draft_limit requires a lower load upon arrival, so it must be visited after enough cargo has already been unloaded.
 
-Strategy: [1-2 sentences]
-Step 1: → [node_id] ([reason]) | load=[value] dlimit=[value]
-Step 2: → [node_id] ([reason]) | load=[value] dlimit=[value]
-...
-Step 10: → [node_id] ([reason]) | load=[value] dlimit=[value]
-  Remaining: [list of unvisited node ids]
-(continue; output Remaining every 10 steps)
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
 
-After </think>, output ONLY the final route:
+1. **Strategy**: Analyze draft limits and node positions. Identify which nodes have tight draft limits (must be visited late) vs loose limits (can be visited early), and how you will balance draft-limit ordering with distance minimization. Reference specific node IDs.
+
+2. **Step-by-step construction**: Build the route one node at a time. Each step format:
+   [step] at N → M (d=X.XXX, unload=X, load:X→X, dl=X, #feas=X) | alt: A(X.XX,dl=X), B(X.XX,dl=X)
+   - d = distance from current to chosen node
+   - unload = cargo unloaded at M
+   - load = current load before→after unloading at M
+   - dl = draft_limit of M (must satisfy: load_before <= dl)
+   - #feas = number of remaining unvisited nodes feasible at current load
+   - alt = 2-3 nearest feasible alternatives with distance and draft_limit
+   Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+
+3. **Final route**: Write the complete route in "Route: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final route (copied from think):
 Route: 0 -> A -> B -> C -> ... -> 0""",
 
     "cvrp": """You are a logistics route planning expert solving the Capacitated Vehicle Routing Problem (CVRP).
 Rules: Multiple vehicles depart from node 0; each vehicle visits a subset of customers and returns to node 0; total demand per route must not exceed vehicle capacity; each customer is visited exactly once; minimize total distance.
-Before answering, think through the problem step by step in <think>...</think>. Inside <think>, you MUST follow this structured format, building one route at a time:
 
-Strategy: [1-2 sentences]
-Route 1:
-  Step 1: → [node_id] ([reason]) | dem=[value]/[capacity]
-  Step 2: → [node_id] ([reason]) | dem=[value]/[capacity]
-  ...
-  (output Remaining every 10 steps within each route)
-Route 2:
-  Step 1: → [node_id] ([reason]) | dem=[value]/[capacity]
-  ...
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
 
-After </think>, output ONLY the final routes (one per line):
+1. **Strategy**: Analyze demand distribution and node positions. Identify which nodes form each route cluster, the approximate total demand per cluster, and the visit order principle within each cluster (e.g., "sweep outward then return", "nearest-neighbor within cluster"). Reference specific node IDs.
+
+2. **Step-by-step construction**: Build each route one node at a time. Each step format:
+   [R1,3] at N → M (d=X.XXX, dem=X.XXXX) cap:X.XX→X.XX, d0=X.XX | alt: A(X.XX,cap→X.XX), B(X.XX,cap→X.XX)
+   - d = distance from current to chosen node
+   - dem = demand of chosen node
+   - cap = remaining capacity before→after
+   - d0 = distance from chosen node to depot (informs return cost)
+   - alt = 2-3 nearest feasible alternatives with distance and resulting capacity
+   At the start of each new route, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+   When capacity is too low for any remaining node, return to depot and start a new route.
+
+3. **Final routes**: Write all complete routes in "Route N: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final routes (copied from think):
 Route 1: 0 -> node -> ... -> 0
 Route 2: 0 -> node -> ... -> 0""",
 
@@ -142,37 +166,57 @@ Rules:
 - Each customer node has a time window [earliest, latest]: arrival time must be <= latest
 - If arrival time < earliest, wait at the node until earliest (advance current time to earliest), then continue
 - Objective: minimize total travel distance across all routes
-Before answering, think through the problem step by step in <think>...</think>. Inside <think>, you MUST follow this structured format, building one route at a time:
 
-Strategy: [1-2 sentences]
-Route 1:
-  Step 1: → [node_id] ([reason]) | arr=[value] tw=[earliest,latest]
-  Step 2: → [node_id] ([reason]) | arr=[value] tw=[earliest,latest]
-  ...
-  (output Remaining every 10 steps within each route)
-Route 2:
-  Step 1: → [node_id] ([reason]) | arr=[value] tw=[earliest,latest]
-  ...
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
 
-After </think>, output ONLY the final routes (one per line):
+1. **Strategy**: Analyze time windows and node positions. Group nodes into routes by time-window compatibility and geographic proximity. For each planned route, state which nodes belong to it and the time-window range of that group. Reference specific node IDs.
+
+2. **Step-by-step construction**: Build each route one node at a time. Each step format:
+   [R1,3] at N → M (d=X.XXX, t=X.XX, arr=X.XX, slack=X.XX) | alt: A(X.XX,slack=X.XX), B(X.XX,slack=X.XX)
+   - d = distance from current to chosen node
+   - t = current time (before departing from N)
+   - arr = arrival time at M
+   - slack = deadline of M minus arrival time (how much time margin remains)
+   - alt = 2-3 nearest feasible alternatives with distance and slack
+   If arrival < earliest of M, mark "wait" and set current time to earliest.
+   At the start of each new route, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+   When no feasible next node exists within current route's time constraints, return to depot and start a new route.
+
+3. **Final routes**: Write all complete routes in "Route N: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final routes (copied from think):
 Route 1: 0 -> node -> ... -> 0
 Route 2: 0 -> node -> ... -> 0""",
 
     "cvrptw": """You are a logistics scheduling expert solving the Capacitated Vehicle Routing Problem with Time Windows (CVRPTW).
-Rules: Multiple vehicles depart from node 0; total demand per route <= vehicle capacity; each node has a time window [earliest, latest]; travel time = Euclidean distance; early arrival allows waiting, late arrival is a violation; each customer is visited exactly once; minimize total distance.
-Before answering, think through the problem step by step in <think>...</think>. Inside <think>, you MUST follow this structured format, building one route at a time:
+Rules:
+- Multiple vehicles depart from node 0 (depot); each vehicle visits a subset of customers and returns to node 0
+- All customer nodes are visited exactly once
+- Travel time between nodes = Euclidean distance
+- Total demand per route must not exceed vehicle capacity
+- Each customer node has a time window [earliest, latest]: arrival time must be <= latest
+- If arrival time < earliest, wait at the node until earliest (advance current time to earliest), then continue
+- Objective: minimize total travel distance across all routes
 
-Strategy: [1-2 sentences]
-Route 1:
-  Step 1: → [node_id] ([reason]) | dem=[value]/[capacity] arr=[value] tw=[earliest,latest]
-  Step 2: → [node_id] ([reason]) | dem=[value]/[capacity] arr=[value] tw=[earliest,latest]
-  ...
-  (output Remaining every 10 steps within each route)
-Route 2:
-  Step 1: → [node_id] ([reason]) | dem=[value]/[capacity] arr=[value] tw=[earliest,latest]
-  ...
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
 
-After </think>, output ONLY the final routes (one per line):
+1. **Strategy**: Analyze constraints and node positions. Group nodes into routes by capacity feasibility, time-window compatibility, and geographic proximity. For each planned route, state which nodes belong to it, approximate demand sum, and time-window range. Reference specific node IDs.
+
+2. **Step-by-step construction**: Build each route one node at a time. Each step format:
+   [R1,3] at N → M (d=X.XXX, dem=X.XXXX) cap:X.XX→X.XX, arr=X.XX, slack=X.XX | alt: A(X.XX,cap→X.XX,slack=X.XX), B(X.XX,cap→X.XX,slack=X.XX)
+   - d = distance from current to chosen node
+   - dem = demand of chosen node
+   - cap = remaining capacity before→after
+   - arr = arrival time at M
+   - slack = deadline of M minus arrival time
+   - alt = 2-3 nearest feasible alternatives with distance, resulting capacity, and slack
+   If arrival < earliest of M, mark "wait" and set current time to earliest.
+   At the start of each new route, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+   When capacity is too low or no feasible time-window node exists, return to depot and start a new route.
+
+3. **Final routes**: Write all complete routes in "Route N: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final routes (copied from think):
 Route 1: 0 -> node -> ... -> 0
 Route 2: 0 -> node -> ... -> 0""",
 }

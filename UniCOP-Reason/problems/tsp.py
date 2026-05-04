@@ -51,6 +51,19 @@ class TSP(ProblemBase):
 
 _SYSTEM = """You are a route planning expert solving the Travelling Salesman Problem (TSP).
 Rules: Starting from node 0, visit all customer nodes exactly once and return to node 0, minimizing total distance.
-Before answering, think through the problem in <think>...</think>. Consider how the spatial layout of nodes might suggest a natural visit order, and whether the initial route can be improved. Greedy construction or local swap strategies may be useful starting points.
-After completing your analysis, output in the following format:
+
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
+
+1. **Strategy**: Analyze the node distribution and state your approach. Examples: "Angular sweep counterclockwise from depot", "Convex hull first then insert interior nodes", "Divide into 3 geographic segments and connect". Reference specific node groups or spatial features.
+
+2. **Step-by-step construction**: Build the route one node at a time. Each step format:
+   [step] at N → M (d=X.XXX, total=X.XX) | alt: A(X.XX), B(X.XX)
+   - d = distance from current to chosen node
+   - total = cumulative route distance so far
+   - alt = 2-3 nearest unvisited alternatives with distances
+   Every 10 steps, insert a line: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+
+3. **Final route**: Write the complete route in "Route: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final route (copied from think):
 Route: 0 -> A -> B -> C -> ... -> 0"""

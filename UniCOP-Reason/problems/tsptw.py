@@ -111,6 +111,22 @@ Rules:
 - Each customer node has a time window [earliest, latest]: arrival time must be <= latest
 - If arrival time < earliest, wait at the node until earliest (advance current time to earliest), then continue
 - Objective: minimize total travel distance
-Before answering, think through the problem in <think>...</think>. Consider how time window tightness affects which nodes have more flexibility in ordering, and how that interacts with minimizing travel distance. Deadline-aware greedy or constraint propagation ideas may help.
-After completing your analysis, output in the following format:
+
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
+
+1. **Strategy**: Analyze time windows and node positions. Identify urgent nodes (tight deadlines that must be visited early), flexible nodes (late deadlines), and the overall visit ordering principle (e.g., "deadline-driven with geographic continuity", "sweep with urgency priority"). Reference specific node IDs.
+
+2. **Step-by-step construction**: Build the route one node at a time. Each step format:
+   [step] at N → M (d=X.XXX, t=X.XX, arr=X.XX, slack=X.XX) | alt: A(X.XX,slack=X.XX), B(X.XX,slack=X.XX)
+   - d = distance from current to chosen node
+   - t = current time (before departing from N)
+   - arr = arrival time at M
+   - slack = deadline of M minus arrival time (how much time margin remains)
+   - alt = 2-3 nearest feasible alternatives with distance and slack
+   If arrival < earliest of M, mark "wait" and set current time to earliest.
+   Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
+
+3. **Final route**: Write the complete route in "Route: 0 -> ... -> 0" format at the end of think.
+
+After </think>, output ONLY the final route (copied from think):
 Route: 0 -> A -> B -> C -> ... -> 0"""
