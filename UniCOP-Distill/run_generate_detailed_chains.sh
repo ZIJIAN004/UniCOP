@@ -234,7 +234,7 @@ python rationalize_solutions.py \
     --num_samples 0 \
     --max_tokens $P95_OUTPUT \
     --prompt_style detailed \
-    --concurrency $((NUM_GPUS * 16))
+    --concurrency $((NUM_GPUS * 32))
 
 ACTUAL_COUNT=$(grep -c '^{' "$CHAINS_FILE" 2>/dev/null || echo 0)
 echo "  实际生成: $ACTUAL_COUNT 条"
