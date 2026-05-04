@@ -49,6 +49,75 @@ _POSTHOC_SUFFIX = (
     "5. Do NOT output the solution before <think>. The solution ONLY appears after </think>."
 )
 
+_POSTHOC_SUFFIX_DETAILED = (
+    "\n\nYour output MUST start with <think> and follow this exact structure:\n\n"
+    "<think>\n[your step-by-step reasoning]\n</think>\n[solution in required format]\n\n"
+    "Rules:\n"
+    "1. Your FIRST token MUST be '<think>'. Do NOT output anything before <think>.\n"
+    "2. Build each route ONE NODE AT A TIME. For each decision you MUST:\n"
+    "   a. State your current node, remaining vehicle capacity, and unvisited nodes\n"
+    "   b. List 2-3 nearest unvisited candidate nodes with their demand values\n"
+    "   c. Pick one and state the reason (nearest feasible, capacity fit, etc.)\n"
+    "   d. Update remaining capacity: 'Capacity: X - Y = Z'\n"
+    "3. When remaining capacity is too low for any unvisited node, return to depot "
+    "and start a new route.\n"
+    "4. After all nodes are assigned, write each complete route in 'Route N: 0 -> ... -> 0' format "
+    "INSIDE <think>, then copy them after </think>.\n"
+    "5. FORBIDDEN: Do NOT use vague phrases like 'I\\'ll group nodes by proximity', "
+    "'using savings algorithm', 'after optimization'. Every step must reference "
+    "specific node IDs, demand values, and remaining capacity.\n"
+    "6. Do NOT mention that a solution was provided or given to you.\n"
+    "7. After </think>, output the solution exactly in the required format.\n"
+    "8. Do NOT output the solution before <think>. The solution ONLY appears after </think>."
+)
+
+_FEWSHOT_CVRP = (
+    "\n\nHere is an example of the expected reasoning for a CVRP "
+    "(20 customers, vehicle capacity 1.0):\n\n"
+    "<think>\n"
+    "1. Understand the Goal & Constraints:\n"
+    "- Objective: Minimize total travel distance.\n"
+    "- Vehicles: Multiple, starting and ending at Depot (Node 0).\n"
+    "- Capacity: Each vehicle can carry a total demand of 1.0.\n"
+    "- Customers: 20 customers (Nodes 1-20), each visited exactly once.\n\n"
+    "2. Analyze the Data:\n"
+    "- Depot (0): (0.203, 0.269) - lower-left quadrant.\n"
+    "- Cluster 1 (West): Nodes 5, 13, 15, 4. Left side, vertical line.\n"
+    "- Cluster 2 (South-East): Nodes 3, 9, 7, 19, 16.\n"
+    "- Cluster 3 (Central): Nodes 1, 6, 18, 12, 10, 14, 20. Dense group.\n"
+    "- Cluster 4 (East): Nodes 8, 17, 2, 11.\n"
+    "Strategy: build routes based on geographical clusters, respecting capacity.\n\n"
+    "3. Building Routes Step-by-Step:\n\n"
+    "Route 1: Central Cluster\n"
+    "- Start from Depot (0). Go to Node 20 (farthest in cluster, sweep back).\n"
+    "- Current Route: 0 -> 20. Demand: 0.2000. Remaining Capacity: 0.8000.\n"
+    "- From 20, Node 14 is very close. Add it.\n"
+    "- Current Route: 0 -> 20 -> 14. "
+    "Demand: 0.2000 + 0.3000 = 0.5000. Remaining Capacity: 0.5000.\n"
+    "- From 14, Node 10 is the logical next step.\n"
+    "- Current Route: 0 -> 20 -> 14 -> 10. "
+    "Demand: 0.5000 + 0.2000 = 0.7000. Remaining Capacity: 0.3000.\n"
+    "- From 10, continue sweep towards depot. Node 12 is next.\n"
+    "- Current Route: 0 -> 20 -> 14 -> 10 -> 12. "
+    "Demand: 0.7000 + 0.0667 = 0.7667. Remaining Capacity: 0.2333.\n"
+    "- From 12, Node 18 is on the way back.\n"
+    "- Current Route: 0 -> 20 -> 14 -> 10 -> 12 -> 18. "
+    "Demand: 0.7667 + 0.1000 = 0.8667. Remaining Capacity: 0.1333.\n"
+    "- From 18, Node 6 is very close. Demand 0.1333. "
+    "Total: 0.8667 + 0.1333 = 1.0000. Perfect fit.\n"
+    "- Finalize Route 1: 0 -> 20 -> 14 -> 10 -> 12 -> 18 -> 6 -> 0. Route is full.\n\n"
+    "[...Routes 2-4 follow the same pattern for remaining clusters...]\n\n"
+    "Route 1: 0 -> 20 -> 14 -> 10 -> 12 -> 18 -> 6 -> 0\n"
+    "Route 2: 0 -> 3 -> 9 -> 7 -> 19 -> 16 -> 0\n"
+    "Route 3: 0 -> 5 -> 13 -> 15 -> 4 -> 0\n"
+    "Route 4: 0 -> 1 -> 8 -> 17 -> 2 -> 11 -> 0\n"
+    "</think>\n"
+    "Route 1: 0 -> 20 -> 14 -> 10 -> 12 -> 18 -> 6 -> 0\n"
+    "Route 2: 0 -> 3 -> 9 -> 7 -> 19 -> 16 -> 0\n"
+    "Route 3: 0 -> 5 -> 13 -> 15 -> 4 -> 0\n"
+    "Route 4: 0 -> 1 -> 8 -> 17 -> 2 -> 11 -> 0"
+)
+
 _LEAK_PATTERNS = [
     "given the solution", "given the answer", "given to me", "given this solution",
     "provided to me", "provided the solution", "provided the answer",
@@ -65,8 +134,13 @@ _SCKEY = "SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
 _CALC_SAMPLE_COUNT = 20
 
 
-def build_posthoc_prompt(solution: str, system: str, user: str) -> dict:
-    system_posthoc = system + _POSTHOC_SUFFIX
+def build_posthoc_prompt(solution: str, system: str, user: str,
+                         prompt_style: str = "default") -> dict:
+    if prompt_style == "detailed":
+        suffix = _POSTHOC_SUFFIX_DETAILED + _FEWSHOT_CVRP
+    else:
+        suffix = _POSTHOC_SUFFIX
+    system_posthoc = system + suffix
     user_posthoc = (
         user
         + f"\n\nTarget solution (you MUST output exactly this solution after </think>,"
@@ -77,14 +151,16 @@ def build_posthoc_prompt(solution: str, system: str, user: str) -> dict:
     return {"system": system_posthoc, "user": user_posthoc}
 
 
-def calc_max_model_len(solutions: list, max_tokens: int, tokenizer_path: str) -> int:
+def calc_max_model_len(solutions: list, max_tokens: int, tokenizer_path: str,
+                       prompt_style: str = "default") -> int:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
 
     sample = random.sample(solutions, min(_CALC_SAMPLE_COUNT, len(solutions)))
     max_prompt_tokens = 0
     for r in sample:
-        p = build_posthoc_prompt(r["solution"], r["prompt"]["system"], r["prompt"]["user"])
+        p = build_posthoc_prompt(r["solution"], r["prompt"]["system"], r["prompt"]["user"],
+                                 prompt_style=prompt_style)
         text = p["system"] + "\n" + p["user"]
         n_tokens = len(tok.encode(text))
         max_prompt_tokens = max(max_prompt_tokens, n_tokens)
@@ -250,6 +326,8 @@ def main():
                         help="总并发数（均摊到各 vLLM 服务器）")
     parser.add_argument("--max_quality_retries", type=int, default=5,
                         help="每条样本质量不合格时的最大重试次数")
+    parser.add_argument("--prompt_style", choices=["default", "detailed"], default="default",
+                        help="default=原版 prompt, detailed=强制逐步计算")
     parser.add_argument("--preview", type=int, default=0,
                         help="只生成前 N 条并打印详情，用于人工验证")
     parser.add_argument("--seed", type=int, default=42)
@@ -276,7 +354,8 @@ def main():
         if not args.tokenizer:
             print("ERROR: --calc_max_model_len 需要 --tokenizer", file=sys.stderr)
             sys.exit(1)
-        result = calc_max_model_len(all_solutions, args.max_tokens, args.tokenizer)
+        result = calc_max_model_len(all_solutions, args.max_tokens, args.tokenizer,
+                                       prompt_style=args.prompt_style)
         print(result)
         return
 
@@ -343,6 +422,7 @@ def main():
         r, sample_id = item
         prompt_dict = build_posthoc_prompt(
             r["solution"], r["prompt"]["system"], r["prompt"]["user"],
+            prompt_style=args.prompt_style,
         )
 
         for attempt in range(max_qr):

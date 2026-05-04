@@ -1,14 +1,16 @@
 """
-Stage 1 SFT：用 solver 解训练 Qwen2.5-Instruct 生成合法的解（不训练思维链）。
+Stage 1 SFT：用 solver 解训练模型直接输出合法的解（不训练思维链）。
 
-基座模型：Qwen2.5-7B-Instruct（非推理模型，无 <think> 机制）
-训练目标：模型看到问题描述后，直接输出格式正确、节点不遗漏不重复的解。
+基座模型：DeepSeek-R1-Distill-Qwen-7B（推理模型，内置 <think> 机制）
+训练目标：模型看到问题描述后，直接输出格式正确、约束满足的解。
+         LoRA 微调不影响基座冻结权重中的推理能力，Stage 2 可恢复 think chain。
 数据来源：generate_solutions.py 生成的 solutions.jsonl
 损失函数：DataCollatorForCompletionOnlyLM，只在 completion token 上算 loss。
 
 与 Stage 2 的区别：
-  - Stage 1: Qwen2.5-Instruct + prompt → solution (无 <think>，只学可行性)
-  - Stage 2: Stage1 ckpt + prompt → <think>...</think> + solution (从零学推理链)
+  - Stage 1: R1-Distill + prompt → solution (无 <think>，只学可行性)
+  - Stage 2: Stage1 ckpt + prompt → <think>reasoning</think> + solution (学推理链)
+  - Stage 1/2 使用不同的数据实例，通过 --exclude_ids 去重
 
 运行示例:
     python stage1_solution/train_sft_stage1.py
@@ -113,11 +115,7 @@ def _setup_pad_token(tokenizer):
 
 
 def _detect_think_suffix(tokenizer) -> str:
-    """
-    检测 chat_template add_generation_prompt 末尾是否带 <think>。
-    Stage 1 需要剥离它，使 prompt 止于 <|Assistant|>。
-    不碰 <think> 机制，避免压制推理模型的思维链能力。
-    """
+    """检测 chat_template add_generation_prompt 末尾是否带 <think>，Stage 1 需要剥离。"""
     probe = tokenizer.apply_chat_template(
         [{"role": "system", "content": "p"}, {"role": "user", "content": "p"}],
         tokenize=False, add_generation_prompt=True,
@@ -145,6 +143,7 @@ def _detect_response_template(tokenizer) -> str:
 
 def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
                         think_suffix: str,
+                        exclude_ids: set[str] | None = None,
                         filter_problems=None, filter_sizes=None) -> Dataset:
     """
     加载 solutions.jsonl，构建 Stage 1 训练集。
@@ -158,6 +157,7 @@ def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
     """
     records = []
     skipped = 0
+    excluded = 0
 
     with open(data_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -173,6 +173,10 @@ def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
             if filter_problems and r.get("problem_type") not in filter_problems:
                 continue
             if filter_sizes and r.get("n") not in filter_sizes:
+                continue
+
+            if exclude_ids and r.get("id", "") in exclude_ids:
+                excluded += 1
                 continue
 
             system = _strip_think_instructions(r["prompt"]["system"])
@@ -224,6 +228,8 @@ def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
         else:
             print(f"  [OK] 无 <think> 标签，不干扰推理能力")
 
+    if excluded:
+        print(f"  排除 {excluded} 条 (Stage 2 数据去重)")
     if skipped:
         print(f"  跳过 {skipped} 条记录")
 
@@ -252,6 +258,8 @@ def main():
                         help="只训练指定问题类型，如 tsp cvrp")
     parser.add_argument("--filter_sizes", type=int, nargs="+", default=None,
                         help="只训练指定规模，如 20 50")
+    parser.add_argument("--exclude_ids", type=str, default=None,
+                        help="排除的样本 ID 列表文件（每行一个 ID，用于 Stage 1/2 数据去重）")
     parser.add_argument("--max_length", type=int, default=4096,
                         help="Stage 1 不含推理链，序列较短，4096 足够")
     parser.add_argument("--val_ratio", type=float, default=0.0)
@@ -299,9 +307,17 @@ def main():
 
     think_suffix = _detect_think_suffix(tokenizer)
 
+    # ── 排除 ID ─────────────────────────────────────────────────────────
+    exclude_ids = None
+    if args.exclude_ids:
+        with open(args.exclude_ids, encoding="utf-8") as f:
+            exclude_ids = {line.strip() for line in f if line.strip()}
+        print(f"  排除 ID 文件: {args.exclude_ids} ({len(exclude_ids)} 条)")
+
     # ── 数据 ─────────────────────────────────────────────────────────────
     print("加载训练数据...")
     dataset = load_stage1_dataset(args.data, tokenizer, args.max_length, think_suffix,
+                                  exclude_ids=exclude_ids,
                                   filter_problems=args.filter_problems,
                                   filter_sizes=args.filter_sizes)
 
