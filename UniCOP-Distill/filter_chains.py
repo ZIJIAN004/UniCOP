@@ -22,12 +22,28 @@ def get_customers(routes: list[list[int]]) -> set[int]:
     return {n for r in routes for n in r if n != 0}
 
 
+_RE_NODE_LIST = re.compile(
+    r"[Nn]odes?\s+([\d]+(?:\s*[,，]\s*\d+)+(?:\s*(?:and|&)\s*\d+)?)")
+_RE_NODE_RANGE = re.compile(r"[Nn]odes?\s+(\d+)\s*[-–—]+\s*(\d+)")
+_RE_NODE_RANGE2 = re.compile(r"[Nn]odes?\s+(\d+)\s+to\s+(\d+)")
+
+
 def count_mentioned_nodes(think: str, answer_nodes: set[int]) -> set[int]:
-    """检查 think chain 中提到了哪些答案节点（Route 格式 + 文字提及）。"""
+    """检查 think chain 中提到了哪些答案节点（Route 格式 + 列表/范围 + 文字提及）。"""
     mentioned = set()
 
     route_nodes = get_customers(parse_routes(think))
     mentioned |= (route_nodes & answer_nodes)
+
+    for m in _RE_NODE_LIST.finditer(think):
+        nums = {int(x) for x in re.findall(r"\d+", m.group(0))}
+        mentioned |= (nums & answer_nodes)
+
+    for pat in (_RE_NODE_RANGE, _RE_NODE_RANGE2):
+        for m in pat.finditer(think):
+            start, end = int(m.group(1)), int(m.group(2))
+            if 0 < end - start <= 25:
+                mentioned |= (set(range(start, end + 1)) & answer_nodes)
 
     for n in answer_nodes - mentioned:
         patterns = [
