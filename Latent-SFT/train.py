@@ -39,6 +39,14 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
         "train_micro_batch_size_per_gpu": "auto",
         "train_batch_size": "auto",
         "gradient_accumulation_steps": "auto",
+        "optimizer": {
+            "type": "AdamW",
+            "params": {"lr": "auto", "weight_decay": "auto"},
+        },
+        "scheduler": {
+            "type": "WarmupDecayLR",
+            "params": {"warmup_num_steps": "auto", "total_num_steps": "auto"},
+        },
     }
 
     if zero_stage == 2:
@@ -161,11 +169,9 @@ def train(cfg: LatentSFTConfig):
         pin_memory=True,
     )
 
-    # ── Optimizer: 模型参数 + latent embeddings 分开设置 lr ──
-    optimizer = AdamW([
-        {"params": model.parameters(), "lr": cfg.lr, "weight_decay": cfg.weight_decay},
-        {"params": latent_emb.parameters(), "lr": cfg.latent_lr, "weight_decay": 0.0},
-    ])
+    # ── Optimizer: 模型参数走 DeepSpeed，latent embeddings 单独管理 ──
+    optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    latent_optimizer = AdamW(latent_emb.parameters(), lr=cfg.latent_lr, weight_decay=0.0)
 
     # ── Accelerate prepare（先 prepare，再用 sharded dataloader 长度算 scheduler）──
     model, optimizer, dataloader = accelerator.prepare(
@@ -212,12 +218,14 @@ def train(cfg: LatentSFTConfig):
                 accelerator.backward(total_loss)
 
                 if accelerator.sync_gradients:
-                    # 多卡同步 latent_emb 梯度（仅在梯度累积完成时）
                     if accelerator.num_processes > 1 and latent_emb.embedding.grad is not None:
                         torch.distributed.all_reduce(latent_emb.embedding.grad, op=torch.distributed.ReduceOp.AVG)
 
                     accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
                     torch.nn.utils.clip_grad_norm_(latent_emb.parameters(), cfg.max_grad_norm)
+
+                    latent_optimizer.step()
+                    latent_optimizer.zero_grad()
 
                 optimizer.step()
                 scheduler.step()
@@ -251,19 +259,17 @@ def train(cfg: LatentSFTConfig):
 
 def _save_checkpoint(accelerator, model, latent_emb, tokenizer, cfg, tag):
     accelerator.wait_for_everyone()
-    if not accelerator.is_main_process:
-        return
-
     save_path = os.path.join(cfg.output_dir, f"checkpoint-{tag}")
-    os.makedirs(save_path, exist_ok=True)
-
     unwrapped = accelerator.unwrap_model(model)
-    unwrapped.save_pretrained(save_path)
-    tokenizer.save_pretrained(save_path)
-
-    # 单独保存 latent embeddings
-    torch.save(latent_emb.state_dict(), os.path.join(save_path, "latent_embeddings.pt"))
-    print(f"  ✓ checkpoint 保存到: {save_path}")
+    # ZeRO-3: all ranks must participate in weight gather
+    state_dict = accelerator.get_state_dict(model)
+    if accelerator.is_main_process:
+        os.makedirs(save_path, exist_ok=True)
+        unwrapped.save_pretrained(save_path, state_dict=state_dict)
+        tokenizer.save_pretrained(save_path)
+        torch.save(latent_emb.state_dict(), os.path.join(save_path, "latent_embeddings.pt"))
+        print(f"  ✓ checkpoint 保存到: {save_path}")
+    accelerator.wait_for_everyone()
 
 
 def main():
