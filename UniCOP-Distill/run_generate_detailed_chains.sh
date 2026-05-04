@@ -28,9 +28,9 @@ SCKEY="SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
 PROBLEM="cvrp"
 SIZE=20
 SOLUTIONS_FILE="data/solutions_${PROBLEM}${SIZE}.jsonl"
-CHAINS_FILE="data/chains_self_${PROBLEM}${SIZE}.jsonl"
-CHAINS_FILTERED="data/chains_self_${PROBLEM}${SIZE}_filtered.jsonl"
-FILTERED_IDS="data/chains_self_${PROBLEM}${SIZE}_filtered_ids.txt"
+CHAINS_FILE="data/chains_detailed_${PROBLEM}${SIZE}.jsonl"
+CHAINS_FILTERED="data/chains_detailed_${PROBLEM}${SIZE}_filtered.jsonl"
+FILTERED_IDS="data/chains_detailed_${PROBLEM}${SIZE}_filtered_ids.txt"
 
 # vLLM 配置
 VLLM_BASE_PORT=8100
