@@ -168,7 +168,7 @@ class CODIDataset(Dataset):
 
         cot_cursor = 0
         for seg in latent_segments:
-            seg_start = seg["start"]
+            seg_start = max(seg["start"], cot_cursor)
             seg_end = seg["end"]
             orig_len = seg_end - seg_start + 1
             num_latent = max(1, math.ceil(orig_len / self.compression_ratio))

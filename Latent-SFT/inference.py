@@ -41,8 +41,8 @@ class LatentInferenceEngine:
         self.max_latent_steps = max_latent_steps
 
     def _compute_entropy(self, logits: torch.Tensor) -> float:
-        probs = F.softmax(logits, dim=-1)
-        entropy = -(probs * probs.clamp(min=1e-12).log()).sum(dim=-1)
+        log_p = F.log_softmax(logits.float(), dim=-1)
+        entropy = -(log_p.exp() * log_p).sum(dim=-1)
         return entropy.item()
 
     @torch.no_grad()
@@ -80,12 +80,16 @@ class LatentInferenceEngine:
             current_input = torch.tensor([[first_id]], device=self.model.device)
             if first_id == self.tokenizer.eos_token_id:
                 return self.tokenizer.decode(generated_tokens, skip_special_tokens=True), {
-                    "num_tokens": 1, "entropy_history": [],
+                    "num_tokens": 1, "latent_steps": 0, "entropy_history": [],
                 }
         else:
             current_input = None
 
-        for step in range(max_new_tokens):
+        remaining = max_new_tokens - len(generated_tokens)
+        total_latent_steps = 0
+        full_entropy_history = []
+
+        for step in range(remaining):
             if in_latent:
                 # COCONUT 式: 用上一步的 hidden state 作为输入，shape (1, 1, hidden)
                 outputs = self.model(
@@ -108,9 +112,11 @@ class LatentInferenceEngine:
 
             entropy = self._compute_entropy(logits)
             entropy_history.append(entropy)
+            full_entropy_history.append(entropy)
 
             if in_latent:
                 latent_step_count += 1
+                total_latent_steps += 1
 
                 # 退出条件 1: 熵连续 K 步下降
                 should_exit = False
@@ -155,7 +161,8 @@ class LatentInferenceEngine:
         output_text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
         return output_text, {
             "num_tokens": len(generated_tokens),
-            "entropy_history": entropy_history,
+            "latent_steps": total_latent_steps,
+            "entropy_history": full_entropy_history,
         }
 
     def _sample(self, logits: torch.Tensor, temperature: float) -> int:

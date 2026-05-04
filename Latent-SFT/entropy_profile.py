@@ -41,10 +41,14 @@ def _strip_posthoc(text, marker):
 @torch.no_grad()
 def compute_entropies(model, input_ids):
     outputs = model(input_ids=input_ids)
-    logits = outputs.logits
-    probs = F.softmax(logits, dim=-1)
-    ent = -(probs * probs.clamp(min=1e-12).log()).sum(dim=-1)
-    return ent[0].cpu().tolist()
+    logits = outputs.logits[0]
+    entropies = []
+    for start in range(0, logits.size(0), 512):
+        chunk = logits[start : start + 512].float()
+        log_p = F.log_softmax(chunk, dim=-1)
+        ent = -(log_p.exp() * log_p).sum(dim=-1)
+        entropies.extend(ent.cpu().tolist())
+    return entropies
 
 
 def detect_latent_segments(entropies, window, min_segment):
@@ -53,11 +57,13 @@ def detect_latent_segments(entropies, window, min_segment):
 
     连续 window 步上升 → 进入 latent（entry = 上升起点）
     连续 window 步下降 → 退出 latent（exit = 下降终点）
+    段之间不重叠。
     """
     n = len(entropies)
     segments = []
     in_latent = False
     entry = None
+    last_exit = -1
 
     for i in range(window, n):
         if not in_latent:
@@ -66,21 +72,24 @@ def detect_latent_segments(entropies, window, min_segment):
                 for j in range(window)
             )
             if rising:
-                entry = i - window
-                in_latent = True
+                candidate = i - window
+                if candidate > last_exit:
+                    entry = candidate
+                    in_latent = True
         else:
             falling = all(
                 entropies[i - window + j] > entropies[i - window + j + 1]
                 for j in range(window)
             )
             if falling:
-                if i - entry >= min_segment:
+                if (i - entry + 1) >= min_segment:
                     segments.append({"start": entry, "end": i})
+                    last_exit = i
                 in_latent = False
                 entry = None
 
     if in_latent and entry is not None:
-        if n - 1 - entry >= min_segment:
+        if (n - entry) >= min_segment:
             segments.append({"start": entry, "end": n - 1})
 
     return segments
@@ -159,7 +168,8 @@ def profile_dataset(args):
         cot_start = len(prompt_ids)
         input_tensor = torch.tensor([teacher_ids], device=model.device)
         entropies = compute_entropies(model, input_tensor)
-        cot_entropies = entropies[cot_start : cot_start + len(cot_ids)]
+        # entropies[i] = 预测 token i+1 的熵，偏移 -1 使 cot_entropies[k] 对应 cot_ids[k]
+        cot_entropies = entropies[cot_start - 1 : cot_start + len(cot_ids) - 1]
 
         segments = detect_latent_segments(
             cot_entropies, args.entropy_window, args.min_segment

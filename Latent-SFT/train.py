@@ -250,6 +250,7 @@ def train(cfg: LatentSFTConfig):
 
 
 def _save_checkpoint(accelerator, model, latent_emb, tokenizer, cfg, tag):
+    accelerator.wait_for_everyone()
     if not accelerator.is_main_process:
         return
 
