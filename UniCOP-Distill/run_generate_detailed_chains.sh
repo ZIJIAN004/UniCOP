@@ -28,9 +28,9 @@ SCKEY="SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
 PROBLEM="cvrp"
 SIZE=20
 SOLUTIONS_FILE="data/solutions_${PROBLEM}${SIZE}.jsonl"
-CHAINS_FILE="data/chains_detailed_${PROBLEM}${SIZE}.jsonl"
-CHAINS_FILTERED="data/chains_detailed_${PROBLEM}${SIZE}_filtered.jsonl"
-FILTERED_IDS="data/chains_detailed_${PROBLEM}${SIZE}_filtered_ids.txt"
+CHAINS_FILE="data/chains_self_${PROBLEM}${SIZE}.jsonl"
+CHAINS_FILTERED="data/chains_self_${PROBLEM}${SIZE}_filtered.jsonl"
+FILTERED_IDS="data/chains_self_${PROBLEM}${SIZE}_filtered_ids.txt"
 
 # vLLM 配置
 VLLM_BASE_PORT=8100
@@ -178,7 +178,7 @@ echo "  max prompt length = $MAX_PROMPT_LEN"
 # ══════════════════════════════════════════════════════════════════
 PILOT_SAMPLES=30
 PILOT_MODEL_LEN=$((MAX_PROMPT_LEN + 4096))
-PILOT_FILE="data/chains_detailed_pilot_${PROBLEM}${SIZE}.jsonl"
+PILOT_FILE="data/chains_pilot_${PROBLEM}${SIZE}.jsonl"
 
 echo ""
 echo ">>> Step 2: Pilot 生成 $PILOT_SAMPLES 条 (max-model-len=$PILOT_MODEL_LEN)..."
