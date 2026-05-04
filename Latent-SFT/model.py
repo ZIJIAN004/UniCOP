@@ -85,9 +85,9 @@ def compute_codi_loss(
         h_t_list, h_s_list = [], []
         for b in range(batch_size):
             for t_pos, s_pos in align_pairs[b]:
-                if t_pos >= teacher_hidden[layer_idx].size(1):
+                if t_pos < 0 or t_pos >= teacher_hidden[layer_idx].size(1):
                     continue
-                if s_pos >= student_hidden[layer_idx].size(1):
+                if s_pos < 0 or s_pos >= student_hidden[layer_idx].size(1):
                     continue
                 h_t_list.append(teacher_hidden[layer_idx][b, t_pos, :].detach())
                 h_s_list.append(student_hidden[layer_idx][b, s_pos, :])
@@ -97,7 +97,7 @@ def compute_codi_loss(
 
         h_t_batch = torch.stack(h_t_list)
         h_s_batch = torch.stack(h_s_list)
-        std = h_t_batch.std(dim=-1).mean().clamp(min=1e-6)
+        std = h_t_batch.std(dim=-1).mean().clamp(min=0.1)
         layer_loss = (h_t_batch - h_s_batch).abs().mean() / std
 
         align_loss = align_loss + layer_loss

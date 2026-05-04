@@ -5,8 +5,8 @@ Latent-SFT 推理脚本：entropy-based 动态切换 latent/explicit 模式。
   1. 模型读取问题 prompt，默认以显式模式开始
   2. 显式模式: 正常自回归，监控熵
   3. 熵连续 K 步上升 → 进入 latent 模式
-  4. latent 模式: hidden state 直接回传为下一步输入（COCONUT 式），
-     同时过 LM head 算熵（仅监控，不采样）
+  4. latent 模式: 每步输入训练好的 latent embedding，通过 KV cache 中的
+     注意力积累推理信息，同时过 LM head 算熵（仅监控，不采样）
   5. 熵连续 K 步下降 → 退出 latent，用当前 logits 采样 token
   6. latent 步数达到上限 → 强制退出转显式
 """
@@ -57,14 +57,15 @@ class LatentInferenceEngine:
             temperature: 采样温度 (0 = greedy)
             start_latent: 是否从 latent 模式开始
         """
+        if start_latent and self.latent_emb is None:
+            raise ValueError("Cannot start in latent mode without latent embeddings")
+
         input_ids = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.model.device)
 
-        # 预填充 KV cache（处理 prompt），避免第一步 latent 浪费在 prompt 编码上
         prefill_out = self.model(
-            input_ids=input_ids, use_cache=True, output_hidden_states=True,
+            input_ids=input_ids, use_cache=True,
         )
         past_key_values = prefill_out.past_key_values
-        last_hidden = prefill_out.hidden_states[-1][:, -1, :]
 
         generated_tokens = []
         entropy_history = []
@@ -72,7 +73,6 @@ class LatentInferenceEngine:
         in_latent = start_latent
         latent_step_count = 0
 
-        # 非 latent 启动时，用 prefill logits 采样第一个 token
         if not start_latent:
             first_logits = prefill_out.logits[:, -1, :]
             first_id = self._sample(first_logits, temperature)
@@ -91,24 +91,21 @@ class LatentInferenceEngine:
 
         for step in range(remaining):
             if in_latent:
-                # COCONUT 式: 用上一步的 hidden state 作为输入，shape (1, 1, hidden)
+                latent_input = self.latent_emb().unsqueeze(0).unsqueeze(0)
                 outputs = self.model(
-                    inputs_embeds=last_hidden.unsqueeze(1),
+                    inputs_embeds=latent_input,
                     past_key_values=past_key_values,
                     use_cache=True,
-                    output_hidden_states=True,
                 )
             else:
                 outputs = self.model(
                     input_ids=current_input,
                     past_key_values=past_key_values,
                     use_cache=True,
-                    output_hidden_states=True,
                 )
 
             logits = outputs.logits[:, -1, :]
             past_key_values = outputs.past_key_values
-            last_hidden = outputs.hidden_states[-1][:, -1, :]  # 最后一层最后位置
 
             entropy = self._compute_entropy(logits)
             entropy_history.append(entropy)
@@ -150,8 +147,7 @@ class LatentInferenceEngine:
                 if token_id == self.tokenizer.eos_token_id:
                     break
 
-                # 进入条件: 熵连续 K 步上升
-                if len(entropy_history) >= self.entropy_window + 1:
+                if self.latent_emb is not None and len(entropy_history) >= self.entropy_window + 1:
                     recent = entropy_history[-(self.entropy_window + 1):]
                     if all(recent[i] < recent[i + 1] for i in range(self.entropy_window)):
                         in_latent = True

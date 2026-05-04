@@ -39,14 +39,6 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
         "train_micro_batch_size_per_gpu": "auto",
         "train_batch_size": "auto",
         "gradient_accumulation_steps": "auto",
-        "optimizer": {
-            "type": "AdamW",
-            "params": {"lr": "auto", "weight_decay": "auto"},
-        },
-        "scheduler": {
-            "type": "WarmupDecayLR",
-            "params": {"warmup_num_steps": "auto", "total_num_steps": "auto"},
-        },
     }
 
     if zero_stage == 2:
