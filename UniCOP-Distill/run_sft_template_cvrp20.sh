@@ -116,8 +116,8 @@ CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
     --zero_stage 2 \
     --gradient_checkpointing \
     --epochs $SFT_EPOCHS \
-    --batch_size 2 \
-    --grad_accum 5 \
+    --batch_size 1 \
+    --grad_accum 10 \
     --lr $SFT_LR \
     --save_steps 500
 
