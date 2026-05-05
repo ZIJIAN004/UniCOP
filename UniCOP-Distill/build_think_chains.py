@@ -771,6 +771,224 @@ def process_record(record: dict) -> dict | None:
     }
 
 
+def _pick_rejection_nodes(routes, demands, capacity, rng):
+    """为每条路线（除最后一条）挑选 1-2 个来自后续路线的"注入节点"，
+    使其在当前路线结束时因容量不足被拒绝。
+    返回 dict: {route_idx: [rejected_node, ...]}"""
+    rejections = {}
+    for r_idx in range(len(routes) - 1):
+        # 当前路线服务完后的剩余容量
+        customers = [v for v in routes[r_idx] if v != 0]
+        cap_after = capacity - sum(demands[v] for v in customers)
+
+        # 从后续路线中找 demand > cap_after 的节点作为拒绝候选
+        candidates = []
+        for future_r in routes[r_idx + 1:]:
+            for v in future_r:
+                if v != 0 and demands[v] > cap_after + 1e-9:
+                    candidates.append(v)
+
+        if not candidates:
+            continue
+
+        # 随机选 1 个（偶尔 2 个）
+        n_pick = 1 if rng.random() < 0.7 else min(2, len(candidates))
+        picked = list(rng.choice(candidates, size=n_pick, replace=False))
+        rejections[r_idx] = picked
+
+    return rejections
+
+
+def detect_strategy_cvrp_reject(routes, coords, demands, capacity, rejections):
+    """带注入节点的 strategy：cluster 列表中额外包含将被拒绝的节点。"""
+    n_customers = sum(1 for d in demands if d > 0)
+    total_demand = float(sum(demands))
+    min_vehicles = math.ceil(total_demand / capacity)
+    depot = coords[0]
+
+    cluster_info = []
+    for i, route in enumerate(routes):
+        customers = [v for v in route if v != 0]
+        # 注入节点加到 cluster 列表末尾
+        extra = rejections.get(i, [])
+        display_nodes = customers + extra
+        angles = [_angle_from_depot(coords, 0, c) for c in customers]
+        mean_angle = math.degrees(sum(angles) / len(angles)) % 360 if angles else 0
+        angle_span = (max(angles) - min(angles)) if len(angles) > 1 else 0
+        avg_dist = float(np.mean([_dist(coords, 0, c) for c in customers])) if customers else 0
+        cluster_info.append({
+            "idx": i + 1, "nodes": display_nodes,
+            "angle": mean_angle, "angle_span": math.degrees(angle_span),
+            "avg_dist": avg_dist,
+        })
+
+    cluster_info.sort(key=lambda x: x["angle"])
+
+    lines = [
+        f"Depot at ({depot[0]:.3f}, {depot[1]:.3f}). {n_customers} customers.",
+        f"Total demand: {total_demand:.2f}. Capacity: {capacity:.2f}.",
+        f"Min vehicles needed: ceil({total_demand:.2f}/{capacity:.2f})={min_vehicles}. "
+        f"Using {len(routes)} routes.",
+        f"Cluster analysis:",
+    ]
+    for ci in cluster_info:
+        nodes_str = ", ".join(str(n) for n in ci["nodes"])
+        lines.append(
+            f"  Route {ci['idx']}: [{nodes_str}] "
+            f"{len(ci['nodes'])} nodes, "
+            f"mean_angle={ci['angle']:.0f}°, span={ci['angle_span']:.0f}°, "
+            f"avg_d0={ci['avg_dist']:.3f}"
+        )
+    lines.append(
+        f"Plan: serve each cluster as one route, visit by nearest-neighbor within cluster. "
+        f"End route and return to depot when remaining capacity cannot serve any unvisited node in cluster."
+    )
+    return "\n".join(lines)
+
+
+def build_steps_cvrp_reject(routes, coords, demands, capacity, rejections):
+    """CVRP step-by-step：在每条路线结束时尝试注入节点并展示拒绝过程。"""
+    steps = []
+    all_unvisited = set()
+    for route in routes:
+        all_unvisited.update(v for v in route if v != 0)
+    # 注入节点也算"planned"但最终不在当前路线服务
+    all_reject_nodes = set()
+    for nodes in rejections.values():
+        all_reject_nodes.update(nodes)
+
+    for r_idx, route in enumerate(routes):
+        nodes_str = ", ".join(str(v) for v in sorted(all_unvisited))
+        steps.append(f"Unvisited: {{{nodes_str}}}")
+
+        cap_remaining = capacity
+        step_in_route = 0
+        reject_nodes = rejections.get(r_idx, [])
+
+        for i in range(len(route) - 1):
+            curr, nxt = route[i], route[i + 1]
+            if nxt == 0:
+                # 路线实际节点已服务完，尝试注入节点 → 拒绝
+                for rn in reject_nodes:
+                    if rn in all_unvisited:
+                        steps.append(
+                            f"  → next planned: node {rn} (dem={demands[rn]:.4f}), "
+                            f"but cap={cap_remaining:.2f} < {demands[rn]:.4f} "
+                            f"→ cannot fit, defer to next route"
+                        )
+                # 决策检查
+                if all_unvisited:
+                    min_dem = min(demands[v] for v in all_unvisited)
+                    if cap_remaining < min_dem:
+                        steps.append(
+                            f"  → cap={cap_remaining:.2f} < min_demand(unvisited)={min_dem:.4f} "
+                            f"→ capacity exhausted, return to depot"
+                        )
+                    else:
+                        steps.append(
+                            f"  → cluster complete, cap={cap_remaining:.2f} remaining, "
+                            f"return to depot"
+                        )
+                else:
+                    steps.append(
+                        f"  → all customers served, return to depot"
+                    )
+                d = _dist(coords, curr, 0)
+                steps.append(
+                    f"[R{r_idx+1},{step_in_route+1}] at {curr} → 0 "
+                    f"(d={d:.3f}) return to depot"
+                )
+                break
+
+            d = _dist(coords, curr, nxt)
+            dem = demands[nxt]
+            cap_before = cap_remaining
+            cap_remaining -= dem
+            d0 = _dist(coords, nxt, 0)
+            all_unvisited.discard(nxt)
+            step_in_route += 1
+
+            feasible_unvisited = [
+                v for v in all_unvisited if demands[v] <= cap_before
+            ]
+            alts = _nearest_unvisited(coords, curr, feasible_unvisited, k=2)
+            alt_parts = []
+            for a, ad in alts:
+                a_cap = cap_before - demands[a]
+                alt_parts.append(f"{a}({ad:.3f},cap={cap_before:.2f}-{demands[a]:.4f}={a_cap:.2f})")
+            alt_str = ", ".join(alt_parts) if alt_parts else "none"
+
+            steps.append(
+                f"[R{r_idx+1},{step_in_route}] at {curr} → {nxt} "
+                f"(d={d:.3f}, dem={dem:.4f}) "
+                f"cap={cap_before:.2f}-{dem:.4f}={cap_remaining:.2f}, d0={d0:.2f} "
+                f"| alt: {alt_str}"
+            )
+
+    return steps
+
+
+def process_record_reject(record: dict, rng) -> dict | None:
+    """生成带拒绝事件的 chain：Strategy 多分节点，Step-by-step 展示容量拒绝，最终路线不变。"""
+    pt = record["problem_type"]
+    if pt != "cvrp":
+        return None
+
+    multi_route = True
+    user_prompt = record["prompt"]["user"]
+    instance = parse_instance_from_prompt(user_prompt, pt)
+    if not instance:
+        return None
+
+    n = instance["n"]
+    coords = instance["coords"]
+    demands = instance["demands"]
+    capacity = instance["capacity"]
+
+    routes = parse_routes(record["solution"], multi_route)
+    if not routes:
+        return None
+
+    all_customers = sorted(v for r in routes for v in r if v != 0)
+    if all_customers != list(range(1, n + 1)):
+        return None
+
+    # 选择注入节点
+    rejections = _pick_rejection_nodes(routes, demands, capacity, rng)
+    if not rejections:
+        return None  # 没有可注入的节点（所有路线都打满了），跳过
+
+    strategy = detect_strategy_cvrp_reject(routes, coords, demands, capacity, rejections)
+    step_lines = build_steps_cvrp_reject(routes, coords, demands, capacity, rejections)
+    answer = format_route_answer(routes, multi_route=True)
+
+    think_parts = [
+        f"1. **Strategy**: {strategy}",
+        "",
+        "2. **Step-by-step construction**:",
+        *step_lines,
+        "",
+        "3. **Final routes**:",
+        answer,
+    ]
+    think_content = "\n".join(think_parts)
+    output = f"<think>\n{think_content}\n</think>\n{answer}"
+
+    from problems_prompt import get_system_prompt
+    new_system = get_system_prompt(pt)
+
+    return {
+        "id": record["id"] + "_reject",
+        "problem_type": pt,
+        "n": n,
+        "prompt": {"system": new_system, "user": user_prompt},
+        "output": output,
+        "solver_distance": record.get("solver_distance"),
+        "method": "template_reject",
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="从求解器的解 programmatically 构造思维链 SFT 数据")
@@ -778,6 +996,8 @@ def main():
                         help="输入的 solutions JSONL 文件路径")
     parser.add_argument("--output", required=True,
                         help="输出的 chains JSONL 文件路径")
+    parser.add_argument("--reject_ratio", type=float, default=0.0,
+                        help="额外生成带拒绝事件 chain 的比例 (0-1)，0 表示不生成")
     args = parser.parse_args()
 
     records = []
@@ -790,7 +1010,8 @@ def main():
 
     print(f"读取 {len(records)} 条求解器解")
 
-    success, fail = 0, 0
+    rng = np.random.default_rng(42)
+    success, fail, reject_count = 0, 0, 0
     with open(args.output, "w", encoding="utf-8") as out_f:
         for rec in records:
             result = process_record(rec)
@@ -800,7 +1021,14 @@ def main():
             else:
                 fail += 1
 
-    print(f"完成: {success} 条成功, {fail} 条失败")
+            # 按比例额外生成带拒绝事件的 chain
+            if args.reject_ratio > 0 and rng.random() < args.reject_ratio:
+                reject_result = process_record_reject(rec, rng)
+                if reject_result:
+                    out_f.write(json.dumps(reject_result, ensure_ascii=False) + "\n")
+                    reject_count += 1
+
+    print(f"完成: {success} 条 solver chain, {reject_count} 条 reject chain, {fail} 条失败")
     print(f"输出: {args.output}")
 
 
