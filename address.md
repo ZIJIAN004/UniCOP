@@ -13,7 +13,7 @@
 | LKH 求解器 | `/home/ntu/LKH/LKH` |
 | 基座模型 | `/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B` |
 
-## A*STAR 主机
+## A*STAR-Zhihan 主机
 
 工作目录：`/Data04/yangzhihan/lzj/`
 

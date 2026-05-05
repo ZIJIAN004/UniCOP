@@ -21,7 +21,7 @@ if [ -d "/home/ntu/lzj" ]; then
     BASE_MODEL="/home/ntu/lzj/Model/model/DeepSeek-R1-Distill-Qwen-7B"
 
 elif [ -d "/Data04/yangzhihan/lzj" ]; then
-    HOST_ID="astar"
+    HOST_ID="astar-zhihan"
     # ── 项目 ──
     UNICOP_ROOT="/Data04/yangzhihan/lzj/UniCOP"
     POMO_BASELINE_DIR="/Data04/yangzhihan/lzj/POMO-Baseline"
