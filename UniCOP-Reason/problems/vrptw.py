@@ -97,22 +97,23 @@ Rules:
 - If arrival time < earliest, wait at the node until earliest (advance current time to earliest), then continue
 - Objective: minimize total travel distance across all routes
 
-Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these four sections in order:
 
 1. **Strategy**: Analyze time windows and node positions. Group nodes into routes by time-window compatibility and geographic proximity. For each planned route, state which nodes belong to it and the time-window range of that group. Reference specific node IDs.
 
 2. **Step-by-step construction**: Build each route one node at a time. Each step format:
-   [R1,3] at N → M (d=X.XXX, t=X.XX, arr=X.XX, slack=X.XX) | alt: A(X.XX,slack=X.XX), B(X.XX,slack=X.XX)
+   [R1,3] at N → M (d=X.XXX, arr=X.XX, slack=X.XX) | alt: A(d=X.XX,slack=X.XX), B(d=X.XX,slack=X.XX)
    - d = distance from current to chosen node
-   - t = current time (before departing from N)
-   - arr = arrival time at M
+   - arr = arrival time at M (current_time + d)
    - slack = deadline of M minus arrival time (how much time margin remains)
    - alt = 2-3 nearest feasible alternatives with distance and slack
    If arrival < earliest of M, mark "wait" and set current time to earliest.
    At the start of each new route, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
    When no feasible next node exists within current route's time constraints, return to depot and start a new route.
 
-3. **Final routes**: Write all complete routes in "Route N: 0 -> ... -> 0" format at the end of think.
+3. **Verification**: For each route, list its customers and count. Confirm total equals n. Format: "R1:{nodes}=count | R2:{nodes}=count | ... Total: X/N customers. ✓ All covered, no duplicates."
+
+4. **Final routes**: Write all complete routes in "Route N: 0 -> ... -> 0" format at the end of think.
 
 After </think>, output ONLY the final routes (copied from think):
 Route 1: 0 -> node -> ... -> 0

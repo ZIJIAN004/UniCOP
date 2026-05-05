@@ -466,6 +466,7 @@ def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
         steps.append(f"Unvisited: {{{nodes_str}}}")
 
         cap_remaining = capacity
+        route_load = 0.0
         step_in_route = 0
         for i in range(len(route) - 1):
             curr, nxt = route[i], route[i + 1]
@@ -475,7 +476,7 @@ def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
                     min_dem = min(demands[v] for v in all_unvisited)
                     if cap_remaining < min_dem:
                         steps.append(
-                            f"  → cap={cap_remaining:.2f} < min_demand(unvisited)={min_dem:.4f} "
+                            f"  → cap={cap_remaining:.2f} < min_demand(unvisited)={min_dem:.2f} "
                             f"→ capacity exhausted, return to depot"
                         )
                     else:
@@ -498,6 +499,7 @@ def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
             dem = demands[nxt]
             cap_before = cap_remaining
             cap_remaining -= dem
+            route_load += dem
             d0 = _dist(coords, nxt, 0)
             all_unvisited.discard(nxt)
             step_in_route += 1
@@ -509,13 +511,14 @@ def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
             alt_parts = []
             for a, ad in alts:
                 a_cap = cap_before - demands[a]
-                alt_parts.append(f"{a}({ad:.3f},cap={cap_before:.2f}-{demands[a]:.4f}={a_cap:.2f})")
+                alt_parts.append(f"{a}({ad:.3f},cap={cap_before:.2f}-{demands[a]:.2f}={a_cap:.2f})")
             alt_str = ", ".join(alt_parts) if alt_parts else "none"
 
             steps.append(
                 f"[R{r_idx+1},{step_in_route}] at {curr} → {nxt} "
-                f"(d={d:.3f}, dem={dem:.4f}) "
-                f"cap={cap_before:.2f}-{dem:.4f}={cap_remaining:.2f}, d0={d0:.2f} "
+                f"(d={d:.3f}, dem={dem:.2f}) "
+                f"cap={cap_before:.2f}-{dem:.2f}={cap_remaining:.2f}, "
+                f"load={route_load:.2f}/{capacity:.2f}, d0={d0:.2f} "
                 f"| alt: {alt_str}"
             )
 
@@ -677,6 +680,26 @@ def format_route_answer(routes: list[list[int]], multi_route: bool) -> str:
     return "\n".join(lines)
 
 
+def _build_verification(routes: list[list[int]], n: int, multi_route: bool) -> list[str]:
+    """构建验证步骤：核对所有节点恰好覆盖一次。"""
+    lines = []
+    if multi_route:
+        route_summaries = []
+        for i, route in enumerate(routes):
+            customers = sorted(v for v in route if v != 0)
+            nodes_str = ",".join(str(v) for v in customers)
+            route_summaries.append(f"R{i+1}:{{{nodes_str}}}={len(customers)}")
+        lines.append(" | ".join(route_summaries))
+        total = sum(len([v for v in r if v != 0]) for r in routes)
+        lines.append(f"Total: {total}/{n} customers. " +
+                     ("✓ All covered, no duplicates." if total == n else "✗ Error."))
+    else:
+        customers = sorted(v for v in routes[0] if v != 0)
+        lines.append(f"Visited: {{{','.join(str(v) for v in customers)}}} = {len(customers)}/{n}")
+        lines.append("✓ All covered." if len(customers) == n else "✗ Error.")
+    return lines
+
+
 def build_think_chain(problem_type: str, instance: dict,
                       routes: list[list[int]]) -> str:
     """组装完整的 <think>...</think> + answer。"""
@@ -712,6 +735,10 @@ def build_think_chain(problem_type: str, instance: dict,
     # Final route (inside think)
     answer = format_route_answer(routes, multi_route)
 
+    # Verification
+    n = instance["n"]
+    verify_lines = _build_verification(routes, n, multi_route)
+
     # Assemble
     think_parts = [
         f"1. **Strategy**: {strategy}",
@@ -719,7 +746,10 @@ def build_think_chain(problem_type: str, instance: dict,
         "2. **Step-by-step construction**:",
         *step_lines,
         "",
-        f"3. **Final {'routes' if multi_route else 'route'}**:",
+        "3. **Verification**:",
+        *verify_lines,
+        "",
+        f"4. **Final {'routes' if multi_route else 'route'}**:",
         answer,
     ]
 
@@ -869,6 +899,7 @@ def build_steps_cvrp_reject(routes, coords, demands, capacity, rejections):
         steps.append(f"Unvisited: {{{nodes_str}}}")
 
         cap_remaining = capacity
+        route_load = 0.0
         step_in_route = 0
         reject_nodes = rejections.get(r_idx, [])
 
@@ -879,8 +910,8 @@ def build_steps_cvrp_reject(routes, coords, demands, capacity, rejections):
                 for rn in reject_nodes:
                     if rn in all_unvisited:
                         steps.append(
-                            f"  → next planned: node {rn} (dem={demands[rn]:.4f}), "
-                            f"but cap={cap_remaining:.2f} < {demands[rn]:.4f} "
+                            f"  → next planned: node {rn} (dem={demands[rn]:.2f}), "
+                            f"but cap={cap_remaining:.2f} < {demands[rn]:.2f} "
                             f"→ cannot fit, defer to next route"
                         )
                 # 决策检查
@@ -888,7 +919,7 @@ def build_steps_cvrp_reject(routes, coords, demands, capacity, rejections):
                     min_dem = min(demands[v] for v in all_unvisited)
                     if cap_remaining < min_dem:
                         steps.append(
-                            f"  → cap={cap_remaining:.2f} < min_demand(unvisited)={min_dem:.4f} "
+                            f"  → cap={cap_remaining:.2f} < min_demand(unvisited)={min_dem:.2f} "
                             f"→ capacity exhausted, return to depot"
                         )
                     else:
@@ -911,6 +942,7 @@ def build_steps_cvrp_reject(routes, coords, demands, capacity, rejections):
             dem = demands[nxt]
             cap_before = cap_remaining
             cap_remaining -= dem
+            route_load += dem
             d0 = _dist(coords, nxt, 0)
             all_unvisited.discard(nxt)
             step_in_route += 1
@@ -922,13 +954,14 @@ def build_steps_cvrp_reject(routes, coords, demands, capacity, rejections):
             alt_parts = []
             for a, ad in alts:
                 a_cap = cap_before - demands[a]
-                alt_parts.append(f"{a}({ad:.3f},cap={cap_before:.2f}-{demands[a]:.4f}={a_cap:.2f})")
+                alt_parts.append(f"{a}({ad:.3f},cap={cap_before:.2f}-{demands[a]:.2f}={a_cap:.2f})")
             alt_str = ", ".join(alt_parts) if alt_parts else "none"
 
             steps.append(
                 f"[R{r_idx+1},{step_in_route}] at {curr} → {nxt} "
-                f"(d={d:.3f}, dem={dem:.4f}) "
-                f"cap={cap_before:.2f}-{dem:.4f}={cap_remaining:.2f}, d0={d0:.2f} "
+                f"(d={d:.3f}, dem={dem:.2f}) "
+                f"cap={cap_before:.2f}-{dem:.2f}={cap_remaining:.2f}, "
+                f"load={route_load:.2f}/{capacity:.2f}, d0={d0:.2f} "
                 f"| alt: {alt_str}"
             )
 
@@ -1149,6 +1182,7 @@ def process_record_reject(record: dict, rng) -> dict | None:
         step_lines = build_steps_vrptw_reject(routes, coords, tw, rejections)
 
     answer = format_route_answer(routes, multi_route=True)
+    verify_lines = _build_verification(routes, n, multi_route=True)
 
     think_parts = [
         f"1. **Strategy**: {strategy}",
@@ -1156,7 +1190,10 @@ def process_record_reject(record: dict, rng) -> dict | None:
         "2. **Step-by-step construction**:",
         *step_lines,
         "",
-        "3. **Final routes**:",
+        "3. **Verification**:",
+        *verify_lines,
+        "",
+        "4. **Final routes**:",
         answer,
     ]
     think_content = "\n".join(think_parts)

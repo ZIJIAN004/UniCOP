@@ -112,21 +112,23 @@ Rules:
 - If arrival time < earliest, wait at the node until earliest (advance current time to earliest), then continue
 - Objective: minimize total travel distance
 
-Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these four sections in order:
 
 1. **Strategy**: Analyze time windows and node positions. Identify urgent nodes (tight deadlines that must be visited early), flexible nodes (late deadlines), and the overall visit ordering principle (e.g., "deadline-driven with geographic continuity", "sweep with urgency priority"). Reference specific node IDs.
 
 2. **Step-by-step construction**: Build the route one node at a time. Each step format:
-   [step] at N → M (d=X.XXX, t=X.XX, arr=X.XX, slack=X.XX) | alt: A(X.XX,slack=X.XX), B(X.XX,slack=X.XX)
+   [step] at N → M (d=X.XXX, arr=X.XX, slack=X.XX) #reachable=X/Y | alt: A(d=X.XX,slack=X.XX), B(d=X.XX,slack=X.XX)
    - d = distance from current to chosen node
-   - t = current time (before departing from N)
-   - arr = arrival time at M
+   - arr = arrival time at M (current_time + d)
    - slack = deadline of M minus arrival time (how much time margin remains)
+   - #reachable = how many unvisited nodes are still reachable from M within their deadlines
    - alt = 2-3 nearest feasible alternatives with distance and slack
    If arrival < earliest of M, mark "wait" and set current time to earliest.
    Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
 
-3. **Final route**: Write the complete route in "Route: 0 -> ... -> 0" format at the end of think.
+3. **Verification**: List all visited nodes and confirm total count equals n. Format: "Visited: {1,2,...} = N/N" then "✓ All covered."
+
+4. **Final route**: Write the complete route in "Route: 0 -> ... -> 0" format at the end of think.
 
 After </think>, output ONLY the final route (copied from think):
 Route: 0 -> A -> B -> C -> ... -> 0"""

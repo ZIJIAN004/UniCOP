@@ -37,7 +37,7 @@ class CVRP(ProblemBase):
         for i in range(n + 1):
             tag = " (depot)" if i == 0 else ""
             lines.append(
-                f"  Node {i}{tag}: ({coords[i][0]:.3f}, {coords[i][1]:.3f})  demand={demands[i]:.4f}"
+                f"  Node {i}{tag}: ({coords[i][0]:.3f}, {coords[i][1]:.3f})  demand={demands[i]:.2f}"
             )
         # 约束和输出格式已在 system prompt 中说明，不重复
         return [
@@ -89,21 +89,24 @@ def _greedy_routes(demands, capacity, n, rng):
 _SYSTEM = """You are a logistics route planning expert solving the Capacitated Vehicle Routing Problem (CVRP).
 Rules: Multiple vehicles depart from node 0; each vehicle visits a subset of customers and returns to node 0; total demand per route must not exceed vehicle capacity; each customer is visited exactly once; minimize total distance.
 
-Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these three sections in order:
+Before answering, reason step by step inside <think>...</think>. Your think block MUST contain these four sections in order:
 
 1. **Strategy**: Analyze demand distribution and node positions. Identify which nodes form each route cluster, the approximate total demand per cluster, and the visit order principle within each cluster (e.g., "sweep outward then return", "nearest-neighbor within cluster"). Reference specific node IDs.
 
 2. **Step-by-step construction**: Build each route one node at a time. Each step format:
-   [R1,3] at N → M (d=X.XXX, dem=X.XXXX) cap:X.XX→X.XX, d0=X.XX | alt: A(X.XX,cap→X.XX), B(X.XX,cap→X.XX)
+   [R1,3] at N → M (d=X.XXX, dem=X.XX) cap=X.XX-X.XX=X.XX, load=X.XX/X.XX, d0=X.XX | alt: A(X.XX,cap→X.XX), B(X.XX,cap→X.XX)
    - d = distance from current to chosen node
    - dem = demand of chosen node
-   - cap = remaining capacity before→after
+   - cap = remaining capacity before - demand = after
+   - load = cumulative load of current route / vehicle capacity
    - d0 = distance from chosen node to depot (informs return cost)
    - alt = 2-3 nearest feasible alternatives with distance and resulting capacity
    At the start of each new route, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
    When capacity is too low for any remaining node, return to depot and start a new route.
 
-3. **Final routes**: Write all complete routes in "Route N: 0 -> ... -> 0" format at the end of think.
+3. **Verification**: For each route, list its customers and count. Confirm total equals n. Format: "R1:{nodes}=count | R2:{nodes}=count | ... Total: X/N customers. ✓ All covered, no duplicates."
+
+4. **Final routes**: Write all complete routes in "Route N: 0 -> ... -> 0" format at the end of think.
 
 After </think>, output ONLY the final routes (copied from think):
 Route 1: 0 -> node -> ... -> 0
