@@ -40,7 +40,7 @@ PROBLEMS="cvrp tsptw vrptw"
 SIZES="20"
 NUM_SAMPLES=50000
 WORKERS=32
-REJECT_RATIO=0.2
+REJECT_RATIO=0.3
 SEED=42
 
 # ── 解析命令行参数 ────────────────────────────────────────────────────────────
