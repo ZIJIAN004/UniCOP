@@ -746,6 +746,51 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     print(f"  最优距离均值: {avg_best_dist:.4f}  ({len(best_dists)} 个可行实例)")
     print(f"  {'─'*55}")
 
+    # ── 覆盖完整样本的约束满足分布分析 ────────────────────────────────
+    cov_arr = np.array(all_coverage)
+    con_arr = np.array(all_constraint)
+    covered_mask = cov_arr == 1.0
+    n_covered = int(covered_mask.sum())
+    if n_covered > 0:
+        con_of_covered = con_arr[covered_mask]
+        print(f"\n  {'─'*55}")
+        print(f"  覆盖完整样本的约束满足分布 ({n_covered} 个样本):")
+        print(f"    约束满足率 = 1.0 (全部路线合法): {int((con_of_covered == 1.0).sum())} 个")
+        for lo, hi, label in [
+            (0.8, 1.0, "[0.8, 1.0)  差1-2条路线"),
+            (0.6, 0.8, "[0.6, 0.8)  约2/5路线违约"),
+            (0.4, 0.6, "[0.4, 0.6)  约半数路线违约"),
+            (0.0, 0.4, "[0.0, 0.4)  大部分路线违约"),
+        ]:
+            cnt = int(((con_of_covered >= lo) & (con_of_covered < hi)).sum())
+            print(f"    约束满足率 ∈ {label}: {cnt} 个")
+        print(f"    均值: {con_of_covered.mean():.4f}  中位数: {np.median(con_of_covered):.4f}")
+        print(f"    最小值: {con_of_covered.min():.4f}  最大值: {con_of_covered.max():.4f}")
+        # 按路线数细分：约束=valid/total，反推违约路线数
+        print(f"\n    违约路线数分布 (覆盖完整的 {n_covered} 个样本):")
+        violation_counts = {}
+        for c in con_of_covered:
+            if c == 1.0:
+                n_violated = 0
+            elif c == 0.0:
+                n_violated = -1  # 无法推断
+            else:
+                # c = valid/total → total = round(1/(1-c)) 近似不准，直接用分数反推
+                # 尝试 total_routes = 2..10，找最接近整数的
+                best_total, best_violated = None, None
+                for t in range(2, 15):
+                    valid = c * t
+                    if abs(valid - round(valid)) < 0.01:
+                        best_total = t
+                        best_violated = t - int(round(valid))
+                        break
+                n_violated = best_violated if best_violated is not None else -1
+            violation_counts[n_violated] = violation_counts.get(n_violated, 0) + 1
+        for k in sorted(violation_counts.keys()):
+            label = f"{k} 条路线超载" if k >= 0 else "无法推断"
+            print(f"      {label}: {violation_counts[k]} 个样本")
+        print(f"  {'─'*55}")
+
     # ── 输出示例: parse 成功 / 失败 各 3 个, 不够用另一边补 ─────────
     TARGET_EACH = 3
     TOTAL_TARGET = TARGET_EACH * 2
