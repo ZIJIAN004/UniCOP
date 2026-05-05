@@ -261,27 +261,26 @@ def detect_strategy_cvrp(routes: list[list[int]], coords: np.ndarray,
         })
 
     cluster_info.sort(key=lambda x: x["angle"])
-    avg_util = total_demand / (n_routes * capacity) * 100
 
     # 构建特征分析段
     lines = [
         f"Depot at ({depot[0]:.3f}, {depot[1]:.3f}). {n_customers} customers.",
         f"Total demand: {total_demand:.2f}. Capacity: {capacity:.2f}.",
         f"Min vehicles needed: ceil({total_demand:.2f}/{capacity:.2f})={min_vehicles}. "
-        f"Using {n_routes} routes (avg utilization={avg_util:.0f}%).",
+        f"Using {n_routes} routes.",
         f"Cluster analysis:",
     ]
     for ci in cluster_info:
         nodes_str = ", ".join(str(n) for n in ci["nodes"])
-        util = ci["demand"] / capacity * 100
         lines.append(
             f"  Route {ci['idx']}: [{nodes_str}] "
-            f"sum_demand={ci['demand']:.2f} ({util:.0f}%), "
+            f"{len(ci['nodes'])} nodes, "
             f"mean_angle={ci['angle']:.0f}°, span={ci['angle_span']:.0f}°, "
             f"avg_d0={ci['avg_dist']:.3f}"
         )
     lines.append(
-        f"Plan: serve each cluster as one route, visit by nearest-neighbor within cluster."
+        f"Plan: serve each cluster as one route, visit by nearest-neighbor within cluster. "
+        f"End route and return to depot when remaining capacity cannot serve any unvisited node in cluster."
     )
 
     return "\n".join(lines)
@@ -456,7 +455,7 @@ def build_steps_tsp(route: list[int], coords: np.ndarray) -> list[str]:
 
 def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
                      demands: np.ndarray, capacity: float) -> list[str]:
-    """CVRP: 显式计算 cap=X-Y=Z"""
+    """CVRP: 显式计算 cap=X-Y=Z，路线末尾加容量决策检查"""
     steps = []
     all_unvisited = set()
     for route in routes:
@@ -471,6 +470,23 @@ def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
         for i in range(len(route) - 1):
             curr, nxt = route[i], route[i + 1]
             if nxt == 0:
+                # 容量决策检查：为什么结束这条路线
+                if all_unvisited:
+                    min_dem = min(demands[v] for v in all_unvisited)
+                    if cap_remaining < min_dem:
+                        steps.append(
+                            f"  → cap={cap_remaining:.2f} < min_demand(unvisited)={min_dem:.4f} "
+                            f"→ capacity exhausted, return to depot"
+                        )
+                    else:
+                        steps.append(
+                            f"  → cluster complete, cap={cap_remaining:.2f} remaining, "
+                            f"return to depot"
+                        )
+                else:
+                    steps.append(
+                        f"  → all customers served, return to depot"
+                    )
                 d = _dist(coords, curr, 0)
                 steps.append(
                     f"[R{r_idx+1},{step_in_route+1}] at {curr} → 0 "
@@ -487,13 +503,13 @@ def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
             step_in_route += 1
 
             feasible_unvisited = [
-                v for v in all_unvisited if demands[v] <= cap_before
+                v for v in all_unvisited if demands[v] <= cap_remaining
             ]
             alts = _nearest_unvisited(coords, curr, feasible_unvisited, k=2)
             alt_parts = []
             for a, ad in alts:
-                a_cap = cap_before - demands[a]
-                alt_parts.append(f"{a}({ad:.3f},cap={cap_before:.2f}-{demands[a]:.4f}={a_cap:.2f})")
+                a_cap = cap_remaining - demands[a]
+                alt_parts.append(f"{a}({ad:.3f},cap={cap_remaining:.2f}-{demands[a]:.4f}={a_cap:.2f})")
             alt_str = ", ".join(alt_parts) if alt_parts else "none"
 
             steps.append(
@@ -508,7 +524,7 @@ def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
 
 def build_steps_tsptw(route: list[int], coords: np.ndarray,
                       tw: np.ndarray) -> list[str]:
-    """TSPTW: 显式计算 arr=t+d, slack=dl-arr"""
+    """TSPTW: 显式计算 arr=t+d, slack=dl-arr，加可达性检查"""
     steps = []
     current_time = 0.0
     unvisited = set(route[1:-1])
@@ -546,10 +562,17 @@ def build_steps_tsptw(route: list[int], coords: np.ndarray,
                 alts.append(f"{v}(d={ad:.3f},slack={tw[v][1]:.2f}-{a_arr:.2f}={a_slack:.2f})")
         alt_str = ", ".join(alts) if alts else "none"
 
+        # 从当前节点出发的可达性检查
+        feasible_from_here = sum(
+            1 for v in unvisited
+            if current_time + _dist(coords, nxt, v) <= tw[v][1]
+        )
+        feas_str = f" #reachable={feasible_from_here}/{len(unvisited)}" if unvisited else ""
+
         steps.append(
             f"[{i}] at {curr} → {nxt} (d={d:.3f}, "
             f"arr={t_depart:.2f}+{d:.3f}={arr:.2f}, "
-            f"slack={deadline:.2f}-{arr:.2f}={slack:.2f}){wait_str} "
+            f"slack={deadline:.2f}-{arr:.2f}={slack:.2f}){wait_str}{feas_str} "
             f"| alt: {alt_str}"
         )
 
@@ -562,7 +585,7 @@ def build_steps_tsptw(route: list[int], coords: np.ndarray,
 
 def build_steps_vrptw(routes: list[list[int]], coords: np.ndarray,
                       tw: np.ndarray) -> list[str]:
-    """VRPTW: 显式计算 arr=t+d, slack=dl-arr"""
+    """VRPTW: 显式计算 arr=t+d, slack=dl-arr，路线末尾加时窗决策检查"""
     steps = []
     all_unvisited = set()
     for route in routes:
@@ -581,6 +604,26 @@ def build_steps_vrptw(routes: list[list[int]], coords: np.ndarray,
             arr = t_depart + d
 
             if nxt == 0:
+                # 时窗决策检查：为什么结束这条路线
+                if all_unvisited:
+                    feasible_count = sum(
+                        1 for v in all_unvisited
+                        if current_time + _dist(coords, curr, v) <= tw[v][1]
+                    )
+                    if feasible_count == 0:
+                        steps.append(
+                            f"  → t={current_time:.2f}, no unvisited node reachable within deadline "
+                            f"→ return to depot, start new route"
+                        )
+                    else:
+                        steps.append(
+                            f"  → cluster complete ({feasible_count} unvisited still reachable), "
+                            f"return to depot"
+                        )
+                else:
+                    steps.append(
+                        f"  → all customers served, return to depot"
+                    )
                 steps.append(
                     f"[R{r_idx+1},{step_in_route+1}] at {curr} → 0 "
                     f"(d={d:.3f}, arr={t_depart:.2f}+{d:.3f}={arr:.2f}) "
