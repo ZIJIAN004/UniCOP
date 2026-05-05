@@ -92,7 +92,7 @@ def parse_instance_from_prompt(user_prompt: str, problem_type: str) -> dict:
     if problem_type in ("cvrp",):
         dems = np.zeros(n + 1)
         for nid, nd in node_data.items():
-            dems[nid] = nd.get("demand", 0.0)
+            dems[nid] = round(nd.get("demand", 0.0), 2)
         instance["demands"] = dems
         instance["capacity"] = capacity if capacity else 1.0
 
@@ -761,6 +761,15 @@ def build_think_chain(problem_type: str, instance: dict,
 # 6. 主流程
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _rewrite_demand_precision(user_prompt: str) -> str:
+    """将 user prompt 中的 demand=X.XXXX 重写为 demand=X.XX（2位小数）。"""
+    return re.sub(
+        r"demand=([\d.]+)",
+        lambda m: f"demand={round(float(m.group(1)), 2):.2f}",
+        user_prompt,
+    )
+
+
 def process_record(record: dict) -> dict | None:
     """处理单条 solutions 记录，返回 chains 格式的记录。"""
     pt = record["problem_type"]
@@ -784,6 +793,10 @@ def process_record(record: dict) -> dict | None:
         return None
 
     output = build_think_chain(pt, instance, routes)
+
+    # CVRP: 重写 user prompt 中的 demand 精度为 2 位
+    if pt == "cvrp":
+        user_prompt = _rewrite_demand_precision(user_prompt)
 
     # 用新版 system prompt（带思维链格式指导）
     from problems_prompt import get_system_prompt
@@ -1198,6 +1211,10 @@ def process_record_reject(record: dict, rng) -> dict | None:
     ]
     think_content = "\n".join(think_parts)
     output = f"<think>\n{think_content}\n</think>\n{answer}"
+
+    # CVRP: 重写 user prompt 中的 demand 精度为 2 位
+    if pt == "cvrp":
+        user_prompt = _rewrite_demand_precision(user_prompt)
 
     from problems_prompt import get_system_prompt
     new_system = get_system_prompt(pt)
