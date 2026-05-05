@@ -1,11 +1,14 @@
 """检查 chains_template_cvrp20.jsonl 的 prompt / completion / total token 长度分布"""
 
 import json
+import os
 import numpy as np
 from transformers import AutoTokenizer
 
 DATA_PATH = "data/chains_template_cvrp20.jsonl"
-MODEL_PATH = "/homes/zhuoyi/zijianliu/models/DeepSeek-R1-Distill-Qwen-7B"
+MODEL_PATH = os.environ.get("BASE_MODEL", "")
+if not MODEL_PATH:
+    raise RuntimeError("BASE_MODEL 未设置，请先 source paths.sh")
 
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
