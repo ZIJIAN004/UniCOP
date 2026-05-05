@@ -19,7 +19,7 @@ class CVRP(ProblemBase):
         coords  = rng.uniform(0, 1, size=(n + 1, 2))
         demands = np.zeros(n + 1, dtype=float)
         scaler  = _demand_scaler(n)
-        demands[1:] = rng.integers(1, 10, size=n) / scaler  # normalized to (0,1)
+        demands[1:] = np.round(rng.integers(1, 10, size=n) / scaler, 2)
         capacity = 1.0
 
         feasible_routes = _greedy_routes(demands, capacity, n, rng)
