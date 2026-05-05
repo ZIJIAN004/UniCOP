@@ -446,7 +446,7 @@ def main():
         # ZeRO-3 + LoRA + gc 组合下,non-reentrant checkpoint 和 ZeRO-3 partition 交互
         # 会报 "Recomputed values shape [0]"。社区 workaround 是强制 use_reentrant=True
         # (trl#2514, peft#1142)。与 UniCOP-Reason/train.py 保持一致。
-        gradient_checkpointing_kwargs={"use_reentrant": True},
+        gradient_checkpointing_kwargs={"use_reentrant": args.zero_stage == 3},
         eval_strategy="steps" if eval_dataset else "no",
         eval_steps=args.save_steps if eval_dataset else None,
         lr_scheduler_type="cosine",

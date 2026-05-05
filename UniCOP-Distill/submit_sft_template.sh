@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --qos express
+#SBATCH --qos long
 #SBATCH --gpus=8
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/sft_template_%j.log
 
