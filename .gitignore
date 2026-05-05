@@ -28,7 +28,7 @@ merged_model/
 **/data/processed/
 **/data/*.json
 !UniCOP-Reason/data/
-# *.jsonl 已改用 Git LFS 追踪，不在 gitignore 中排除
+*.jsonl
 *.npz
 
 # ── 日志 ───────────────────────────────────────────
