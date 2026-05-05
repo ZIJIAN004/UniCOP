@@ -503,13 +503,13 @@ def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
             step_in_route += 1
 
             feasible_unvisited = [
-                v for v in all_unvisited if demands[v] <= cap_remaining
+                v for v in all_unvisited if demands[v] <= cap_before
             ]
             alts = _nearest_unvisited(coords, curr, feasible_unvisited, k=2)
             alt_parts = []
             for a, ad in alts:
-                a_cap = cap_remaining - demands[a]
-                alt_parts.append(f"{a}({ad:.3f},cap={cap_remaining:.2f}-{demands[a]:.4f}={a_cap:.2f})")
+                a_cap = cap_before - demands[a]
+                alt_parts.append(f"{a}({ad:.3f},cap={cap_before:.2f}-{demands[a]:.4f}={a_cap:.2f})")
             alt_str = ", ".join(alt_parts) if alt_parts else "none"
 
             steps.append(
