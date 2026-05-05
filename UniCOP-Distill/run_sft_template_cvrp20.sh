@@ -113,11 +113,11 @@ CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
     --lora_rank $SFT_LORA_RANK --lora_alpha $SFT_LORA_ALPHA \
     --max_length $SFT_MAX_LENGTH \
     --output_dir "$OUTPUT_DIR" \
-    --zero_stage 2 \
+    --zero_stage 3 \
     --gradient_checkpointing \
     --epochs $SFT_EPOCHS \
-    --batch_size 1 \
-    --grad_accum 10 \
+    --batch_size 2 \
+    --grad_accum 5 \
     --lr $SFT_LR \
     --save_steps 500
 
