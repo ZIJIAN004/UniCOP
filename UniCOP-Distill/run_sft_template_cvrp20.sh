@@ -34,7 +34,7 @@ SFT_EPOCHS=3
 SFT_LORA_RANK=64
 SFT_LORA_ALPHA=128
 SFT_MAX_LENGTH=8192
-SFT_NUM_GPUS=4
+SFT_NUM_GPUS=3
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
@@ -117,7 +117,7 @@ CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
     --gradient_checkpointing \
     --epochs $SFT_EPOCHS \
     --batch_size 2 \
-    --grad_accum 4 \
+    --grad_accum 5 \
     --lr $SFT_LR \
     --save_steps 500
 
