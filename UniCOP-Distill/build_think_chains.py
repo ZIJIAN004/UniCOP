@@ -771,29 +771,36 @@ def process_record(record: dict) -> dict | None:
     }
 
 
-def _pick_rejection_nodes(routes, demands, capacity, rng):
+def _pick_rejection_nodes(routes, coords, demands, capacity, rng):
     """为每条路线（除最后一条）挑选 1-2 个来自后续路线的"注入节点"，
-    使其在当前路线结束时因容量不足被拒绝。
+    要求：(1) demand > 当前路线剩余容量（保证被拒绝）
+          (2) 地理上靠近当前路线末端节点（保证注入合理性）
     返回 dict: {route_idx: [rejected_node, ...]}"""
     rejections = {}
     for r_idx in range(len(routes) - 1):
-        # 当前路线服务完后的剩余容量
         customers = [v for v in routes[r_idx] if v != 0]
+        if not customers:
+            continue
         cap_after = capacity - sum(demands[v] for v in customers)
+        # 当前路线末端节点（最后 1-2 个），作为地理锚点
+        tail_nodes = customers[-2:] if len(customers) >= 2 else customers[-1:]
 
-        # 从后续路线中找 demand > cap_after 的节点作为拒绝候选
+        # 从后续路线中找 demand > cap_after 的候选
         candidates = []
         for future_r in routes[r_idx + 1:]:
             for v in future_r:
                 if v != 0 and demands[v] > cap_after + 1e-9:
-                    candidates.append(v)
+                    # 计算到当前路线末端的最近距离
+                    min_d = min(_dist(coords, t, v) for t in tail_nodes)
+                    candidates.append((v, min_d))
 
         if not candidates:
             continue
 
-        # 随机选 1 个（偶尔 2 个）
+        # 按距离排序，选最近的 1-2 个（地理上最合理的）
+        candidates.sort(key=lambda x: x[1])
         n_pick = 1 if rng.random() < 0.7 else min(2, len(candidates))
-        picked = list(rng.choice(candidates, size=n_pick, replace=False))
+        picked = [c[0] for c in candidates[:n_pick]]
         rejections[r_idx] = picked
 
     return rejections
@@ -928,10 +935,183 @@ def build_steps_cvrp_reject(routes, coords, demands, capacity, rejections):
     return steps
 
 
+def _pick_rejection_nodes_vrptw(routes, coords, tw, rng):
+    """VRPTW: 为每条路线挑选来自后续路线的注入节点，
+    要求：(1) 从当前路线末端出发到达时已超过该节点的 deadline
+          (2) 地理上靠近当前路线末端
+    返回 dict: {route_idx: [rejected_node, ...]}"""
+    rejections = {}
+    for r_idx in range(len(routes) - 1):
+        customers = [v for v in routes[r_idx] if v != 0]
+        if not customers:
+            continue
+        # 模拟当前路线的结束时间
+        current_time = 0.0
+        for i in range(len(routes[r_idx]) - 1):
+            curr, nxt = routes[r_idx][i], routes[r_idx][i + 1]
+            if nxt == 0:
+                break
+            d = _dist(coords, curr, nxt)
+            arr = current_time + d
+            current_time = max(arr, tw[nxt][0])  # wait if early
+
+        last_node = customers[-1]
+        tail_nodes = customers[-2:] if len(customers) >= 2 else [last_node]
+
+        # 从后续路线中找从 last_node 出发会超 deadline 的节点
+        candidates = []
+        for future_r in routes[r_idx + 1:]:
+            for v in future_r:
+                if v == 0:
+                    continue
+                travel = _dist(coords, last_node, v)
+                arr_time = current_time + travel
+                if arr_time > tw[v][1] + 1e-9:
+                    min_d = min(_dist(coords, t, v) for t in tail_nodes)
+                    candidates.append((v, min_d))
+
+        if not candidates:
+            continue
+
+        candidates.sort(key=lambda x: x[1])
+        n_pick = 1 if rng.random() < 0.7 else min(2, len(candidates))
+        picked = [c[0] for c in candidates[:n_pick]]
+        rejections[r_idx] = picked
+
+    return rejections
+
+
+def detect_strategy_vrptw_reject(routes, coords, tw, rejections):
+    """VRPTW 带注入节点的 strategy。"""
+    depot = coords[0]
+    all_customers = [v for r in routes for v in r if v != 0]
+    n_customers = len(all_customers)
+    avg_window = float(np.mean([tw[c][1] - tw[c][0] for c in all_customers]))
+
+    route_info = []
+    for i, route in enumerate(routes):
+        customers = [v for v in route if v != 0]
+        extra = rejections.get(i, [])
+        display_nodes = customers + extra
+        if not customers:
+            continue
+        tw_earliest = min(tw[c][0] for c in customers)
+        tw_latest = max(tw[c][1] for c in customers)
+        avg_dist = float(np.mean([_dist(coords, 0, c) for c in customers]))
+        nodes_str = ", ".join(str(c) for c in display_nodes)
+        route_info.append(
+            f"  Route {i+1}: [{nodes_str}] "
+            f"tw=[{tw_earliest:.2f},{tw_latest:.2f}], "
+            f"nodes={len(display_nodes)}, avg_d0={avg_dist:.3f}"
+        )
+
+    lines = [
+        f"Depot at ({depot[0]:.3f}, {depot[1]:.3f}). {n_customers} customers.",
+        f"Average time-window width: {avg_window:.2f}.",
+        f"Routes needed: {len(routes)} (each serves a time-compatible cluster).",
+        f"Route analysis:",
+    ]
+    lines.extend(route_info)
+    lines.append(
+        f"Plan: within each route, visit by earliest feasible arrival. "
+        f"When no unvisited node is reachable within its deadline, return to depot and start new route."
+    )
+    return "\n".join(lines)
+
+
+def build_steps_vrptw_reject(routes, coords, tw, rejections):
+    """VRPTW step-by-step：在每条路线结束时展示时窗拒绝。"""
+    steps = []
+    all_unvisited = set()
+    for route in routes:
+        all_unvisited.update(v for v in route if v != 0)
+
+    for r_idx, route in enumerate(routes):
+        nodes_str = ", ".join(str(v) for v in sorted(all_unvisited))
+        steps.append(f"Unvisited: {{{nodes_str}}}")
+
+        current_time = 0.0
+        step_in_route = 0
+        reject_nodes = rejections.get(r_idx, [])
+
+        for i in range(len(route) - 1):
+            curr, nxt = route[i], route[i + 1]
+            t_depart = current_time
+            d = _dist(coords, curr, nxt)
+            arr = t_depart + d
+
+            if nxt == 0:
+                # 尝试注入节点 → 时窗拒绝
+                for rn in reject_nodes:
+                    if rn in all_unvisited:
+                        travel = _dist(coords, curr, rn)
+                        rn_arr = current_time + travel
+                        steps.append(
+                            f"  → next planned: node {rn} (deadline={tw[rn][1]:.2f}), "
+                            f"arr={current_time:.2f}+{travel:.3f}={rn_arr:.2f} > {tw[rn][1]:.2f} "
+                            f"→ deadline exceeded, defer to next route"
+                        )
+                # 时窗决策检查
+                if all_unvisited:
+                    feasible_count = sum(
+                        1 for v in all_unvisited
+                        if current_time + _dist(coords, curr, v) <= tw[v][1]
+                    )
+                    if feasible_count == 0:
+                        steps.append(
+                            f"  → t={current_time:.2f}, no unvisited node reachable within deadline "
+                            f"→ return to depot, start new route"
+                        )
+                    else:
+                        steps.append(
+                            f"  → cluster complete ({feasible_count} unvisited still reachable), "
+                            f"return to depot"
+                        )
+                else:
+                    steps.append(
+                        f"  → all customers served, return to depot"
+                    )
+                steps.append(
+                    f"[R{r_idx+1},{step_in_route+1}] at {curr} → 0 "
+                    f"(d={d:.3f}, arr={t_depart:.2f}+{d:.3f}={arr:.2f}) "
+                    f"return to depot"
+                )
+                break
+
+            all_unvisited.discard(nxt)
+            step_in_route += 1
+            deadline = tw[nxt][1]
+            slack = deadline - arr
+            wait_str = ""
+            if arr < tw[nxt][0]:
+                wait_str = f" wait until {tw[nxt][0]:.2f}"
+                current_time = tw[nxt][0]
+            else:
+                current_time = arr
+
+            alts = []
+            for v in sorted(all_unvisited, key=lambda x: _dist(coords, curr, x))[:2]:
+                ad = _dist(coords, curr, v)
+                a_arr = t_depart + ad
+                if a_arr <= tw[v][1]:
+                    a_slack = tw[v][1] - a_arr
+                    alts.append(f"{v}(d={ad:.3f},slack={tw[v][1]:.2f}-{a_arr:.2f}={a_slack:.2f})")
+            alt_str = ", ".join(alts) if alts else "none"
+
+            steps.append(
+                f"[R{r_idx+1},{step_in_route}] at {curr} → {nxt} "
+                f"(d={d:.3f}, arr={t_depart:.2f}+{d:.3f}={arr:.2f}, "
+                f"slack={deadline:.2f}-{arr:.2f}={slack:.2f}){wait_str} "
+                f"| alt: {alt_str}"
+            )
+
+    return steps
+
+
 def process_record_reject(record: dict, rng) -> dict | None:
-    """生成带拒绝事件的 chain：Strategy 多分节点，Step-by-step 展示容量拒绝，最终路线不变。"""
+    """生成带拒绝事件的 chain，支持 CVRP 和 VRPTW。"""
     pt = record["problem_type"]
-    if pt != "cvrp":
+    if pt not in ("cvrp", "vrptw"):
         return None
 
     multi_route = True
@@ -942,8 +1122,6 @@ def process_record_reject(record: dict, rng) -> dict | None:
 
     n = instance["n"]
     coords = instance["coords"]
-    demands = instance["demands"]
-    capacity = instance["capacity"]
 
     routes = parse_routes(record["solution"], multi_route)
     if not routes:
@@ -953,13 +1131,23 @@ def process_record_reject(record: dict, rng) -> dict | None:
     if all_customers != list(range(1, n + 1)):
         return None
 
-    # 选择注入节点
-    rejections = _pick_rejection_nodes(routes, demands, capacity, rng)
-    if not rejections:
-        return None  # 没有可注入的节点（所有路线都打满了），跳过
+    if pt == "cvrp":
+        demands = instance["demands"]
+        capacity = instance["capacity"]
+        rejections = _pick_rejection_nodes(routes, coords, demands, capacity, rng)
+        if not rejections:
+            return None
+        strategy = detect_strategy_cvrp_reject(routes, coords, demands, capacity, rejections)
+        step_lines = build_steps_cvrp_reject(routes, coords, demands, capacity, rejections)
 
-    strategy = detect_strategy_cvrp_reject(routes, coords, demands, capacity, rejections)
-    step_lines = build_steps_cvrp_reject(routes, coords, demands, capacity, rejections)
+    elif pt == "vrptw":
+        tw = instance["time_windows"]
+        rejections = _pick_rejection_nodes_vrptw(routes, coords, tw, rng)
+        if not rejections:
+            return None
+        strategy = detect_strategy_vrptw_reject(routes, coords, tw, rejections)
+        step_lines = build_steps_vrptw_reject(routes, coords, tw, rejections)
+
     answer = format_route_answer(routes, multi_route=True)
 
     think_parts = [
@@ -1014,6 +1202,17 @@ def main():
     success, fail, reject_count = 0, 0, 0
     with open(args.output, "w", encoding="utf-8") as out_f:
         for rec in records:
+            use_reject = (args.reject_ratio > 0 and rng.random() < args.reject_ratio)
+
+            if use_reject:
+                # 尝试生成 reject chain 替换 solver chain
+                reject_result = process_record_reject(rec, rng)
+                if reject_result:
+                    out_f.write(json.dumps(reject_result, ensure_ascii=False) + "\n")
+                    reject_count += 1
+                    continue
+                # 生成失败（无可注入节点），fallback 到 solver chain
+
             result = process_record(rec)
             if result:
                 out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
@@ -1021,14 +1220,12 @@ def main():
             else:
                 fail += 1
 
-            # 按比例额外生成带拒绝事件的 chain
-            if args.reject_ratio > 0 and rng.random() < args.reject_ratio:
-                reject_result = process_record_reject(rec, rng)
-                if reject_result:
-                    out_f.write(json.dumps(reject_result, ensure_ascii=False) + "\n")
-                    reject_count += 1
-
-    print(f"完成: {success} 条 solver chain, {reject_count} 条 reject chain, {fail} 条失败")
+    total = success + reject_count
+    pct = reject_count / total * 100 if total else 0
+    print(f"完成: {success} 条 solver chain + {reject_count} 条 reject chain = {total} 条")
+    print(f"Reject 占比: {pct:.1f}% (目标 {args.reject_ratio*100:.0f}%)")
+    if fail:
+        print(f"失败: {fail} 条")
     print(f"输出: {args.output}")
 
 
