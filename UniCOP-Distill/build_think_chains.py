@@ -415,8 +415,31 @@ def _nearest_unvisited(coords, current, unvisited, k=3):
     return dists[:k]
 
 
+def _build_feasible_str(coords, curr, candidates, nxt, k=3):
+    """构建 feasible 候选列表字符串，必含 nxt，最多 k 个，超出加省略号。"""
+    all_feasible = [(n, _dist(coords, curr, n)) for n in candidates]
+    all_feasible.sort(key=lambda x: x[1])
+    total_feasible = len(all_feasible)
+
+    # 确保 nxt 在列表中
+    shown = []
+    nxt_in_top = False
+    for n, d in all_feasible[:k]:
+        shown.append((n, d))
+        if n == nxt:
+            nxt_in_top = True
+    if not nxt_in_top:
+        nxt_d = _dist(coords, curr, nxt)
+        if len(shown) >= k:
+            shown[-1] = (nxt, nxt_d)
+        else:
+            shown.append((nxt, nxt_d))
+
+    return shown, total_feasible
+
+
 def build_steps_tsp(route: list[int], coords: np.ndarray) -> list[str]:
-    """TSP: 显式计算 total=prev+d"""
+    """TSP: 先列 feasible 候选，最后 → select N"""
     steps = []
     total_dist = 0.0
     unvisited = set(route[1:-1])
@@ -424,26 +447,28 @@ def build_steps_tsp(route: list[int], coords: np.ndarray) -> list[str]:
     for i in range(len(route) - 1):
         curr, nxt = route[i], route[i + 1]
         d = _dist(coords, curr, nxt)
-        prev_total = total_dist
         total_dist += d
 
         if nxt == 0 and i == len(route) - 2:
             steps.append(
-                f"[{i}] at {curr} → 0 (d={d:.3f}, "
-                f"total={prev_total:.2f}+{d:.3f}={total_dist:.2f}) "
-                f"| return to depot"
+                f"[{i}] from {curr}, total={total_dist - d:.2f} "
+                f"→ return depot (d={d:.3f}, total={total_dist:.2f})"
             )
             break
 
         unvisited.discard(nxt)
 
-        alts = _nearest_unvisited(coords, curr, unvisited, k=3)
-        alt_str = ", ".join(f"{a}({ad:.3f})" for a, ad in alts) if alts else "none"
+        shown, total_feasible = _build_feasible_str(
+            coords, curr, unvisited | {nxt}, nxt, k=3
+        )
+        parts = [f"{n}(d={nd:.3f})" for n, nd in shown]
+        feasible_str = ", ".join(parts)
+        if total_feasible > 3:
+            feasible_str += ", ..."
 
         steps.append(
-            f"[{i}] at {curr} → {nxt} (d={d:.3f}, "
-            f"total={prev_total:.2f}+{d:.3f}={total_dist:.2f}) "
-            f"| alt: {alt_str}"
+            f"[{i}] from {curr}, total={total_dist - d:.2f} "
+            f"| feasible: {feasible_str} → select {nxt}"
         )
 
         if i > 0 and i % 10 == 0 and unvisited:
@@ -455,71 +480,99 @@ def build_steps_tsp(route: list[int], coords: np.ndarray) -> list[str]:
 
 def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
                      demands: np.ndarray, capacity: float) -> list[str]:
-    """CVRP: 显式计算 cap=X-Y=Z，路线末尾加容量决策检查"""
+    """CVRP: 先算 cap，列 feasible 候选，最后 → select N"""
     steps = []
     all_unvisited = set()
     for route in routes:
         all_unvisited.update(v for v in route if v != 0)
 
+    prev_dem = 0.0  # 上一步选择的 demand（用于本步开头的 cap 计算）
     for r_idx, route in enumerate(routes):
         nodes_str = ", ".join(str(v) for v in sorted(all_unvisited))
         steps.append(f"Unvisited: {{{nodes_str}}}")
 
         cap_remaining = capacity
-        route_load = 0.0
         step_in_route = 0
+        prev_dem = 0.0
         for i in range(len(route) - 1):
             curr, nxt = route[i], route[i + 1]
+            step_in_route += 1
+
+            # 构建 cap 状态字符串
+            if i == 0:
+                cap_str = f"cap={capacity:.2f}"
+            else:
+                cap_str = f"cap={cap_remaining + prev_dem:.2f}-{prev_dem:.2f}={cap_remaining:.2f}"
+
             if nxt == 0:
-                # 容量决策检查：为什么结束这条路线
-                if all_unvisited:
-                    min_dem = min(demands[v] for v in all_unvisited)
-                    if cap_remaining < min_dem:
+                d = _dist(coords, curr, 0)
+                if not all_unvisited:
+                    steps.append(
+                        f"[R{r_idx+1},{step_in_route}] {cap_str} "
+                        f"→ all customers served, return depot (d={d:.3f})"
+                    )
+                else:
+                    # 检查是 Case A（被迫）还是 Case B（策略）
+                    feasible_nodes = [
+                        v for v in all_unvisited if demands[v] <= cap_remaining
+                    ]
+                    if not feasible_nodes:
+                        # Case A: 无可行节点
+                        check_parts = [
+                            f"{v}(dem={demands[v]:.2f}>{cap_remaining:.2f})"
+                            for v in sorted(all_unvisited)[:5]
+                        ]
+                        if len(all_unvisited) > 5:
+                            check_parts.append("...")
                         steps.append(
-                            f"  → cap={cap_remaining:.2f} < min_demand(unvisited)={min_dem:.2f} "
-                            f"→ capacity exhausted, return to depot"
+                            f"[R{r_idx+1},{step_in_route}] {cap_str} "
+                            f"| check: {', '.join(check_parts)} "
+                            f"→ no feasible → return depot (d={d:.3f})"
                         )
                     else:
-                        steps.append(
-                            f"  → cluster complete, cap={cap_remaining:.2f} remaining, "
-                            f"return to depot"
+                        # Case B: 策略性回depot
+                        shown, total_f = _build_feasible_str(
+                            coords, curr, feasible_nodes, feasible_nodes[0], k=3
                         )
-                else:
-                    steps.append(
-                        f"  → all customers served, return to depot"
-                    )
-                d = _dist(coords, curr, 0)
-                steps.append(
-                    f"[R{r_idx+1},{step_in_route+1}] at {curr} → 0 "
-                    f"(d={d:.3f}) return to depot"
-                )
+                        parts = []
+                        for n, nd in shown:
+                            nc = cap_remaining - demands[n]
+                            parts.append(f"{n}(d={nd:.3f},dem={demands[n]:.2f},cap→{nc:.2f})")
+                        feasible_str = ", ".join(parts)
+                        if total_f > 3:
+                            feasible_str += ", ..."
+                        steps.append(
+                            f"[R{r_idx+1},{step_in_route}] {cap_str} "
+                            f"| feasible: {feasible_str} "
+                            f"→ remaining nodes better served by new route, return depot (d={d:.3f})"
+                        )
                 break
 
             d = _dist(coords, curr, nxt)
             dem = demands[nxt]
-            cap_before = cap_remaining
-            cap_remaining -= dem
-            route_load += dem
-            d0 = _dist(coords, nxt, 0)
-            all_unvisited.discard(nxt)
-            step_in_route += 1
+            prev_dem = dem
 
-            feasible_unvisited = [
-                v for v in all_unvisited if demands[v] <= cap_before
+            # 构建 feasible 候选
+            feasible_candidates = [
+                v for v in (all_unvisited | {nxt}) if demands[v] <= cap_remaining
             ]
-            alts = _nearest_unvisited(coords, curr, feasible_unvisited, k=2)
-            alt_parts = []
-            for a, ad in alts:
-                a_cap = cap_before - demands[a]
-                alt_parts.append(f"{a}({ad:.3f},cap={cap_before:.2f}-{demands[a]:.2f}={a_cap:.2f})")
-            alt_str = ", ".join(alt_parts) if alt_parts else "none"
+            shown, total_f = _build_feasible_str(
+                coords, curr, feasible_candidates, nxt, k=3
+            )
+            parts = []
+            for n, nd in shown:
+                nc = cap_remaining - demands[n]
+                parts.append(f"{n}(d={nd:.3f},dem={demands[n]:.2f},cap→{nc:.2f})")
+            feasible_str = ", ".join(parts)
+            if total_f > 3:
+                feasible_str += ", ..."
+
+            cap_remaining -= dem
+            all_unvisited.discard(nxt)
 
             steps.append(
-                f"[R{r_idx+1},{step_in_route}] at {curr} → {nxt} "
-                f"(d={d:.3f}, dem={dem:.2f}) "
-                f"cap={cap_before:.2f}-{dem:.2f}={cap_remaining:.2f}, "
-                f"load={route_load:.2f}/{capacity:.2f}, d0={d0:.2f} "
-                f"| alt: {alt_str}"
+                f"[R{r_idx+1},{step_in_route}] {cap_str} "
+                f"| feasible: {feasible_str} → select {nxt}"
             )
 
     return steps
@@ -527,10 +580,11 @@ def build_steps_cvrp(routes: list[list[int]], coords: np.ndarray,
 
 def build_steps_tsptw(route: list[int], coords: np.ndarray,
                       tw: np.ndarray) -> list[str]:
-    """TSPTW: 显式计算 arr=t+d, slack=dl-arr，加可达性检查"""
+    """TSPTW: 先列 feasible 候选（含 arr/slack），最后 → select N"""
     steps = []
     current_time = 0.0
     unvisited = set(route[1:-1])
+    prev_wait_str = ""  # 上一步的等待信息（在本步开头显示）
 
     for i in range(len(route) - 1):
         curr, nxt = route[i], route[i + 1]
@@ -540,55 +594,81 @@ def build_steps_tsptw(route: list[int], coords: np.ndarray,
 
         if nxt == 0:
             steps.append(
-                f"[{i}] at {curr} → 0 (d={d:.3f}, "
-                f"arr={t_depart:.2f}+{d:.3f}={arr:.2f}) "
-                f"| return to depot"
+                f"[{i}] t={t_depart:.2f} from {curr}{prev_wait_str} "
+                f"→ return depot (d={d:.3f})"
             )
             break
 
         unvisited.discard(nxt)
-        deadline = tw[nxt][1]
-        slack = deadline - arr
-        wait_str = ""
+
+        # 构建 feasible 候选：可达（arr <= deadline）的节点
+        feasible_candidates = []
+        for v in (unvisited | {nxt}):
+            vd = _dist(coords, curr, v)
+            v_arr = t_depart + vd
+            if v_arr <= tw[v][1]:
+                v_slack = tw[v][1] - v_arr
+                feasible_candidates.append((v, vd, v_arr, v_slack))
+        feasible_candidates.sort(key=lambda x: x[1])
+        total_feasible = len(feasible_candidates)
+
+        # 确保 nxt 在 top 3
+        shown = []
+        nxt_in_top = False
+        for v, vd, v_arr, v_slack in feasible_candidates[:3]:
+            shown.append((v, vd, v_arr, v_slack))
+            if v == nxt:
+                nxt_in_top = True
+        if not nxt_in_top:
+            nxt_arr = arr
+            nxt_slack = tw[nxt][1] - arr
+            if len(shown) >= 3:
+                shown[-1] = (nxt, d, nxt_arr, nxt_slack)
+            else:
+                shown.append((nxt, d, nxt_arr, nxt_slack))
+
+        parts = [
+            f"{v}(d={vd:.3f},arr={v_arr:.2f},slack={v_slack:.2f})"
+            for v, vd, v_arr, v_slack in shown
+        ]
+        feasible_str = ", ".join(parts)
+        if total_feasible > 3:
+            feasible_str += ", ..."
+
+        # 可达性（从选择的节点出发）
         if arr < tw[nxt][0]:
-            wait_str = f" wait until {tw[nxt][0]:.2f}"
-            current_time = tw[nxt][0]
+            effective_time = tw[nxt][0]
+            prev_wait_str = f" (arr={arr:.2f}, wait {tw[nxt][0] - arr:.2f})"
         else:
-            current_time = arr
+            effective_time = arr
+            prev_wait_str = ""
 
-        alts = []
-        for v in sorted(unvisited, key=lambda x: _dist(coords, curr, x))[:3]:
-            ad = _dist(coords, curr, v)
-            a_arr = t_depart + ad
-            if a_arr <= tw[v][1]:
-                a_slack = tw[v][1] - a_arr
-                alts.append(f"{v}(d={ad:.3f},slack={tw[v][1]:.2f}-{a_arr:.2f}={a_slack:.2f})")
-        alt_str = ", ".join(alts) if alts else "none"
-
-        # 从当前节点出发的可达性检查
-        feasible_from_here = sum(
+        feasible_from_nxt = sum(
             1 for v in unvisited
-            if current_time + _dist(coords, nxt, v) <= tw[v][1]
+            if effective_time + _dist(coords, nxt, v) <= tw[v][1]
         )
-        feas_str = f" #reachable={feasible_from_here}/{len(unvisited)}" if unvisited else ""
+        reach_str = f" #reachable={feasible_from_nxt}/{len(unvisited)}" if unvisited else ""
 
         steps.append(
-            f"[{i}] at {curr} → {nxt} (d={d:.3f}, "
-            f"arr={t_depart:.2f}+{d:.3f}={arr:.2f}, "
-            f"slack={deadline:.2f}-{arr:.2f}={slack:.2f}){wait_str}{feas_str} "
-            f"| alt: {alt_str}"
+            f"[{i}] t={t_depart:.2f} from {curr}{prev_wait_str if i > 0 else ''} "
+            f"| feasible: {feasible_str}{reach_str} → select {nxt}"
         )
+
+        current_time = effective_time
 
         if i > 0 and i % 10 == 0 and unvisited:
             nodes_str = ", ".join(str(v) for v in sorted(unvisited))
             steps.append(f"Unvisited: {{{nodes_str}}}")
+
+        # 重置 wait_str（已在本步开头用过，下一步的 wait 在 nxt 处理后设置）
+        # prev_wait_str 已在上面正确设置
 
     return steps
 
 
 def build_steps_vrptw(routes: list[list[int]], coords: np.ndarray,
                       tw: np.ndarray) -> list[str]:
-    """VRPTW: 显式计算 arr=t+d, slack=dl-arr，路线末尾加时窗决策检查"""
+    """VRPTW: 先列 feasible 候选（含 arr/slack），最后 → select N"""
     steps = []
     all_unvisited = set()
     for route in routes:
@@ -600,65 +680,112 @@ def build_steps_vrptw(routes: list[list[int]], coords: np.ndarray,
 
         current_time = 0.0
         step_in_route = 0
+        prev_wait_str = ""
         for i in range(len(route) - 1):
             curr, nxt = route[i], route[i + 1]
             t_depart = current_time
             d = _dist(coords, curr, nxt)
             arr = t_depart + d
+            step_in_route += 1
 
             if nxt == 0:
-                # 时窗决策检查：为什么结束这条路线
-                if all_unvisited:
-                    feasible_count = sum(
-                        1 for v in all_unvisited
-                        if current_time + _dist(coords, curr, v) <= tw[v][1]
+                if not all_unvisited:
+                    steps.append(
+                        f"[R{r_idx+1},{step_in_route}] t={t_depart:.2f} from {curr}{prev_wait_str} "
+                        f"→ all customers served, return depot (d={d:.3f})"
                     )
-                    if feasible_count == 0:
+                else:
+                    # 检查 Case A vs Case B
+                    feasible_nodes = [
+                        v for v in all_unvisited
+                        if t_depart + _dist(coords, curr, v) <= tw[v][1]
+                    ]
+                    if not feasible_nodes:
+                        # Case A: 无可达节点
+                        check_parts = []
+                        for v in sorted(all_unvisited)[:5]:
+                            v_arr = t_depart + _dist(coords, curr, v)
+                            check_parts.append(
+                                f"{v}(arr={v_arr:.2f}>deadline={tw[v][1]:.2f})"
+                            )
+                        if len(all_unvisited) > 5:
+                            check_parts.append("...")
                         steps.append(
-                            f"  → t={current_time:.2f}, no unvisited node reachable within deadline "
-                            f"→ return to depot, start new route"
+                            f"[R{r_idx+1},{step_in_route}] t={t_depart:.2f} from {curr}{prev_wait_str} "
+                            f"| check: {', '.join(check_parts)} "
+                            f"→ no feasible → return depot (d={d:.3f})"
                         )
                     else:
+                        # Case B: 策略性回depot
+                        cands = []
+                        for v in feasible_nodes:
+                            vd = _dist(coords, curr, v)
+                            v_arr = t_depart + vd
+                            v_slack = tw[v][1] - v_arr
+                            cands.append((v, vd, v_arr, v_slack))
+                        cands.sort(key=lambda x: x[1])
+                        shown = cands[:3]
+                        parts = [
+                            f"{v}(d={vd:.3f},arr={v_arr:.2f},slack={v_slack:.2f})"
+                            for v, vd, v_arr, v_slack in shown
+                        ]
+                        feasible_str = ", ".join(parts)
+                        if len(feasible_nodes) > 3:
+                            feasible_str += ", ..."
                         steps.append(
-                            f"  → cluster complete ({feasible_count} unvisited still reachable), "
-                            f"return to depot"
+                            f"[R{r_idx+1},{step_in_route}] t={t_depart:.2f} from {curr}{prev_wait_str} "
+                            f"| feasible: {feasible_str} "
+                            f"→ remaining nodes better served by new route, return depot (d={d:.3f})"
                         )
-                else:
-                    steps.append(
-                        f"  → all customers served, return to depot"
-                    )
-                steps.append(
-                    f"[R{r_idx+1},{step_in_route+1}] at {curr} → 0 "
-                    f"(d={d:.3f}, arr={t_depart:.2f}+{d:.3f}={arr:.2f}) "
-                    f"return to depot"
-                )
                 break
 
             all_unvisited.discard(nxt)
-            step_in_route += 1
-            deadline = tw[nxt][1]
-            slack = deadline - arr
-            wait_str = ""
+
+            # 构建 feasible 候选
+            feasible_candidates = []
+            for v in (all_unvisited | {nxt}):
+                vd = _dist(coords, curr, v)
+                v_arr = t_depart + vd
+                if v_arr <= tw[v][1]:
+                    v_slack = tw[v][1] - v_arr
+                    feasible_candidates.append((v, vd, v_arr, v_slack))
+            feasible_candidates.sort(key=lambda x: x[1])
+            total_feasible = len(feasible_candidates)
+
+            # 确保 nxt 在 top 3
+            shown = []
+            nxt_in_top = False
+            for v, vd, v_arr, v_slack in feasible_candidates[:3]:
+                shown.append((v, vd, v_arr, v_slack))
+                if v == nxt:
+                    nxt_in_top = True
+            if not nxt_in_top:
+                nxt_slack = tw[nxt][1] - arr
+                if len(shown) >= 3:
+                    shown[-1] = (nxt, d, arr, nxt_slack)
+                else:
+                    shown.append((nxt, d, arr, nxt_slack))
+
+            parts = [
+                f"{v}(d={vd:.3f},arr={v_arr:.2f},slack={v_slack:.2f})"
+                for v, vd, v_arr, v_slack in shown
+            ]
+            feasible_str = ", ".join(parts)
+            if total_feasible > 3:
+                feasible_str += ", ..."
+
+            # 等待处理
             if arr < tw[nxt][0]:
-                wait_str = f" wait until {tw[nxt][0]:.2f}"
+                prev_wait_str = f" (arr={arr:.2f}, wait {tw[nxt][0] - arr:.2f})"
                 current_time = tw[nxt][0]
             else:
+                prev_wait_str = ""
                 current_time = arr
 
-            alts = []
-            for v in sorted(all_unvisited, key=lambda x: _dist(coords, curr, x))[:2]:
-                ad = _dist(coords, curr, v)
-                a_arr = t_depart + ad
-                if a_arr <= tw[v][1]:
-                    a_slack = tw[v][1] - a_arr
-                    alts.append(f"{v}(d={ad:.3f},slack={tw[v][1]:.2f}-{a_arr:.2f}={a_slack:.2f})")
-            alt_str = ", ".join(alts) if alts else "none"
-
             steps.append(
-                f"[R{r_idx+1},{step_in_route}] at {curr} → {nxt} "
-                f"(d={d:.3f}, arr={t_depart:.2f}+{d:.3f}={arr:.2f}, "
-                f"slack={deadline:.2f}-{arr:.2f}={slack:.2f}){wait_str} "
-                f"| alt: {alt_str}"
+                f"[R{r_idx+1},{step_in_route}] t={t_depart:.2f} from {curr}"
+                f"{prev_wait_str if i > 0 else ''} "
+                f"| feasible: {feasible_str} → select {nxt}"
             )
 
     return steps
@@ -814,421 +941,10 @@ def process_record(record: dict) -> dict | None:
     }
 
 
-def _pick_rejection_nodes(routes, coords, demands, capacity, rng):
-    """为每条路线（除最后一条）挑选 1-2 个来自后续路线的"注入节点"，
-    要求：(1) demand > 当前路线剩余容量（保证被拒绝）
-          (2) 地理上靠近当前路线末端节点（保证注入合理性）
-    返回 dict: {route_idx: [rejected_node, ...]}"""
-    rejections = {}
-    for r_idx in range(len(routes) - 1):
-        customers = [v for v in routes[r_idx] if v != 0]
-        if not customers:
-            continue
-        cap_after = capacity - sum(demands[v] for v in customers)
-        # 当前路线末端节点（最后 1-2 个），作为地理锚点
-        tail_nodes = customers[-2:] if len(customers) >= 2 else customers[-1:]
-
-        # 从后续路线中找 demand > cap_after 的候选
-        candidates = []
-        for future_r in routes[r_idx + 1:]:
-            for v in future_r:
-                if v != 0 and demands[v] > cap_after + 1e-9:
-                    # 计算到当前路线末端的最近距离
-                    min_d = min(_dist(coords, t, v) for t in tail_nodes)
-                    candidates.append((v, min_d))
-
-        if not candidates:
-            continue
-
-        # 按距离排序，选最近的 1-2 个（地理上最合理的）
-        candidates.sort(key=lambda x: x[1])
-        n_pick = 1 if rng.random() < 0.7 else min(2, len(candidates))
-        picked = [c[0] for c in candidates[:n_pick]]
-        rejections[r_idx] = picked
-
-    return rejections
-
-
-def detect_strategy_cvrp_reject(routes, coords, demands, capacity, rejections):
-    """带注入节点的 strategy：cluster 列表中额外包含将被拒绝的节点。"""
-    n_customers = sum(1 for d in demands if d > 0)
-    total_demand = float(sum(demands))
-    min_vehicles = math.ceil(total_demand / capacity)
-    depot = coords[0]
-
-    cluster_info = []
-    for i, route in enumerate(routes):
-        customers = [v for v in route if v != 0]
-        # 注入节点加到 cluster 列表末尾
-        extra = rejections.get(i, [])
-        display_nodes = customers + extra
-        angles = [_angle_from_depot(coords, 0, c) for c in customers]
-        mean_angle = math.degrees(sum(angles) / len(angles)) % 360 if angles else 0
-        angle_span = (max(angles) - min(angles)) if len(angles) > 1 else 0
-        avg_dist = float(np.mean([_dist(coords, 0, c) for c in customers])) if customers else 0
-        cluster_info.append({
-            "idx": i + 1, "nodes": display_nodes,
-            "angle": mean_angle, "angle_span": math.degrees(angle_span),
-            "avg_dist": avg_dist,
-        })
-
-    cluster_info.sort(key=lambda x: x["angle"])
-
-    lines = [
-        f"Depot at ({depot[0]:.3f}, {depot[1]:.3f}). {n_customers} customers.",
-        f"Total demand: {total_demand:.2f}. Capacity: {capacity:.2f}.",
-        f"Min vehicles needed: ceil({total_demand:.2f}/{capacity:.2f})={min_vehicles}. "
-        f"Using {len(routes)} routes.",
-        f"Cluster analysis:",
-    ]
-    for ci in cluster_info:
-        nodes_str = ", ".join(str(n) for n in ci["nodes"])
-        lines.append(
-            f"  Route {ci['idx']}: [{nodes_str}] "
-            f"{len(ci['nodes'])} nodes, "
-            f"mean_angle={ci['angle']:.0f}°, span={ci['angle_span']:.0f}°, "
-            f"avg_d0={ci['avg_dist']:.3f}"
-        )
-    lines.append(
-        f"Plan: serve each cluster as one route, visit by nearest-neighbor within cluster. "
-        f"End route and return to depot when remaining capacity cannot serve any unvisited node in cluster."
-    )
-    return "\n".join(lines)
-
-
-def build_steps_cvrp_reject(routes, coords, demands, capacity, rejections):
-    """CVRP step-by-step：在每条路线结束时尝试注入节点并展示拒绝过程。"""
-    steps = []
-    all_unvisited = set()
-    for route in routes:
-        all_unvisited.update(v for v in route if v != 0)
-    # 注入节点也算"planned"但最终不在当前路线服务
-    all_reject_nodes = set()
-    for nodes in rejections.values():
-        all_reject_nodes.update(nodes)
-
-    for r_idx, route in enumerate(routes):
-        nodes_str = ", ".join(str(v) for v in sorted(all_unvisited))
-        steps.append(f"Unvisited: {{{nodes_str}}}")
-
-        cap_remaining = capacity
-        route_load = 0.0
-        step_in_route = 0
-        reject_nodes = rejections.get(r_idx, [])
-
-        for i in range(len(route) - 1):
-            curr, nxt = route[i], route[i + 1]
-            if nxt == 0:
-                # 路线实际节点已服务完，尝试注入节点 → 拒绝
-                for rn in reject_nodes:
-                    if rn in all_unvisited:
-                        steps.append(
-                            f"  → next planned: node {rn} (dem={demands[rn]:.2f}), "
-                            f"but cap={cap_remaining:.2f} < {demands[rn]:.2f} "
-                            f"→ cannot fit, defer to next route"
-                        )
-                # 决策检查
-                if all_unvisited:
-                    min_dem = min(demands[v] for v in all_unvisited)
-                    if cap_remaining < min_dem:
-                        steps.append(
-                            f"  → cap={cap_remaining:.2f} < min_demand(unvisited)={min_dem:.2f} "
-                            f"→ capacity exhausted, return to depot"
-                        )
-                    else:
-                        steps.append(
-                            f"  → cluster complete, cap={cap_remaining:.2f} remaining, "
-                            f"return to depot"
-                        )
-                else:
-                    steps.append(
-                        f"  → all customers served, return to depot"
-                    )
-                d = _dist(coords, curr, 0)
-                steps.append(
-                    f"[R{r_idx+1},{step_in_route+1}] at {curr} → 0 "
-                    f"(d={d:.3f}) return to depot"
-                )
-                break
-
-            d = _dist(coords, curr, nxt)
-            dem = demands[nxt]
-            cap_before = cap_remaining
-            cap_remaining -= dem
-            route_load += dem
-            d0 = _dist(coords, nxt, 0)
-            all_unvisited.discard(nxt)
-            step_in_route += 1
-
-            feasible_unvisited = [
-                v for v in all_unvisited if demands[v] <= cap_before
-            ]
-            alts = _nearest_unvisited(coords, curr, feasible_unvisited, k=2)
-            alt_parts = []
-            for a, ad in alts:
-                a_cap = cap_before - demands[a]
-                alt_parts.append(f"{a}({ad:.3f},cap={cap_before:.2f}-{demands[a]:.2f}={a_cap:.2f})")
-            alt_str = ", ".join(alt_parts) if alt_parts else "none"
-
-            steps.append(
-                f"[R{r_idx+1},{step_in_route}] at {curr} → {nxt} "
-                f"(d={d:.3f}, dem={dem:.2f}) "
-                f"cap={cap_before:.2f}-{dem:.2f}={cap_remaining:.2f}, "
-                f"load={route_load:.2f}/{capacity:.2f}, d0={d0:.2f} "
-                f"| alt: {alt_str}"
-            )
-
-    return steps
-
-
-def _pick_rejection_nodes_vrptw(routes, coords, tw, rng):
-    """VRPTW: 为每条路线挑选来自后续路线的注入节点，
-    要求：(1) 从当前路线末端出发到达时已超过该节点的 deadline
-          (2) 地理上靠近当前路线末端
-    返回 dict: {route_idx: [rejected_node, ...]}"""
-    rejections = {}
-    for r_idx in range(len(routes) - 1):
-        customers = [v for v in routes[r_idx] if v != 0]
-        if not customers:
-            continue
-        # 模拟当前路线的结束时间
-        current_time = 0.0
-        for i in range(len(routes[r_idx]) - 1):
-            curr, nxt = routes[r_idx][i], routes[r_idx][i + 1]
-            if nxt == 0:
-                break
-            d = _dist(coords, curr, nxt)
-            arr = current_time + d
-            current_time = max(arr, tw[nxt][0])  # wait if early
-
-        last_node = customers[-1]
-        tail_nodes = customers[-2:] if len(customers) >= 2 else [last_node]
-
-        # 从后续路线中找从 last_node 出发会超 deadline 的节点
-        candidates = []
-        for future_r in routes[r_idx + 1:]:
-            for v in future_r:
-                if v == 0:
-                    continue
-                travel = _dist(coords, last_node, v)
-                arr_time = current_time + travel
-                if arr_time > tw[v][1] + 1e-9:
-                    min_d = min(_dist(coords, t, v) for t in tail_nodes)
-                    candidates.append((v, min_d))
-
-        if not candidates:
-            continue
-
-        candidates.sort(key=lambda x: x[1])
-        n_pick = 1 if rng.random() < 0.7 else min(2, len(candidates))
-        picked = [c[0] for c in candidates[:n_pick]]
-        rejections[r_idx] = picked
-
-    return rejections
-
-
-def detect_strategy_vrptw_reject(routes, coords, tw, rejections):
-    """VRPTW 带注入节点的 strategy。"""
-    depot = coords[0]
-    all_customers = [v for r in routes for v in r if v != 0]
-    n_customers = len(all_customers)
-    avg_window = float(np.mean([tw[c][1] - tw[c][0] for c in all_customers]))
-
-    route_info = []
-    for i, route in enumerate(routes):
-        customers = [v for v in route if v != 0]
-        extra = rejections.get(i, [])
-        display_nodes = customers + extra
-        if not customers:
-            continue
-        tw_earliest = min(tw[c][0] for c in customers)
-        tw_latest = max(tw[c][1] for c in customers)
-        avg_dist = float(np.mean([_dist(coords, 0, c) for c in customers]))
-        nodes_str = ", ".join(str(c) for c in display_nodes)
-        route_info.append(
-            f"  Route {i+1}: [{nodes_str}] "
-            f"tw=[{tw_earliest:.2f},{tw_latest:.2f}], "
-            f"nodes={len(display_nodes)}, avg_d0={avg_dist:.3f}"
-        )
-
-    lines = [
-        f"Depot at ({depot[0]:.3f}, {depot[1]:.3f}). {n_customers} customers.",
-        f"Average time-window width: {avg_window:.2f}.",
-        f"Routes needed: {len(routes)} (each serves a time-compatible cluster).",
-        f"Route analysis:",
-    ]
-    lines.extend(route_info)
-    lines.append(
-        f"Plan: within each route, visit by earliest feasible arrival. "
-        f"When no unvisited node is reachable within its deadline, return to depot and start new route."
-    )
-    return "\n".join(lines)
-
-
-def build_steps_vrptw_reject(routes, coords, tw, rejections):
-    """VRPTW step-by-step：在每条路线结束时展示时窗拒绝。"""
-    steps = []
-    all_unvisited = set()
-    for route in routes:
-        all_unvisited.update(v for v in route if v != 0)
-
-    for r_idx, route in enumerate(routes):
-        nodes_str = ", ".join(str(v) for v in sorted(all_unvisited))
-        steps.append(f"Unvisited: {{{nodes_str}}}")
-
-        current_time = 0.0
-        step_in_route = 0
-        reject_nodes = rejections.get(r_idx, [])
-
-        for i in range(len(route) - 1):
-            curr, nxt = route[i], route[i + 1]
-            t_depart = current_time
-            d = _dist(coords, curr, nxt)
-            arr = t_depart + d
-
-            if nxt == 0:
-                # 尝试注入节点 → 时窗拒绝
-                for rn in reject_nodes:
-                    if rn in all_unvisited:
-                        travel = _dist(coords, curr, rn)
-                        rn_arr = current_time + travel
-                        steps.append(
-                            f"  → next planned: node {rn} (deadline={tw[rn][1]:.2f}), "
-                            f"arr={current_time:.2f}+{travel:.3f}={rn_arr:.2f} > {tw[rn][1]:.2f} "
-                            f"→ deadline exceeded, defer to next route"
-                        )
-                # 时窗决策检查
-                if all_unvisited:
-                    feasible_count = sum(
-                        1 for v in all_unvisited
-                        if current_time + _dist(coords, curr, v) <= tw[v][1]
-                    )
-                    if feasible_count == 0:
-                        steps.append(
-                            f"  → t={current_time:.2f}, no unvisited node reachable within deadline "
-                            f"→ return to depot, start new route"
-                        )
-                    else:
-                        steps.append(
-                            f"  → cluster complete ({feasible_count} unvisited still reachable), "
-                            f"return to depot"
-                        )
-                else:
-                    steps.append(
-                        f"  → all customers served, return to depot"
-                    )
-                steps.append(
-                    f"[R{r_idx+1},{step_in_route+1}] at {curr} → 0 "
-                    f"(d={d:.3f}, arr={t_depart:.2f}+{d:.3f}={arr:.2f}) "
-                    f"return to depot"
-                )
-                break
-
-            all_unvisited.discard(nxt)
-            step_in_route += 1
-            deadline = tw[nxt][1]
-            slack = deadline - arr
-            wait_str = ""
-            if arr < tw[nxt][0]:
-                wait_str = f" wait until {tw[nxt][0]:.2f}"
-                current_time = tw[nxt][0]
-            else:
-                current_time = arr
-
-            alts = []
-            for v in sorted(all_unvisited, key=lambda x: _dist(coords, curr, x))[:2]:
-                ad = _dist(coords, curr, v)
-                a_arr = t_depart + ad
-                if a_arr <= tw[v][1]:
-                    a_slack = tw[v][1] - a_arr
-                    alts.append(f"{v}(d={ad:.3f},slack={tw[v][1]:.2f}-{a_arr:.2f}={a_slack:.2f})")
-            alt_str = ", ".join(alts) if alts else "none"
-
-            steps.append(
-                f"[R{r_idx+1},{step_in_route}] at {curr} → {nxt} "
-                f"(d={d:.3f}, arr={t_depart:.2f}+{d:.3f}={arr:.2f}, "
-                f"slack={deadline:.2f}-{arr:.2f}={slack:.2f}){wait_str} "
-                f"| alt: {alt_str}"
-            )
-
-    return steps
-
-
 def process_record_reject(record: dict, rng) -> dict | None:
-    """生成带拒绝事件的 chain，支持 CVRP 和 VRPTW。"""
-    pt = record["problem_type"]
-    if pt not in ("cvrp", "vrptw"):
-        return None
-
-    multi_route = True
-    user_prompt = record["prompt"]["user"]
-    instance = parse_instance_from_prompt(user_prompt, pt)
-    if not instance:
-        return None
-
-    n = instance["n"]
-    coords = instance["coords"]
-
-    routes = parse_routes(record["solution"], multi_route)
-    if not routes:
-        return None
-
-    all_customers = sorted(v for r in routes for v in r if v != 0)
-    if all_customers != list(range(1, n + 1)):
-        return None
-
-    if pt == "cvrp":
-        demands = instance["demands"]
-        capacity = instance["capacity"]
-        rejections = _pick_rejection_nodes(routes, coords, demands, capacity, rng)
-        if not rejections:
-            return None
-        strategy = detect_strategy_cvrp_reject(routes, coords, demands, capacity, rejections)
-        step_lines = build_steps_cvrp_reject(routes, coords, demands, capacity, rejections)
-
-    elif pt == "vrptw":
-        tw = instance["time_windows"]
-        rejections = _pick_rejection_nodes_vrptw(routes, coords, tw, rng)
-        if not rejections:
-            return None
-        strategy = detect_strategy_vrptw_reject(routes, coords, tw, rejections)
-        step_lines = build_steps_vrptw_reject(routes, coords, tw, rejections)
-
-    answer = format_route_answer(routes, multi_route=True)
-    verify_lines = _build_verification(routes, n, multi_route=True)
-
-    think_parts = [
-        f"1. **Strategy**: {strategy}",
-        "",
-        "2. **Step-by-step construction**:",
-        *step_lines,
-        "",
-        "3. **Verification**:",
-        *verify_lines,
-        "",
-        "4. **Final routes**:",
-        answer,
-    ]
-    think_content = "\n".join(think_parts)
-    output = f"<think>\n{think_content}\n</think>\n{answer}"
-
-    # CVRP: 重写 user prompt 中的 demand 精度为 2 位
-    if pt == "cvrp":
-        user_prompt = _rewrite_demand_precision(user_prompt)
-
-    from problems_prompt import get_system_prompt
-    new_system = get_system_prompt(pt)
-
-    return {
-        "id": record["id"] + "_reject",
-        "problem_type": pt,
-        "n": n,
-        "prompt": {"system": new_system, "user": user_prompt},
-        "output": output,
-        "solver_distance": record.get("solver_distance"),
-        "method": "template_reject",
-        "timestamp": datetime.now().isoformat(),
-    }
+    """新格式下 reject 已内嵌在 build_steps_cvrp/vrptw 中（Case A/B），
+    此函数保留接口兼容性，直接复用 process_record。"""
+    return None
 
 
 def main():
