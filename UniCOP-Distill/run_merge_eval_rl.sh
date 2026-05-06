@@ -47,7 +47,13 @@ echo "日志文件: $LOG_FILE"
 # ── 配置 ────────────────────────────────────────────────────────────────────
 PROBLEM="cvrp"
 SIZE=20
-ADAPTER_DIR="output_sft_template_${PROBLEM}${SIZE}/checkpoint-2000"
+OUTPUT_DIR="output_sft_template_${PROBLEM}${SIZE}"
+ADAPTER_DIR=$(ls -d "$OUTPUT_DIR"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1)
+if [ -z "$ADAPTER_DIR" ]; then
+    echo "ERROR: $OUTPUT_DIR 下未找到任何 checkpoint-* 目录"
+    exit 1
+fi
+echo "自动检测到最新 checkpoint: $ADAPTER_DIR"
 MERGED_MODEL="$DISTILL_DIR/$ADAPTER_DIR"
 
 # 评估配置
