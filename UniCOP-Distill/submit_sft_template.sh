@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --qos normal
-#SBATCH --gpus=3
+#SBATCH --gpus=4
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/sft_template_%j.log
 
 export HOME=/homes/zhuoyi
