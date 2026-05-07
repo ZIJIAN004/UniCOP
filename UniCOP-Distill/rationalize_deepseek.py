@@ -104,7 +104,7 @@ Your output MUST start with <reasoning> and follow this exact structure:
 
 Rules:
 1. Your FIRST token MUST be '<reasoning>'. Do NOT output anything before <reasoning>.
-2. In <reasoning>, describe your high-level strategy: how you group nodes into routes (geographic clusters, demand balancing, etc.) and the visit order within each group. Do NOT enumerate candidates or compute distances at every step — focus on the reasoning behind key decisions.
+2. In <reasoning>, show your decision process for constructing the routes. Focus on strategy (how you group nodes, why you choose a visit order) rather than enumerating every candidate at every step. You may compute distances or demands when it helps justify a key decision.
 3. When a non-obvious choice is made (e.g. skipping a closer node), briefly note why.
 4. For each route, verify total demand does not exceed vehicle capacity before closing it.
 5. Keep <reasoning> concise.
