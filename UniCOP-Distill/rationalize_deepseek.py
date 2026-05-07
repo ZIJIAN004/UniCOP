@@ -113,20 +113,77 @@ Rules:
 
 FEWSHOT = ""
 
-STRUCTURED_FORMAT = """
+STRUCTURED_FORMAT = {
+    "cvrp": """
 
-Additionally, structure your step-by-step construction using this format. Build each route one node at a time:
+Additionally, structure your step-by-step construction using this exact format. Build each route one node at a time:
 
 At the start of each new route, list: "Unvisited: {node_id, node_id, ...}"
 
 Each step format:
-  [R1,step] at Node N, cap=X.XX. Candidates: A(d=X.XX, dem=X.XX), B(d=X.XX, dem=X.XX). [≤10 words: why] → M (cap→X.XX)
+  [R1,step] cap=X.XX-X.XX=X.XX | feasible: A(d=X.XX,dem=X.XX,cap→X.XX), B(d=X.XX,dem=X.XX,cap→X.XX), ... → select M
+  - cap = remaining capacity after previous step's demand deduction (first step: cap=full capacity)
+  - feasible = up to 3 candidate nodes that fit remaining capacity, with distance, demand, and resulting capacity
+  - → select M = the chosen next node
 
 When no unvisited node fits remaining capacity:
-  [R1,step] cap=X.XX. Remaining nodes all exceed capacity (A: dem=X.XX, B: dem=X.XX). → return depot
+  [R1,step] cap=X.XX | check: A(dem=X.XX>cap), B(dem=X.XX>cap) → no feasible → return depot (d=X.XX)
+
+When feasible nodes exist but returning to depot is more efficient:
+  [R1,step] cap=X.XX | feasible: A(d=X.XX,dem=X.XX,cap→X.XX), ... → remaining nodes better served by new route, return depot (d=X.XX)
 
 After all routes, verify: "R1:{nodes}=count | R2:{nodes}=count | ... Total: X/N ✓"
-"""
+""",
+    "tsp": """
+
+Additionally, structure your step-by-step construction using this exact format. Build the route one node at a time:
+
+Each step format:
+  [step] from N, total=X.XX | feasible: A(d=X.XX), B(d=X.XX), C(d=X.XX), ... → select M
+  - from N = current node
+  - total = cumulative route distance so far
+  - feasible = up to 3 unvisited candidate nodes with distance from current node
+  - → select M = the chosen next node
+For the last step: [step] from N, total=X.XX → return depot (d=X.XX, total=X.XX)
+Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}"
+
+After the route, verify: "Visited: {1,2,...} = N/N ✓"
+""",
+    "tsptw": """
+
+Additionally, structure your step-by-step construction using this exact format. Build the route one node at a time:
+
+Each step format:
+  [step] t=X.XX from N | feasible: A(d=X.XX,arr=X.XX,slack=X.XX), B(d=X.XX,arr=X.XX,slack=X.XX), ... #reachable=X/Y → select M
+  - t = current time at departure from N
+  - feasible = up to 3 candidate nodes reachable within their deadlines, with distance, arrival time, and slack (deadline minus arrival)
+  - #reachable = how many unvisited nodes are still reachable
+  - → select M = the chosen next node
+If arrival < earliest, note: (arr=X.XX, wait X.XX)
+For the last step: [step] t=X.XX from N → return depot (d=X.XX)
+Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}"
+
+After the route, verify: "Visited: {1,2,...} = N/N ✓"
+""",
+    "vrptw": """
+
+Additionally, structure your step-by-step construction using this exact format. Build each route one node at a time:
+
+At the start of each new route, list: "Unvisited: {node_id, node_id, ...}"
+
+Each step format:
+  [R1,step] t=X.XX from N | feasible: A(d=X.XX,arr=X.XX,slack=X.XX), B(d=X.XX,arr=X.XX,slack=X.XX), ... → select M
+  - t = current time at departure from N
+  - feasible = up to 3 candidate nodes reachable within their deadlines, with distance, arrival time, and slack
+  - → select M = the chosen next node
+If arrival < earliest, note: (arr=X.XX, wait X.XX)
+
+When no unvisited node is reachable within its deadline:
+  [R1,step] t=X.XX from N | check: A(arr=X.XX>deadline=X.XX), B(arr=X.XX>deadline=X.XX) → no feasible → return depot (d=X.XX)
+
+After all routes, verify: "R1:{nodes}=count | R2:{nodes}=count | ... Total: X/N ✓"
+""",
+}
 
 
 def build_prompt(solution: str, problem_type: str, user: str,
@@ -135,7 +192,8 @@ def build_prompt(solution: str, problem_type: str, user: str,
     base = BASE_SYSTEM.get(problem_type, BASE_SYSTEM["cvrp"])
     system_new = base + SYSTEM_SUFFIX + (FEWSHOT if use_fewshot else "")
     if structured:
-        system_new += STRUCTURED_FORMAT
+        fmt = STRUCTURED_FORMAT.get(problem_type, STRUCTURED_FORMAT["cvrp"])
+        system_new += fmt
     user_new = (
         user
         + f"\n\nTarget solution (you MUST output exactly this solution after </reasoning>,"
