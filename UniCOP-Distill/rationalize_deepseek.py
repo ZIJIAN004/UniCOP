@@ -55,8 +55,8 @@ Your output MUST start with <reasoning> and follow this exact structure:
 
 Rules:
 1. Your FIRST token MUST be '<reasoning>'. Do NOT output anything before <reasoning>.
-2. In <reasoning>, show your step-by-step decision process for constructing the route from scratch. At each step, state where you are, which nearby nodes are candidates, and why you pick the next one (e.g. nearest distance, capacity constraint, cluster boundary). Write as if you are solving this problem yourself for the first time.
-3. When you skip a closer node for a farther one, briefly note why (e.g. "Node 5 is closer but would leave an isolated node; choosing Node 8 to clear this cluster first").
+2. Write in natural paragraphs, as if explaining your thought process to a colleague. Start by observing the spatial layout (clusters, spread, depot position), then describe how you build each route and why. Do NOT use a rigid per-node table or structured log format — write prose.
+3. Focus on the key decisions, not every single node. You do not need to narrate adding each node. But when you make a non-obvious choice (e.g. skipping a closer node), briefly explain why.
 4. For each route, verify total demand does not exceed vehicle capacity before closing it.
 5. Keep <reasoning> concise (a few hundred words at most). Do NOT mention that a solution was provided or given to you. Do NOT describe your task as 'reconstructing', 'explaining', or 'justifying' a solution. You are solving this problem from scratch — your reasoning should read as original problem-solving, not as post-hoc analysis of a known answer.
 6. After </reasoning>, output the solution exactly in the required format.
