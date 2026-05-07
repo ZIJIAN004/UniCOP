@@ -55,8 +55,8 @@ Your output MUST start with <reasoning> and follow this exact structure:
 
 Rules:
 1. Your FIRST token MUST be '<reasoning>'. Do NOT output anything before <reasoning>.
-2. Write in natural paragraphs, as if explaining your thought process to a colleague. Start by observing the spatial layout (clusters, spread, depot position), then describe how you build each route and why. Do NOT use a rigid per-node table or structured log format — write prose.
-3. Focus on the key decisions, not every single node. You do not need to narrate adding each node. But when you make a non-obvious choice (e.g. skipping a closer node), briefly explain why.
+2. In <reasoning>, show your step-by-step decision process for constructing the route from scratch. At each step, state where you are, which nearby nodes are candidates, and why you pick the next one (e.g. nearest distance, capacity constraint, cluster boundary). Write as if you are solving this problem yourself for the first time.
+3. When you skip a closer node for a farther one, briefly note why (e.g. "Node 5 is closer but would leave an isolated node; choosing Node 8 to clear this cluster first").
 4. For each route, verify total demand does not exceed vehicle capacity before closing it.
 5. Keep <reasoning> concise (a few hundred words at most). Do NOT mention that a solution was provided or given to you. Do NOT describe your task as 'reconstructing', 'explaining', or 'justifying' a solution. You are solving this problem from scratch — your reasoning should read as original problem-solving, not as post-hoc analysis of a known answer.
 6. After </reasoning>, output the solution exactly in the required format.
@@ -169,9 +169,13 @@ def replace_answer(output: str, correct_solution: str) -> str:
 
 def call_deepseek(client: OpenAI, system: str, user: str,
                   model: str, max_tokens: int,
+                  use_thinking: bool = True,
                   max_retries: int = 3) -> dict | None:
     for attempt in range(max_retries):
         try:
+            extra = {}
+            if not use_thinking:
+                extra["thinking"] = {"type": "disabled"}
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -180,15 +184,22 @@ def call_deepseek(client: OpenAI, system: str, user: str,
                 ],
                 temperature=0.7,
                 max_tokens=max_tokens,
-                extra_body={"thinking": {"type": "disabled"}},
+                extra_body=extra if extra else None,
             )
             choice = response.choices[0]
             usage = response.usage
-            raw = choice.message.content or ""
-            raw = raw.lstrip().removeprefix("</think>").lstrip()
-            raw = raw.replace("<reasoning>", "<think>").replace("</reasoning>", "</think>")
-            if not raw.lstrip().startswith("<think>"):
-                raw = "<think>\n" + raw
+
+            if use_thinking:
+                reasoning = getattr(choice.message, "reasoning_content", "") or ""
+                answer = (choice.message.content or "").strip()
+                raw = f"<think>\n{reasoning}\n</think>\n{answer}"
+            else:
+                raw = choice.message.content or ""
+                raw = raw.lstrip().removeprefix("</think>").lstrip()
+                raw = raw.replace("<reasoning>", "<think>").replace("</reasoning>", "</think>")
+                if not raw.lstrip().startswith("<think>"):
+                    raw = "<think>\n" + raw
+
             return {
                 "output":        raw,
                 "output_tokens": usage.completion_tokens if usage else None,
@@ -228,6 +239,8 @@ def main():
     parser.add_argument("--preview", type=int, default=0)
     parser.add_argument("--no_fewshot", action="store_true",
                         help="Disable fewshot example to save ~350 input tokens/sample")
+    parser.add_argument("--disable_thinking", action="store_true",
+                        help="Disable model's built-in thinking (produces rigid format)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -258,7 +271,9 @@ def main():
 
     # DeepSeek client
     client = OpenAI(base_url=args.base_url, api_key=args.api_key)
-    print(f"API: {args.base_url}  model: {args.model}  fewshot: {not args.no_fewshot}")
+    use_thinking = not args.disable_thinking
+    print(f"API: {args.base_url}  model: {args.model}  "
+          f"thinking: {use_thinking}  fewshot: {not args.no_fewshot}")
 
     # 断点续跑
     existing_ids = set()
@@ -300,7 +315,7 @@ def main():
         for attempt in range(max_qr):
             result = call_deepseek(
                 client, prompt_dict["system"], prompt_dict["user"],
-                args.model, args.max_tokens
+                args.model, args.max_tokens, use_thinking=use_thinking
             )
             if result is None:
                 continue
@@ -346,6 +361,18 @@ def main():
         preview_conc = min(args.preview, args.concurrency)
         print(f"\nPreview: generating {len(preview_tasks)} samples "
               f"(concurrency={preview_conc})...\n")
+
+        # Debug: print the exact prompt for the first sample
+        first_r = preview_tasks[0][0]
+        debug_prompt = build_prompt(
+            first_r["solution"], first_r["prompt"]["system"],
+            first_r["prompt"]["user"], use_fewshot=not args.no_fewshot,
+        )
+        print("=== DEBUG: SYSTEM PROMPT ===")
+        print(debug_prompt["system"])
+        print("=== DEBUG: USER PROMPT (first 500 chars) ===")
+        print(debug_prompt["user"][:500])
+        print("=== END DEBUG ===\n")
 
         results = []
         with ThreadPoolExecutor(max_workers=preview_conc) as pool:
