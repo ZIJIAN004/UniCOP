@@ -116,8 +116,9 @@ Route 1: 0 -> 5 -> 2 -> 19 -> 6 -> 3 -> 16 -> 14 -> 0
 Route 2: ..."""
 
 
-def build_prompt(solution: str, system: str, user: str) -> dict:
-    system_new = system + SYSTEM_SUFFIX + FEWSHOT
+def build_prompt(solution: str, system: str, user: str,
+                 use_fewshot: bool = True) -> dict:
+    system_new = system + SYSTEM_SUFFIX + (FEWSHOT if use_fewshot else "")
     user_new = (
         user
         + f"\n\nTarget solution (you MUST output exactly this solution after </reasoning>,"
@@ -274,6 +275,8 @@ def main():
                         help="Parallel API calls (respect rate limits)")
     parser.add_argument("--max_quality_retries", type=int, default=3)
     parser.add_argument("--preview", type=int, default=0)
+    parser.add_argument("--no_fewshot", action="store_true",
+                        help="Disable fewshot example to save ~350 input tokens/sample")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -304,7 +307,7 @@ def main():
 
     # DeepSeek client
     client = OpenAI(base_url=args.base_url, api_key=args.api_key)
-    print(f"API: {args.base_url}  model: {args.model}")
+    print(f"API: {args.base_url}  model: {args.model}  fewshot: {not args.no_fewshot}")
 
     # 断点续跑
     existing_ids = set()
@@ -339,7 +342,8 @@ def main():
     def process_one(item):
         r, sample_id = item
         prompt_dict = build_prompt(
-            r["solution"], r["prompt"]["system"], r["prompt"]["user"]
+            r["solution"], r["prompt"]["system"], r["prompt"]["user"],
+            use_fewshot=not args.no_fewshot,
         )
 
         for attempt in range(max_qr):
