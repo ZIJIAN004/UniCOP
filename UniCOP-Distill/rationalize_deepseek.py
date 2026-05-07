@@ -378,32 +378,41 @@ def main():
             stats["fail"] += 1
         return None
 
-    # 预览模式
+    # 预览模式（也并发）
     if args.preview > 0:
         preview_tasks = tasks[:args.preview]
-        print(f"\nPreview: generating {len(preview_tasks)} samples...\n")
-        for item in preview_tasks:
-            record = process_one(item)
-            if record is None:
-                print(f"  [{item[1]}] FAILED\n")
-                continue
-            think_start = record["output"].index("<think>") + 7
-            think_end = record["output"].index("</think>")
-            think_text = record["output"][think_start:think_end].strip()
-            answer_text = record["output"][think_end + len("</think>"):].strip()
-            print(f"  [{record['id']}]  tokens: in={record['prompt_tokens']} out={record['output_tokens']}")
-            print(f"  Think ({len(think_text)} chars):")
-            for line in think_text.split("\n")[:30]:
-                print(f"    {line}")
-            if think_text.count("\n") > 30:
-                print(f"    ... ({think_text.count(chr(10))-30} more lines)")
-            print(f"  Answer:")
-            print(f"    {answer_text[:300]}")
-            print()
+        preview_conc = min(args.preview, args.concurrency)
+        print(f"\nPreview: generating {len(preview_tasks)} samples "
+              f"(concurrency={preview_conc})...\n")
 
-            # 写入文件
+        results = []
+        with ThreadPoolExecutor(max_workers=preview_conc) as pool:
+            futures = {pool.submit(process_one, t): t for t in preview_tasks}
+            for future in as_completed(futures):
+                record = future.result()
+                item = futures[future]
+                if record is None:
+                    print(f"  [{item[1]}] FAILED")
+                    continue
+                results.append(record)
+                think_start = record["output"].index("<think>") + 7
+                think_end = record["output"].index("</think>")
+                think_text = record["output"][think_start:think_end].strip()
+                answer_text = record["output"][think_end + len("</think>"):].strip()
+                print(f"  [{record['id']}]  tokens: in={record['prompt_tokens']} out={record['output_tokens']}")
+                print(f"  Think ({len(think_text)} chars):")
+                for line in think_text.split("\n")[:30]:
+                    print(f"    {line}")
+                if think_text.count("\n") > 30:
+                    print(f"    ... ({think_text.count(chr(10))-30} more lines)")
+                print(f"  Answer:")
+                print(f"    {answer_text[:300]}")
+                print()
+
+        if results:
             with open(args.output, "a", encoding="utf-8") as fout:
-                fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+                for record in results:
+                    fout.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         print(f"Preview done: {stats['ok']}/{len(preview_tasks)} passed")
         return
