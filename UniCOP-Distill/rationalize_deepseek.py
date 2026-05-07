@@ -107,9 +107,10 @@ Rules:
 2. In <reasoning>, show your step-by-step decision process for constructing the route from scratch. At each step, state where you are, which nearby nodes are candidates, and why you pick the next one (e.g. nearest distance, capacity constraint, cluster boundary). Write as if you are solving this problem yourself for the first time.
 3. When you skip a closer node for a farther one, briefly note why (e.g. "Node 5 is closer but would leave an isolated node; choosing Node 8 to clear this cluster first").
 4. For each route, verify total demand does not exceed vehicle capacity before closing it.
-5. Keep <reasoning> concise (a few hundred words at most). Do NOT mention that a solution was provided or given to you. Do NOT describe your task as 'reconstructing', 'explaining', or 'justifying' a solution. You are solving this problem from scratch — your reasoning should read as original problem-solving, not as post-hoc analysis of a known answer.
-6. After </reasoning>, output the solution exactly in the required format.
-7. Do NOT output the solution before <reasoning>. The solution ONLY appears after </reasoning>."""
+5. Do NOT re-list node coordinates or demands — they are already in the problem statement. Jump straight into your strategy and route construction.
+6. Keep <reasoning> concise. Do NOT mention that a solution was provided or given to you. Do NOT describe your task as 'reconstructing', 'explaining', or 'justifying' a solution. You are solving this problem from scratch — your reasoning should read as original problem-solving, not as post-hoc analysis of a known answer.
+7. After </reasoning>, output the solution exactly in the required format.
+8. Do NOT output the solution before <reasoning>. The solution ONLY appears after </reasoning>."""
 
 FEWSHOT = ""
 
@@ -362,7 +363,7 @@ def main():
     parser.add_argument("--size", type=int, default=20)
     parser.add_argument("--num_samples", type=int, default=0,
                         help="0 = all")
-    parser.add_argument("--max_tokens", type=int, default=4096)
+    parser.add_argument("--max_tokens", type=int, default=8192)
     parser.add_argument("--concurrency", type=int, default=8,
                         help="Parallel API calls (respect rate limits)")
     parser.add_argument("--max_quality_retries", type=int, default=3)
