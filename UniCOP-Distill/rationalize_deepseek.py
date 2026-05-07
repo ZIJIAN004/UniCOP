@@ -228,10 +228,12 @@ def call_deepseek(client: OpenAI, system: str, user: str,
                 ],
                 temperature=0.7,
                 max_tokens=max_tokens,
+                extra_body={"thinking": {"type": "disabled"}},
             )
             choice = response.choices[0]
             usage = response.usage
             raw = choice.message.content or ""
+            raw = raw.lstrip().removeprefix("</think>").lstrip()
             raw = raw.replace("<reasoning>", "<think>").replace("</reasoning>", "</think>")
             if not raw.lstrip().startswith("<think>"):
                 raw = "<think>\n" + raw
