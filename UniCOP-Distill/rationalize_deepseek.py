@@ -113,11 +113,29 @@ Rules:
 
 FEWSHOT = ""
 
+STRUCTURED_FORMAT = """
+
+Additionally, structure your step-by-step construction using this format. Build each route one node at a time:
+
+At the start of each new route, list: "Unvisited: {node_id, node_id, ...}"
+
+Each step format:
+  [R1,step] at Node N, cap=X.XX. Candidates: A(d=X.XX, dem=X.XX), B(d=X.XX, dem=X.XX). [1-2 sentences: why you choose one over others — distance, capacity, cluster completion, avoiding backtrack, etc.] → select M (cap: X.XX-X.XX=X.XX)
+
+When no unvisited node fits remaining capacity:
+  [R1,step] cap=X.XX. Remaining nodes all exceed capacity (A: dem=X.XX, B: dem=X.XX). → return depot
+
+After all routes, verify: "R1:{nodes}=count | R2:{nodes}=count | ... Total: X/N ✓"
+"""
+
 
 def build_prompt(solution: str, problem_type: str, user: str,
-                 use_fewshot: bool = True) -> dict:
+                 use_fewshot: bool = True,
+                 structured: bool = False) -> dict:
     base = BASE_SYSTEM.get(problem_type, BASE_SYSTEM["cvrp"])
     system_new = base + SYSTEM_SUFFIX + (FEWSHOT if use_fewshot else "")
+    if structured:
+        system_new += STRUCTURED_FORMAT
     user_new = (
         user
         + f"\n\nTarget solution (you MUST output exactly this solution after </reasoning>,"
@@ -289,6 +307,8 @@ def main():
     parser.add_argument("--preview", type=int, default=0)
     parser.add_argument("--no_fewshot", action="store_true",
                         help="Disable fewshot example to save ~350 input tokens/sample")
+    parser.add_argument("--structured", action="store_true",
+                        help="Enable structured step format (think-then-select at each step)")
     parser.add_argument("--disable_thinking", action="store_true",
                         help="Disable model's built-in thinking (produces rigid format)")
     parser.add_argument("--seed", type=int, default=42)
@@ -323,7 +343,8 @@ def main():
     client = OpenAI(base_url=args.base_url, api_key=args.api_key)
     use_thinking = not args.disable_thinking
     print(f"API: {args.base_url}  model: {args.model}  "
-          f"thinking: {use_thinking}  fewshot: {not args.no_fewshot}")
+          f"thinking: {use_thinking}  structured: {args.structured}  "
+          f"fewshot: {not args.no_fewshot}")
 
     # 断点续跑
     existing_ids = set()
@@ -359,7 +380,7 @@ def main():
         r, sample_id = item
         prompt_dict = build_prompt(
             r["solution"], r["problem_type"], r["prompt"]["user"],
-            use_fewshot=not args.no_fewshot,
+            use_fewshot=not args.no_fewshot, structured=args.structured,
         )
 
         for attempt in range(max_qr):
@@ -417,6 +438,7 @@ def main():
         debug_prompt = build_prompt(
             first_r["solution"], first_r["problem_type"],
             first_r["prompt"]["user"], use_fewshot=not args.no_fewshot,
+            structured=args.structured,
         )
         print("=== DEBUG: SYSTEM PROMPT ===")
         print(debug_prompt["system"])
