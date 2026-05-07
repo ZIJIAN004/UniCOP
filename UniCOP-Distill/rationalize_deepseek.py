@@ -46,74 +46,41 @@ from openai import OpenAI
 
 SYSTEM_SUFFIX = """
 
-Your output MUST start with <reasoning> and follow this exact structure:
+Your output MUST start with <reasoning> and follow this structure:
 
 <reasoning>
-[your step-by-step reasoning]
+[your reasoning process]
 </reasoning>
 [solution in required format]
 
-Rules:
-1. Your FIRST token MUST be '<reasoning>'. Do NOT output anything before <reasoning>.
-
-2. STRUCTURE your reasoning in two phases:
-   Phase A — Cluster & Capacity Planning (brief):
-     - Identify 3-5 geographic clusters of nodes
-     - For each cluster, sum the total demand and check against vehicle capacity (1.0)
-     - Decide how to split clusters that exceed capacity
-   Phase B — Route Construction (the main body):
-     - Build each route one node at a time from the depot
-
-3. ROUTE CONSTRUCTION rules — for each route:
-   a. When you START a new route: state which cluster/region you are targeting and why
-   b. At each step, pick the next node. You do NOT need to list all candidates every time.
-      BUT: if you skip a closer node in favor of a farther one, you MUST say:
-      "Node X is closer, but I choose Node Y because [specific reason: capacity, sweep direction, cluster boundary]"
-   c. CAPACITY CHECKPOINTS — you MUST compute remaining capacity:
-      - After adding the FIRST node to a route
-      - Whenever remaining capacity drops below 0.35
-      - Before closing a route (verify total demand ≤ 1.0)
-      Format: "Capacity: [cumulative demand] / 1.0, remaining: [value]"
-   d. When you CLOSE a route: state the complete route and total demand
-
-4. FORBIDDEN phrases (these indicate vague reasoning):
-   - "logical next step", "natural choice", "obvious", "makes sense"
-   - Use these ONLY if followed by a concrete reason with node IDs
-
-5. Keep <reasoning> concise — aim for 400-800 words, not thousands.
-   Do NOT mention that a solution was provided or given to you.
-   You are solving this problem from scratch.
-
-6. After </reasoning>, output the solution exactly in the required format.
-   Do NOT output the solution before </reasoning>."""
+Principles:
+1. Your FIRST token MUST be '<reasoning>'.
+2. Solve the problem from scratch. Explain your strategy and key decisions freely — you may use any approach (clustering, sweep, nearest-neighbor, savings, or any combination). There is no required format for the reasoning body.
+3. Every claim must reference specific node IDs and numbers. When you make a non-obvious choice (e.g., skipping a nearby node, splitting a cluster across routes), state what alternatives you considered and why you rejected them.
+4. Verify feasibility: each route's total demand must not exceed vehicle capacity. Show this check at least once per route.
+5. Do NOT use vague phrases ("logical next step", "natural choice", "obvious") without a concrete reason.
+6. Keep <reasoning> concise (300-800 words). Do NOT mention that a solution was provided to you — reason as if solving it yourself.
+7. After </reasoning>, output the solution exactly in the required format."""
 
 FEWSHOT = """
 
-Here is an example of the expected reasoning style:
+Here is an example showing two different valid reasoning styles:
 
+Example A (cluster-first):
 <reasoning>
-Phase A — Cluster & Capacity Planning:
-The depot (Node 0) is at (0.30, 0.39). I see roughly 4 clusters:
-- South-East: Nodes 3(d=0.17), 6(d=0.17), 16(d=0.10), 19(d=0.30). Sum=0.74. Fits one vehicle.
-- Central: Nodes 1(d=0.20), 2(d=0.07), 4(d=0.30), 5(d=0.07), 12(d=0.07), 14(d=0.07). Sum=0.78. Fits one vehicle.
-- North: Nodes 11(d=0.27), 13(d=0.07), 17(d=0.17), 20(d=0.30), 10(d=0.10). Sum=0.91. Fits one vehicle.
-- East: Nodes 7(d=0.07), 8(d=0.30), 9(d=0.23), 15(d=0.20), 18(d=0.20). Sum=1.00. Exactly fits.
-
-Phase B — Route Construction:
-
-Route 1 (Central cluster):
-Start from depot. Target the central band of nodes (1, 2, 4, 5, 12, 14).
-- Depot → Node 5 (0.53, 0.55). Capacity: 0.07/1.0, remaining: 0.93.
-- Node 5 → Node 2 (0.55, 0.53). They are adjacent.
-- Node 2 → Node 19 (0.78, 0.40). Node 4 is closer, but Node 19 anchors the SE cluster and I want to sweep east first to avoid backtracking. Capacity: 0.07+0.07+0.30 = 0.44/1.0, remaining: 0.56.
-- Node 19 → Node 6 → Node 3 → Node 16 → Node 14. Following the SE edge back toward depot.
-- Capacity check: 0.07+0.07+0.30+0.17+0.17+0.10+0.07 = 0.95/1.0. Under limit.
-- Close Route 1: 0 → 5 → 2 → 19 → 6 → 3 → 16 → 14 → 0. Total demand: 0.95.
-
-[...remaining routes follow same pattern...]
+The depot is at (0.30, 0.39). I'll group nodes geographically and build one route per cluster.
+South-East cluster: Nodes 3(d=0.17), 6(d=0.17), 16(d=0.10), 19(d=0.30) — total demand 0.74, fits one vehicle. I'll sweep clockwise from Node 19...
+[continues freely]
+Feasibility: Route 1 demand = 0.74 ≤ 1.0. ✓
 </reasoning>
-Route 1: 0 -> 5 -> 2 -> 19 -> 6 -> 3 -> 16 -> 14 -> 0
-Route 2: ..."""
+
+Example B (sweep-based):
+<reasoning>
+I'll sort all nodes by polar angle from the depot and partition into routes when capacity fills up.
+Starting from angle 0: Node 8 (angle=15°, d=0.30), Node 17 (angle=28°, d=0.17)... cumulative demand 0.47.
+Node 2 (angle=35°, d=0.07) — adding it gives 0.54. Node 11 (angle=52°, d=0.27) — now 0.81. Next is Node 9 (d=0.23), but 0.81+0.23=1.04 > 1.0, so I close this route and start a new one.
+[continues freely]
+</reasoning>"""
 
 
 def build_prompt(solution: str, system: str, user: str,
@@ -191,7 +158,8 @@ def quality_check(output: str, solution: str) -> tuple[bool, str]:
             return False, f"LEAK:{pattern}"
 
     # 检查是否包含 capacity 验算
-    if "capacity" not in think_lower and "remaining" not in think_lower:
+    capacity_words = ["capacity", "remaining", "demand", "load", "≤", "<=", "exceed"]
+    if not any(w in think_lower for w in capacity_words):
         return False, "NO_CAPACITY_CHECK"
 
     answer_part = output[think_end + len("</think>"):]
