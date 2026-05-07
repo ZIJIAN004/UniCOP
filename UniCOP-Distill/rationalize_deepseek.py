@@ -108,7 +108,7 @@ Rules:
 3. When a non-obvious choice is made (e.g. skipping a closer node), briefly note why.
 4. For each route, verify total demand does not exceed vehicle capacity before closing it.
 5. Keep <reasoning> concise.
-6. Do NOT mention that a solution was provided or given to you. You are solving this problem from scratch — your reasoning should read as original problem-solving, not as post-hoc analysis.
+6. Inside <reasoning>, you must NOT reference, quote, or verify any solution that appears elsewhere in the prompt. Do NOT mention that a solution was provided, given, or expected. Write as if you are solving the problem from scratch — your reasoning must read as original problem-solving, not as post-hoc verification or justification of a known answer.
 7. After </reasoning>, output the solution exactly in the required format.
 8. Do NOT output the solution before <reasoning>. The solution ONLY appears after </reasoning>."""
 
@@ -197,9 +197,8 @@ def build_prompt(solution: str, problem_type: str, user: str,
         system_new += fmt
     user_new = (
         user
-        + f"\n\n===EXPECTED OUTPUT===\n{solution}\n===END===\n"
-          f"You MUST output exactly the above after </reasoning>. "
-          f"Do NOT reference or mention it in your reasoning."
+        + f"\n\n######\n{solution}\n######\n"
+          f"Output exactly the above after </reasoning>."
         + "\n\nStart your response with <reasoning> immediately."
     )
     return {"system": system_new, "user": user_new}
@@ -219,6 +218,8 @@ _LEAK_PATTERNS = [
     "known answer", "know the answer", "already know",
     "post-hoc", "posthoc", "post hoc",
     "working backward", "work backward",
+    "expected output", "expected solution", "expected route",
+    "expected answer", "as required", "as if",
 ]
 
 _RE_MULTI_ROUTE = re.compile(r"Route\s+\d+\s*:", re.IGNORECASE)
