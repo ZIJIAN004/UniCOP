@@ -120,7 +120,7 @@ Additionally, structure your step-by-step construction using this format. Build 
 At the start of each new route, list: "Unvisited: {node_id, node_id, ...}"
 
 Each step format:
-  [R1,step] at Node N, cap=X.XX. Candidates: A(d=X.XX, dem=X.XX), B(d=X.XX, dem=X.XX). [1-2 sentences: why you choose one over others — distance, capacity, cluster completion, avoiding backtrack, etc.] → select M (cap: X.XX-X.XX=X.XX)
+  [R1,step] at Node N, cap=X.XX. Candidates: A(d=X.XX, dem=X.XX), B(d=X.XX, dem=X.XX). [≤10 words: why] → M (cap→X.XX)
 
 When no unvisited node fits remaining capacity:
   [R1,step] cap=X.XX. Remaining nodes all exceed capacity (A: dem=X.XX, B: dem=X.XX). → return depot
