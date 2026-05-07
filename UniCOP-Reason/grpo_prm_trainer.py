@@ -564,8 +564,8 @@ class GRPOPRMTrainer(GRPOTrainer):
             old_per_token_logps = per_token_logps.detach()
         ratio = torch.exp(per_token_logps - old_per_token_logps)
 
-        eps_low  = getattr(self, 'epsilon_low', 0.2)
-        eps_high = getattr(self, 'epsilon_high', 0.2)
+        eps_low  = config.clip_epsilon_low
+        eps_high = config.clip_epsilon_high
         clipped_ratio = torch.clamp(ratio, 1 - eps_low, 1 + eps_high)
 
         # advantage: (B, T) per-token 或 (B,) 标量
