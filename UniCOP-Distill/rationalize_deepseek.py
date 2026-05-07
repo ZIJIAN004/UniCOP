@@ -106,10 +106,11 @@ Rules:
 1. Your FIRST token MUST be '<reasoning>'. Do NOT output anything before <reasoning>.
 2. In <reasoning>, describe your high-level strategy: how you group nodes into routes (geographic clusters, demand balancing, etc.) and the visit order within each group. Do NOT enumerate candidates or compute distances at every step — focus on the reasoning behind key decisions.
 3. When a non-obvious choice is made (e.g. skipping a closer node), briefly note why.
-4. Do NOT re-list node coordinates or demands. Do NOT compute exact distances. Keep <reasoning> concise (under 500 words).
-5. Do NOT mention that a solution was provided or given to you. You are solving this problem from scratch — your reasoning should read as original problem-solving, not as post-hoc analysis.
-6. After </reasoning>, output the solution exactly in the required format.
-7. Do NOT output the solution before <reasoning>. The solution ONLY appears after </reasoning>."""
+4. For each route, verify total demand does not exceed vehicle capacity before closing it.
+5. Do NOT re-list node coordinates or demands. Keep <reasoning> concise.
+6. Do NOT mention that a solution was provided or given to you. You are solving this problem from scratch — your reasoning should read as original problem-solving, not as post-hoc analysis.
+7. After </reasoning>, output the solution exactly in the required format.
+8. Do NOT output the solution before <reasoning>. The solution ONLY appears after </reasoning>."""
 
 FEWSHOT = ""
 
