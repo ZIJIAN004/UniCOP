@@ -44,6 +44,55 @@ from openai import OpenAI
 # 改进版提示词
 # ═══════════════════════════════════════════════════════════════════════
 
+BASE_SYSTEM = {
+    "cvrp": (
+        "You are a logistics route planning expert solving the Capacitated Vehicle Routing Problem (CVRP).\n"
+        "Rules: Multiple vehicles depart from node 0; each vehicle visits a subset of customers and returns to node 0; "
+        "total demand per route must not exceed vehicle capacity; each customer is visited exactly once; minimize total distance.\n"
+        "Before answering, think through the problem in <reasoning>...</reasoning>. "
+        "Consider how to balance grouping customers into feasible routes against minimizing total travel distance. "
+        "Clustering or savings-based ideas may be a useful lens.\n"
+        "After completing your analysis, output in the following format (one route per line, nodes in visit order):\n"
+        "Route 1: 0 -> node -> ... -> 0\n"
+        "Route 2: 0 -> node -> ... -> 0"
+    ),
+    "tsp": (
+        "You are a route planning expert solving the Travelling Salesman Problem (TSP).\n"
+        "Rules: Starting from node 0, visit all customer nodes exactly once and return to node 0, minimizing total distance.\n"
+        "Before answering, think through the problem in <reasoning>...</reasoning>. "
+        "Consider how the spatial layout of nodes might suggest a natural visit order, "
+        "and whether the initial route can be improved. Greedy construction or local swap strategies may be useful starting points.\n"
+        "After completing your analysis, output in the following format:\n"
+        "Route: 0 -> A -> B -> C -> ... -> 0"
+    ),
+    "tsptw": (
+        "You are a route planning expert solving the Travelling Salesman Problem with Time Windows (TSPTW).\n"
+        "Rules:\n"
+        "- Start from node 0 (depot), visit all customer nodes exactly once, and return to node 0\n"
+        "- Travel time between nodes = Euclidean distance\n"
+        "- Each customer node has a time window [earliest, latest]: arrival time must be <= latest\n"
+        "- If arrival time < earliest, wait at the node until earliest (advance current time to earliest), then continue\n"
+        "- Objective: minimize total travel distance\n"
+        "Before answering, think through the problem in <reasoning>...</reasoning>.\n"
+        "After completing your analysis, output in the following format:\n"
+        "Route: 0 -> A -> B -> C -> ... -> 0"
+    ),
+    "vrptw": (
+        "You are a logistics scheduling expert solving the Vehicle Routing Problem with Time Windows (VRPTW).\n"
+        "Rules:\n"
+        "- Multiple vehicles depart from node 0 (depot); each vehicle visits a subset of customers and returns to node 0\n"
+        "- All customer nodes are visited exactly once\n"
+        "- Travel time between nodes = Euclidean distance\n"
+        "- Each customer node has a time window [earliest, latest]: arrival time must be <= latest\n"
+        "- If arrival time < earliest, wait at the node until earliest (advance current time to earliest), then continue\n"
+        "- Objective: minimize total travel distance across all routes\n"
+        "Before answering, think through the problem in <reasoning>...</reasoning>.\n"
+        "After completing your analysis, output in the following format (one route per line, nodes in visit order):\n"
+        "Route 1: 0 -> node -> ... -> 0\n"
+        "Route 2: 0 -> node -> ... -> 0"
+    ),
+}
+
 SYSTEM_SUFFIX = """
 
 Your output MUST start with <reasoning> and follow this exact structure:
@@ -65,9 +114,10 @@ Rules:
 FEWSHOT = ""
 
 
-def build_prompt(solution: str, system: str, user: str,
+def build_prompt(solution: str, problem_type: str, user: str,
                  use_fewshot: bool = True) -> dict:
-    system_new = system + SYSTEM_SUFFIX + (FEWSHOT if use_fewshot else "")
+    base = BASE_SYSTEM.get(problem_type, BASE_SYSTEM["cvrp"])
+    system_new = base + SYSTEM_SUFFIX + (FEWSHOT if use_fewshot else "")
     user_new = (
         user
         + f"\n\nTarget solution (you MUST output exactly this solution after </reasoning>,"
@@ -308,7 +358,7 @@ def main():
     def process_one(item):
         r, sample_id = item
         prompt_dict = build_prompt(
-            r["solution"], r["prompt"]["system"], r["prompt"]["user"],
+            r["solution"], r["problem_type"], r["prompt"]["user"],
             use_fewshot=not args.no_fewshot,
         )
 
@@ -365,7 +415,7 @@ def main():
         # Debug: print the exact prompt for the first sample
         first_r = preview_tasks[0][0]
         debug_prompt = build_prompt(
-            first_r["solution"], first_r["prompt"]["system"],
+            first_r["solution"], first_r["problem_type"],
             first_r["prompt"]["user"], use_fewshot=not args.no_fewshot,
         )
         print("=== DEBUG: SYSTEM PROMPT ===")
