@@ -117,13 +117,13 @@ Before answering, reason step by step inside <think>...</think>. Your think bloc
 1. **Strategy**: Analyze time windows and node positions. Identify urgent nodes (tight deadlines that must be visited early), flexible nodes (late deadlines), and the overall visit ordering principle (e.g., "deadline-driven with geographic continuity", "sweep with urgency priority"). Reference specific node IDs.
 
 2. **Step-by-step construction**: Build the route one node at a time. Each step format:
-   [step] at N → M (d=X.XXX, arr=X.XX, slack=X.XX) #reachable=X/Y | alt: A(d=X.XX,slack=X.XX), B(d=X.XX,slack=X.XX)
-   - d = distance from current to chosen node
-   - arr = arrival time at M (current_time + d)
-   - slack = deadline of M minus arrival time (how much time margin remains)
-   - #reachable = how many unvisited nodes are still reachable from M within their deadlines
-   - alt = 2-3 nearest feasible alternatives with distance and slack
-   If arrival < earliest of M, mark "wait" and set current time to earliest.
+   [step] t=X.XX from N | feasible: A(d=X.XX,arr=X.XX,slack=X.XX), B(d=X.XX,arr=X.XX,slack=X.XX), ... #reachable=X/Y → select M
+   - t = current time at departure from N
+   - feasible = up to 3 candidate nodes reachable within their deadlines, with distance, arrival time, and slack (deadline minus arrival); if more candidates exist, append ", ..."
+   - #reachable = how many unvisited nodes are still reachable within their deadlines
+   - → select M = the chosen next node (end of line marks the decision)
+   If arrival at previous node < its earliest, note at step start: (arr=X.XX, wait X.XX)
+   For the last step (return to depot): [step] t=X.XX from N → return depot (d=X.XX)
    Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
 
 3. **Verification**: List all visited nodes and confirm total count equals n. Format: "Visited: {1,2,...} = N/N" then "✓ All covered."

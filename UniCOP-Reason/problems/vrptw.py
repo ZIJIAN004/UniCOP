@@ -102,14 +102,16 @@ Before answering, reason step by step inside <think>...</think>. Your think bloc
 1. **Strategy**: Analyze time windows and node positions. Group nodes into routes by time-window compatibility and geographic proximity. For each planned route, state which nodes belong to it and the time-window range of that group. Reference specific node IDs.
 
 2. **Step-by-step construction**: Build each route one node at a time. Each step format:
-   [R1,3] at N → M (d=X.XXX, arr=X.XX, slack=X.XX) | alt: A(d=X.XX,slack=X.XX), B(d=X.XX,slack=X.XX)
-   - d = distance from current to chosen node
-   - arr = arrival time at M (current_time + d)
-   - slack = deadline of M minus arrival time (how much time margin remains)
-   - alt = 2-3 nearest feasible alternatives with distance and slack
-   If arrival < earliest of M, mark "wait" and set current time to earliest.
+   [R1,step] t=X.XX from N | feasible: A(d=X.XX,arr=X.XX,slack=X.XX), B(d=X.XX,arr=X.XX,slack=X.XX), ... → select M
+   - t = current time at departure from N
+   - feasible = up to 3 candidate nodes reachable within their deadlines, with distance, arrival time, and slack; if more candidates exist, append ", ..."
+   - → select M = the chosen next node (end of line marks the decision)
+   If arrival at previous node < its earliest, note at step start: (arr=X.XX, wait X.XX)
    At the start of each new route, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
-   When no feasible next node exists within current route's time constraints, return to depot and start a new route.
+   When no unvisited node is reachable within its deadline:
+     [R1,step] t=X.XX from N | check: A(arr=X.XX>deadline=X.XX), B(arr=X.XX>deadline=X.XX) → no feasible → return depot (d=X.XX)
+   When feasible nodes exist but returning to depot is more efficient:
+     [R1,step] t=X.XX from N | feasible: A(d=X.XX,arr=X.XX,slack=X.XX), ... → remaining nodes better served by new route, return depot (d=X.XX)
 
 3. **Verification**: For each route, list its customers and count. Confirm total equals n. Format: "R1:{nodes}=count | R2:{nodes}=count | ... Total: X/N customers. ✓ All covered, no duplicates."
 

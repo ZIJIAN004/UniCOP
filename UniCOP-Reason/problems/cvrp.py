@@ -94,15 +94,15 @@ Before answering, reason step by step inside <think>...</think>. Your think bloc
 1. **Strategy**: Analyze demand distribution and node positions. Identify which nodes form each route cluster, the approximate total demand per cluster, and the visit order principle within each cluster (e.g., "sweep outward then return", "nearest-neighbor within cluster"). Reference specific node IDs.
 
 2. **Step-by-step construction**: Build each route one node at a time. Each step format:
-   [R1,3] at N → M (d=X.XXX, dem=X.XX) cap=X.XX-X.XX=X.XX, load=X.XX/X.XX, d0=X.XX | alt: A(X.XX,cap→X.XX), B(X.XX,cap→X.XX)
-   - d = distance from current to chosen node
-   - dem = demand of chosen node
-   - cap = remaining capacity before - demand = after
-   - load = cumulative load of current route / vehicle capacity
-   - d0 = distance from chosen node to depot (informs return cost)
-   - alt = 2-3 nearest feasible alternatives with distance and resulting capacity
+   [R1,step] cap=X.XX-X.XX=X.XX | feasible: A(d=X.XX,dem=X.XX,cap→X.XX), B(d=X.XX,dem=X.XX,cap→X.XX), ... → select M
+   - cap = remaining capacity after previous step's demand deduction (first step of route: cap=full capacity)
+   - feasible = up to 3 candidate nodes that fit remaining capacity, with distance, demand, and resulting capacity; if more candidates exist, append ", ..."
+   - → select M = the chosen next node (end of line marks the decision)
    At the start of each new route, insert: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
-   When capacity is too low for any remaining node, return to depot and start a new route.
+   When no unvisited node fits remaining capacity:
+     [R1,step] cap=X.XX | check: A(dem=X.XX>cap), B(dem=X.XX>cap) → no feasible → return depot (d=X.XX)
+   When feasible nodes exist but returning to depot is more efficient:
+     [R1,step] cap=X.XX | feasible: A(d=X.XX,dem=X.XX,cap→X.XX), ... → remaining nodes better served by new route, return depot (d=X.XX)
 
 3. **Verification**: For each route, list its customers and count. Confirm total equals n. Format: "R1:{nodes}=count | R2:{nodes}=count | ... Total: X/N customers. ✓ All covered, no duplicates."
 

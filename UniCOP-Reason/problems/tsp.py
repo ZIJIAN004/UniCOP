@@ -57,10 +57,12 @@ Before answering, reason step by step inside <think>...</think>. Your think bloc
 1. **Strategy**: Analyze the node distribution and state your approach. Examples: "Angular sweep counterclockwise from depot", "Convex hull first then insert interior nodes", "Divide into 3 geographic segments and connect". Reference specific node groups or spatial features.
 
 2. **Step-by-step construction**: Build the route one node at a time. Each step format:
-   [step] at N → M (d=X.XXX, total=X.XX) | alt: A(X.XX), B(X.XX)
-   - d = distance from current to chosen node
+   [step] from N, total=X.XX | feasible: A(d=X.XX), B(d=X.XX), C(d=X.XX), ... → select M
+   - from N = current node
    - total = cumulative route distance so far
-   - alt = 2-3 nearest unvisited alternatives with distances
+   - feasible = up to 3 unvisited candidate nodes with distance from current node; if more candidates exist, append ", ..."
+   - → select M = the chosen next node (end of line marks the decision)
+   For the last step (return to depot): [step] from N, total=X.XX → return depot (d=X.XX, total=X.XX)
    Every 10 steps, insert a line: "Unvisited: {node_id, node_id, ...}" listing all remaining unvisited nodes.
 
 3. **Verification**: List all visited nodes and confirm total count equals n. Format: "Visited: {1,2,...} = N/N" then "✓ All covered."
