@@ -122,9 +122,6 @@ At the start of each new route, list: "Unvisited: {node_id, node_id, ...}"
 
 Each step format:
   [R1,step] cap=X.XX-X.XX=X.XX | feasible: A(d=X.XX,dem=X.XX,cap→X.XX), B(d=X.XX,dem=X.XX,cap→X.XX), ... → select M
-  - cap = remaining capacity after previous step's demand deduction (first step: cap=full capacity)
-  - feasible = up to 3 candidate nodes that fit remaining capacity, with distance, demand, and resulting capacity
-  - → select M = the chosen next node
 
 When no unvisited node fits remaining capacity:
   [R1,step] cap=X.XX | check: A(dem=X.XX>cap), B(dem=X.XX>cap) → no feasible → return depot (d=X.XX)
@@ -140,10 +137,6 @@ Additionally, structure your step-by-step construction using this exact format. 
 
 Each step format:
   [step] from N, total=X.XX | feasible: A(d=X.XX), B(d=X.XX), C(d=X.XX), ... → select M
-  - from N = current node
-  - total = cumulative route distance so far
-  - feasible = up to 3 unvisited candidate nodes with distance from current node
-  - → select M = the chosen next node
 For the last step: [step] from N, total=X.XX → return depot (d=X.XX, total=X.XX)
 Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}"
 
@@ -155,10 +148,6 @@ Additionally, structure your step-by-step construction using this exact format. 
 
 Each step format:
   [step] t=X.XX from N | feasible: A(d=X.XX,arr=X.XX,slack=X.XX), B(d=X.XX,arr=X.XX,slack=X.XX), ... #reachable=X/Y → select M
-  - t = current time at departure from N
-  - feasible = up to 3 candidate nodes reachable within their deadlines, with distance, arrival time, and slack (deadline minus arrival)
-  - #reachable = how many unvisited nodes are still reachable
-  - → select M = the chosen next node
 If arrival < earliest, note: (arr=X.XX, wait X.XX)
 For the last step: [step] t=X.XX from N → return depot (d=X.XX)
 Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}"
@@ -173,9 +162,6 @@ At the start of each new route, list: "Unvisited: {node_id, node_id, ...}"
 
 Each step format:
   [R1,step] t=X.XX from N | feasible: A(d=X.XX,arr=X.XX,slack=X.XX), B(d=X.XX,arr=X.XX,slack=X.XX), ... → select M
-  - t = current time at departure from N
-  - feasible = up to 3 candidate nodes reachable within their deadlines, with distance, arrival time, and slack
-  - → select M = the chosen next node
 If arrival < earliest, note: (arr=X.XX, wait X.XX)
 
 When no unvisited node is reachable within its deadline:
