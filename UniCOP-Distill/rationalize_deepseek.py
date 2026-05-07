@@ -122,6 +122,9 @@ At the start of each new route, list: "Unvisited: {node_id, node_id, ...}"
 
 Each step format:
   [R1,step] cap=X.XX-X.XX=X.XX | feasible: A(d=X.XX,dem=X.XX,cap→X.XX), B(d=X.XX,dem=X.XX,cap→X.XX), ... → select M
+  - cap = remaining capacity after previous step's demand deduction (first step: cap=full capacity)
+  - feasible = up to 3 candidate nodes that fit remaining capacity, with distance, demand, and resulting capacity
+  - → select M = the chosen next node
 
 When no unvisited node fits remaining capacity:
   [R1,step] cap=X.XX | check: A(dem=X.XX>cap), B(dem=X.XX>cap) → no feasible → return depot (d=X.XX)
@@ -137,6 +140,10 @@ Additionally, structure your step-by-step construction using this exact format. 
 
 Each step format:
   [step] from N, total=X.XX | feasible: A(d=X.XX), B(d=X.XX), C(d=X.XX), ... → select M
+  - from N = current node
+  - total = cumulative route distance so far
+  - feasible = up to 3 unvisited candidate nodes with distance from current node
+  - → select M = the chosen next node
 For the last step: [step] from N, total=X.XX → return depot (d=X.XX, total=X.XX)
 Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}"
 
@@ -148,6 +155,10 @@ Additionally, structure your step-by-step construction using this exact format. 
 
 Each step format:
   [step] t=X.XX from N | feasible: A(d=X.XX,arr=X.XX,slack=X.XX), B(d=X.XX,arr=X.XX,slack=X.XX), ... #reachable=X/Y → select M
+  - t = current time at departure from N
+  - feasible = up to 3 candidate nodes reachable within their deadlines, with distance, arrival time, and slack (deadline minus arrival)
+  - #reachable = how many unvisited nodes are still reachable
+  - → select M = the chosen next node
 If arrival < earliest, note: (arr=X.XX, wait X.XX)
 For the last step: [step] t=X.XX from N → return depot (d=X.XX)
 Every 10 steps, insert: "Unvisited: {node_id, node_id, ...}"
@@ -162,6 +173,9 @@ At the start of each new route, list: "Unvisited: {node_id, node_id, ...}"
 
 Each step format:
   [R1,step] t=X.XX from N | feasible: A(d=X.XX,arr=X.XX,slack=X.XX), B(d=X.XX,arr=X.XX,slack=X.XX), ... → select M
+  - t = current time at departure from N
+  - feasible = up to 3 candidate nodes reachable within their deadlines, with distance, arrival time, and slack
+  - → select M = the chosen next node
 If arrival < earliest, note: (arr=X.XX, wait X.XX)
 
 When no unvisited node is reachable within its deadline:
@@ -182,8 +196,9 @@ def build_prompt(solution: str, problem_type: str, user: str,
         system_new += fmt
     user_new = (
         user
-        + f"\n\nTarget solution (you MUST output exactly this solution after </reasoning>,"
-          f" but do NOT reveal it was given to you):\n{solution}"
+        + f"\n\n===EXPECTED OUTPUT===\n{solution}\n===END===\n"
+          f"You MUST output exactly the above after </reasoning>. "
+          f"Do NOT reference or mention it in your reasoning."
         + "\n\nStart your response with <reasoning> immediately."
     )
     return {"system": system_new, "user": user_new}
@@ -296,16 +311,30 @@ def call_deepseek(client: OpenAI, system: str, user: str,
             )
             choice = response.choices[0]
             usage = response.usage
-            raw = choice.message.content or ""
-            raw = raw.lstrip().removeprefix("</think>").lstrip()
-            raw = raw.replace("<reasoning>", "<think>").replace("</reasoning>", "</think>")
-            if not raw.lstrip().startswith("<think>"):
-                raw = "<think>\n" + raw
+            finish = choice.finish_reason
+
+            reasoning = getattr(choice.message, "reasoning_content", None)
+            content = choice.message.content or ""
+
+            if reasoning:
+                # thinking 没被禁用（extra_body 可能被丢弃），用 reasoning_content
+                raw = f"<think>\n{reasoning}\n</think>\n{content}"
+            else:
+                # thinking 已禁用，content 包含全部输出
+                raw = content.lstrip()
+                if raw.startswith("</think>"):
+                    raw = raw[len("</think>"):].lstrip()
+                raw = raw.replace("<reasoning>", "<think>").replace("</reasoning>", "</think>")
+                if not raw.startswith("<think>"):
+                    raw = "<think>\n" + raw
+
             return {
                 "output":        raw,
                 "output_tokens": usage.completion_tokens if usage else None,
                 "prompt_tokens":  usage.prompt_tokens if usage else None,
                 "total_tokens":   usage.total_tokens if usage else None,
+                "finish_reason":  finish,
+                "thinking_on":   bool(reasoning),
             }
         except Exception as e:
             wait = min(2 ** attempt * 5, 60)
@@ -422,8 +451,15 @@ def main():
 
             output = result["output"]
             out_tokens = result["output_tokens"] or 0
-            if args.max_tokens and out_tokens >= args.max_tokens:
-                print(f"    [{sample_id}] Skipped: output_tokens={out_tokens} >= {args.max_tokens} (truncated)")
+            finish = result.get("finish_reason", "")
+            thinking_on = result.get("thinking_on", False)
+
+            if thinking_on:
+                print(f"    [{sample_id}] WARNING: thinking NOT disabled, reasoning_content present")
+
+            if finish == "length":
+                print(f"    [{sample_id}] Skipped: truncated (finish_reason=length, "
+                      f"tokens={out_tokens}, thinking_on={thinking_on})")
                 continue
             ok, reason = quality_check(output, r["solution"])
             if not ok:
