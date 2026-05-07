@@ -237,13 +237,9 @@ def replace_answer(output: str, correct_solution: str) -> str:
 
 def call_deepseek(client: OpenAI, system: str, user: str,
                   model: str, max_tokens: int,
-                  use_thinking: bool = True,
                   max_retries: int = 3) -> dict | None:
     for attempt in range(max_retries):
         try:
-            extra = {}
-            if not use_thinking:
-                extra["thinking"] = {"type": "disabled"}
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -252,22 +248,15 @@ def call_deepseek(client: OpenAI, system: str, user: str,
                 ],
                 temperature=0.7,
                 max_tokens=max_tokens,
-                extra_body=extra if extra else None,
+                extra_body={"thinking": {"type": "disabled"}},
             )
             choice = response.choices[0]
             usage = response.usage
-
-            if use_thinking:
-                reasoning = getattr(choice.message, "reasoning_content", "") or ""
-                answer = (choice.message.content or "").strip()
-                raw = f"<think>\n{reasoning}\n</think>\n{answer}"
-            else:
-                raw = choice.message.content or ""
-                raw = raw.lstrip().removeprefix("</think>").lstrip()
-                raw = raw.replace("<reasoning>", "<think>").replace("</reasoning>", "</think>")
-                if not raw.lstrip().startswith("<think>"):
-                    raw = "<think>\n" + raw
-
+            raw = choice.message.content or ""
+            raw = raw.lstrip().removeprefix("</think>").lstrip()
+            raw = raw.replace("<reasoning>", "<think>").replace("</reasoning>", "</think>")
+            if not raw.lstrip().startswith("<think>"):
+                raw = "<think>\n" + raw
             return {
                 "output":        raw,
                 "output_tokens": usage.completion_tokens if usage else None,
@@ -309,8 +298,6 @@ def main():
                         help="Disable fewshot example to save ~350 input tokens/sample")
     parser.add_argument("--structured", action="store_true",
                         help="Enable structured step format (think-then-select at each step)")
-    parser.add_argument("--disable_thinking", action="store_true",
-                        help="Disable model's built-in thinking (produces rigid format)")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -341,10 +328,8 @@ def main():
 
     # DeepSeek client
     client = OpenAI(base_url=args.base_url, api_key=args.api_key)
-    use_thinking = not args.disable_thinking
     print(f"API: {args.base_url}  model: {args.model}  "
-          f"thinking: {use_thinking}  structured: {args.structured}  "
-          f"fewshot: {not args.no_fewshot}")
+          f"structured: {args.structured}  fewshot: {not args.no_fewshot}")
 
     # 断点续跑
     existing_ids = set()
@@ -386,7 +371,7 @@ def main():
         for attempt in range(max_qr):
             result = call_deepseek(
                 client, prompt_dict["system"], prompt_dict["user"],
-                args.model, args.max_tokens, use_thinking=use_thinking
+                args.model, args.max_tokens
             )
             if result is None:
                 continue
