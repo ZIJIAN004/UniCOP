@@ -74,6 +74,84 @@ class StepRewards:
     covered: int = 0                    # 合法前缀内覆盖的客户数
 
 
+# ── Think 段解析 + Per-Customer 增量 PRM ────────────────────────────────────
+
+
+@dataclass
+class ThinkStep:
+    """think 段内一步客户决策（不含 depot 回程）。"""
+    customer_id: int
+    char_range: tuple          # (start, end) 在 completion text 中的字符范围
+    full_step_idx: int         # 在重建的 full_steps 序列中的索引
+
+
+@dataclass
+class ThinkPRMResult:
+    """单条 completion 的 think 段 PRM 结果。"""
+    customer_rewards: dict     # customer_id → 增量 reward（仅正常步）
+    customer_ranges: dict      # customer_id → (char_start, char_end)
+    anomaly_customers: set     # 异常的 customer ID 集合
+    n: int
+
+
+_THINK_MARKER_PATTERN = re.compile(
+    r'\[R?(\d+)(?:,(\d+))?\]\s*at\s+(\d+)\s*[-→>]+\s*(\d+)'
+)
+
+
+def parse_think_segments(completion: str):
+    """
+    从 <think> 段扫描 [R{r},{s}] 标记，提取逐步决策并做链校验。
+
+    Returns:
+        full_steps:    完整节点序列（含 depot）
+        customer_steps: 仅客户步列表（ThinkStep）
+        anomaly_start: customer_steps 中首个异常索引（None = 全部正常）
+    """
+    think_start = completion.find("<think>")
+    think_end = completion.find("</think>")
+    if think_start == -1 or think_end == -1:
+        return [0], [], 0
+
+    think_text = completion[think_start + len("<think>"):think_end]
+    think_offset = think_start + len("<think>")
+
+    markers = list(_THINK_MARKER_PATTERN.finditer(think_text))
+    if not markers:
+        return [0], [], 0
+
+    full_steps = [0]
+    customer_steps: list[ThinkStep] = []
+    prev_target = 0
+    anomaly_start = None
+
+    for i, m in enumerate(markers):
+        src = int(m.group(3))
+        dst = int(m.group(4))
+
+        seg_start = think_offset + m.start()
+        seg_end = (think_offset + markers[i + 1].start()
+                   if i + 1 < len(markers) else think_end)
+
+        if anomaly_start is None and src != prev_target:
+            anomaly_start = len(customer_steps)
+
+        if dst == 0:
+            full_steps.append(0)
+            prev_target = 0
+            continue
+
+        full_steps.append(dst)
+        customer_steps.append(ThinkStep(
+            customer_id=dst,
+            char_range=(seg_start, seg_end),
+            full_step_idx=len(full_steps) - 1,
+        ))
+        prev_target = dst
+
+    return full_steps, customer_steps, anomaly_start
+
+
 # ── POMO 模型加载 ─────────────────────────────────────────────────────────────
 
 def _import_pomo(pomo_baseline_dir: str):
@@ -295,6 +373,97 @@ class POMOPRM:
             depot_token_positions=depot_positions,
             n=n,
             covered=valid_customers,
+        )
+
+    # ── Per-Customer 增量 PRM（基于 think 段标记） ──────────────────
+
+    @torch.no_grad()
+    def compute_think_step_rewards(
+        self,
+        completion: str,
+        instance: dict,
+        problem_type: str,
+    ) -> ThinkPRMResult:
+        """
+        基于 <think> 段 [R{r},{s}] 标记的 per-customer 增量 PRM。
+        仅应在可行 completion 上调用。
+
+        流程：
+            1. parse_think_segments() 解析标记 + 链校验
+            2. _validate_prefix() 约束校验
+            3. _batch_evaluate_prefixes() POMO 评估
+            4. 计算增量 reward: R_step[t] = POMO(prefix_t) - POMO(prefix_{t-1})
+        """
+        n = instance["n"]
+
+        full_steps, customer_steps, chain_anomaly_idx = parse_think_segments(
+            completion
+        )
+
+        if not customer_steps:
+            return ThinkPRMResult(
+                customer_rewards={}, customer_ranges={},
+                anomaly_customers=set(range(1, n + 1)), n=n,
+            )
+
+        # ── 约束校验 → valid_full_length ──────────────────────────────
+        valid_full_length = self._validate_prefix(
+            full_steps, instance, problem_type
+        )
+
+        # ── 合并链异常 + 约束异常 → effective_anomaly ──────────────────
+        constraint_anomaly = len(customer_steps)
+        for ci, step in enumerate(customer_steps):
+            if step.full_step_idx >= valid_full_length:
+                constraint_anomaly = ci
+                break
+
+        chain_limit = (chain_anomaly_idx
+                       if chain_anomaly_idx is not None
+                       else len(customer_steps))
+        effective_anomaly = min(chain_limit, constraint_anomaly)
+
+        normal_steps = customer_steps[:effective_anomaly]
+        customer_rewards: dict[int, float] = {}
+        customer_ranges: dict[int, tuple] = {}
+        anomaly_customers: set[int] = set()
+
+        # ── POMO 评估正常步 ──────────────────────────────────────────
+        if normal_steps:
+            cust_indices = [s.full_step_idx for s in normal_steps]
+            pomo_values = self._batch_evaluate_prefixes(
+                full_steps[:valid_full_length],
+                cust_indices,
+                instance, problem_type,
+            )
+            pomo_prev = 0.0
+            for i, step in enumerate(normal_steps):
+                if i < len(pomo_values):
+                    R_step = pomo_values[i] - pomo_prev
+                    pomo_prev = pomo_values[i]
+                    customer_rewards[step.customer_id] = R_step
+                    customer_ranges[step.customer_id] = step.char_range
+                else:
+                    anomaly_customers.add(step.customer_id)
+
+        # ── 异常步（含未访问客户） ─────────────────────────────────────
+        # 若 customer 已在正常区获得 reward，不覆盖（防 think 中假回溯）
+        for step in customer_steps[effective_anomaly:]:
+            c = step.customer_id
+            if c not in customer_rewards:
+                anomaly_customers.add(c)
+            customer_ranges.setdefault(c, step.char_range)
+
+        visited = {s.customer_id for s in customer_steps}
+        for c in range(1, n + 1):
+            if c not in visited and c not in customer_rewards:
+                anomaly_customers.add(c)
+
+        return ThinkPRMResult(
+            customer_rewards=customer_rewards,
+            customer_ranges=customer_ranges,
+            anomaly_customers=anomaly_customers,
+            n=n,
         )
 
     # ── 解析 ──────────────────────────────────────────────────────────

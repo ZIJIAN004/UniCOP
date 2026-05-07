@@ -1,15 +1,15 @@
 """
-GRPOPRMTrainer: 继承 trl.GRPOTrainer，三信号解耦 GRPO 训练。
+GRPOPRMTrainer: 继承 trl.GRPOTrainer，Per-Customer 增量 PRM + 段内广播。
 
-设计（三信号解耦 + DAPO token-level）：
-    1. Feasibility gate：parse + coverage + constraint + format 全满足才算可行
-       - 不可行 → A_total = 动态惩罚（历史最小可行 advantage - margin）
-       - 可行   → 进入 outcome + process 计算
-    2. A_out (Outcome)：负距离，只在可行解之间独立归一化
-    3. A_proc (Process)：客户节点 PRM 分数每步减组内均值 → 聚合标量 → 独立归一化
-       - depot 不参与（可行性由 gate 管）
-    4. A_total = A_out + α · A_proc → 广播到所有 token
-    5. Loss：单一 DAPO token-level loss（按 token 数加权）
+设计（A_feasibility + A_outcome + Per-Customer PRM → per-token advantage）：
+    1. A_feasibility：4D 信号加权（可行拿满，不可行按维度给部分分）
+    2. A_outcome：可行解之间 z-score(-distance)，不可行 = 0
+    3. A_out = A_feasibility + A_outcome → 所有 token 共享
+    4. A_proc：per-customer 增量 PRM，段内广播到 [R{r},{s}] 标记对应的推理段
+       - 仅可行 completion 计算；不可行 A_proc = 0
+       - per-customer 跨 completion z-score 归一化
+    5. per-token advantage = A_out + α · A_proc（步骤段内）/ A_out（非步骤区域）
+    6. Loss：单一 DAPO token-level loss（按 token 数加权）
 """
 
 import json
@@ -18,7 +18,7 @@ import torch
 from accelerate.utils import broadcast_object_list, gather_object
 from trl import GRPOTrainer
 
-from pomo_prm import POMOPRM, StepRewards
+from pomo_prm import POMOPRM, ThinkPRMResult
 from terminal_reward import compute_terminal_components, is_fully_feasible
 from foarl_reward import compute_foarl_reward
 from ref_solver import solve_reference
@@ -42,7 +42,6 @@ class GRPOPRMTrainer(GRPOTrainer):
         super().__init__(**kwargs)
         self.pomo_prm = pomo_prm
         self.problem_types = problem_types or []
-        self._hist_min = float('inf')
 
         if self.args.num_generations < 2:
             raise ValueError(
@@ -62,13 +61,6 @@ class GRPOPRMTrainer(GRPOTrainer):
             value = value.unsqueeze(0)
         gathered = self.accelerator.gather(value)
         return gathered.float().mean().item()
-
-    # ── 动态惩罚 ─────────────────────────────────────────────────────
-
-    def _get_penalty(self) -> float:
-        if self._hist_min == float('inf'):
-            return config.infeasible_default_penalty
-        return self._hist_min - config.infeasible_margin
 
     # ══════════════════════════════════════════════════════════════════
     #  生成 + 三信号解耦
@@ -117,33 +109,18 @@ class GRPOPRMTrainer(GRPOTrainer):
                 completions_text, instances, problem_type_list,
                 B, num_gen, device=completion_ids.device,
             )
+            # FOARL 返回 (B,) → 扩展到 (B, T) 保持接口一致
+            advantages = advantages.unsqueeze(-1).expand(-1, T).contiguous()
         else:
             # 可行性重采样：每组至少 2 条可行解
             self._resample_infeasible(
                 batch, completions_text, instances, problem_type_list, num_gen
             )
 
-            # PRM step rewards（ablation 模式下跳过）
-            if config.disable_prm:
-                all_step_rewards = [None] * B
-            else:
-                all_step_rewards = []
-                for i in range(B):
-                    pt = problem_type_list[i]
-                    if pt not in POMOPRM.SUPPORTED:
-                        raise ValueError(
-                            f"Problem type '{pt}' 不在 POMO PRM 支持列表 "
-                            f"{sorted(POMOPRM.SUPPORTED)}。"
-                        )
-                    sr = self.pomo_prm.compute_step_rewards(
-                        completions_text[i], instances[i], pt
-                    )
-                    all_step_rewards.append(sr)
-
-            # 三信号解耦 → 统一 advantage (B,)
+            # Per-Customer PRM + A_feasibility + A_outcome → per-token (B, T)
             advantages = self._build_unified_advantages(
                 completions_text, instances, problem_type_list,
-                all_step_rewards, B, num_gen, device=completion_ids.device,
+                B, num_gen, T, device=completion_ids.device,
             )
 
         batch["advantages"] = advantages
@@ -267,137 +244,231 @@ class GRPOPRMTrainer(GRPOTrainer):
             })
 
     # ══════════════════════════════════════════════════════════════════
-    #  三信号解耦 Advantage
+    #  三信号解耦 Advantage（Per-Customer 增量 PRM + 段内广播）
     # ══════════════════════════════════════════════════════════════════
 
     def _build_unified_advantages(self, completions_text, instances,
-                                   problem_type_list, all_step_rewards,
-                                   B, num_gen, device):
+                                   problem_type_list,
+                                   B, num_gen, T, device):
         """
-        Feasibility gate + Outcome (A_out) + Process (A_proc) → 统一 advantage (B,)
+        A_out = A_outcome + A_feasibility  （所有 token 共享）
+        A_proc = per-customer 增量 PRM     （段内广播，仅可行解）
+        → per-token advantage (B, T)
+        """
+        # ── 1. A_out（A_outcome + A_feasibility） ────────────────────
+        a_out, is_feasible, components = self._compute_a_out(
+            completions_text, instances, problem_type_list, B, num_gen, device
+        )
 
-        不可行解: A_total = hist_min - margin（动态惩罚，最后赋值）
-        可行解:   A_total = A_out + α · A_proc（独立归一化后相加）
+        # ── 2. 初始化 advantage tensor: 所有 token 先赋 A_out ────────
+        advantages = a_out.unsqueeze(-1).expand(-1, T).contiguous()
+
+        # ── 3. Per-group PRM 段内广播 ────────────────────────────────
+        if not config.disable_prm and self.pomo_prm is not None:
+            offset_maps = self._build_offset_maps(completions_text, B)
+
+            num_groups = B // num_gen
+            for g in range(num_groups):
+                s = g * num_gen
+                group_texts = completions_text[s:s + num_gen]
+                group_feasible = is_feasible[s:s + num_gen]
+                inst = instances[s]
+                pt = problem_type_list[s]
+
+                prm_segments = self._compute_per_customer_prm(
+                    group_texts, inst, pt, group_feasible
+                )
+
+                for j in range(num_gen):
+                    k = s + j
+                    segs = prm_segments.get(j)
+                    if not segs or offset_maps[k] is None:
+                        continue
+                    om = offset_maps[k]
+                    for (seg_cs, seg_ce, a_proc) in segs:
+                        tok_s, tok_e = self._char_to_token_range(
+                            seg_cs, seg_ce, om
+                        )
+                        if tok_s is not None and tok_e is not None:
+                            tok_e = min(tok_e, T)
+                            advantages[k, tok_s:tok_e] += (
+                                config.proc_alpha * a_proc
+                            )
+
+        # ── 4. Log ───────────────────────────────────────────────────
+        n_feasible = sum(is_feasible)
+        feas_rate = n_feasible / B if B > 0 else 0.0
+        self.log({
+            "reward/feasibility_rate":    self._gather_mean(feas_rate),
+            "reward/R_parse_rate":        self._gather_mean(
+                np.mean([c["parse"] for c in components])),
+            "reward/R_coverage_rate":     self._gather_mean(
+                np.mean([c["coverage"] for c in components])),
+            "reward/R_constraint_mean":   self._gather_mean(
+                np.mean([c["constraint"] for c in components])),
+            "reward/R_format_mean":       self._gather_mean(
+                np.mean([c["format"] for c in components])),
+            "reward/A_out_mean":          self._gather_mean(a_out.mean()),
+            "reward/A_total_mean":        self._gather_mean(advantages.mean()),
+        })
+
+        return advantages
+
+    # ── A_out = A_outcome + A_feasibility ────────────────────────────
+
+    def _compute_a_out(self, completions_text, instances,
+                       problem_type_list, B, num_gen, device):
+        """
+        A_feasibility: 4D 加权（可行拿满, 不可行部分分）
+        A_outcome:     可行解之间 z-score(-distance)（组内 ≥2 才有）
+
+        Returns: a_out (B,), is_feasible list[bool], components list[dict]
         """
         eps = 1e-8
-        A_total = torch.zeros(B, device=device)
-
-        # ── 1. Feasibility + Outcome raw ─────────────────────────────
-        feasible = torch.zeros(B, dtype=torch.bool, device=device)
-        outcome_raw = torch.zeros(B, device=device)
-
-        all_parse, all_cov, all_con, all_fmt = [], [], [], []
-        n_feasible_total = 0
+        a_out = torch.zeros(B, device=device)
+        is_feasible: list[bool] = []
+        components: list[dict] = []
+        distances: list[float | None] = []
 
         for i in range(B):
             c = compute_terminal_components(
                 completions_text[i], instances[i], problem_type_list[i]
             )
-            all_parse.append(c["parse"])
-            all_cov.append(c["coverage"])
-            all_con.append(c["constraint"])
-            all_fmt.append(c["format"])
+            components.append(c)
 
-            is_feas = (c["parse"] == 1.0 and c["coverage"] == 1.0
-                       and c["constraint"] == 1.0 and c["format"] == 1.0)
-            feasible[i] = is_feas
+            feas = (c["parse"] == 1.0 and c["coverage"] == 1.0
+                    and c["constraint"] == 1.0 and c["format"] == 1.0)
+            is_feasible.append(feas)
 
-            if is_feas:
-                n_feasible_total += 1
+            a_feas = (config.w_p * c["parse"] + config.w_c * c["coverage"]
+                      + config.w_k * c["constraint"] + config.w_f * c["format"])
+            a_out[i] = a_feas
+
+            if feas:
                 prob = _PROBLEM_OBJS.get(problem_type_list[i])
-                dist = prob.get_tour_distance(
-                    completions_text[i], instances[i]
-                ) if prob else None
-                outcome_raw[i] = -dist if dist is not None else 0.0
+                dist = (prob.get_tour_distance(completions_text[i], instances[i])
+                        if prob else None)
+                distances.append(dist)
+            else:
+                distances.append(None)
 
-        # ── 2. 逐组计算 A_out + A_proc ──────────────────────────────
         num_groups = B // num_gen
-        fallback_mask = torch.zeros(B, dtype=torch.bool, device=device)
-
         for g in range(num_groups):
-            s, e = g * num_gen, (g + 1) * num_gen
-            f_mask = feasible[s:e]
-            n_f = f_mask.sum().item()
+            s = g * num_gen
+            feas_in_grp = [
+                (j, distances[s + j])
+                for j in range(num_gen)
+                if is_feasible[s + j] and distances[s + j] is not None
+            ]
+            if len(feas_in_grp) >= 2:
+                neg_dists = torch.tensor(
+                    [-d for _, d in feas_in_grp], device=device,
+                    dtype=torch.float32,
+                )
+                mean_d = neg_dists.mean()
+                std_d = neg_dists.std() + eps
+                for idx, (j, _) in enumerate(feas_in_grp):
+                    a_out[s + j] += (neg_dists[idx] - mean_d) / std_d
 
-            if n_f < 2:
-                if n_f == 1:
-                    A_total[s:e][f_mask] = 0.0
-                    self._hist_min = min(self._hist_min, 0.0)
-                fallback_mask[s:e] = ~f_mask
+        return a_out, is_feasible, components
+
+    # ── Per-Customer PRM（仅可行 completion） ────────────────────────
+
+    def _compute_per_customer_prm(self, group_texts, instance,
+                                   problem_type, group_feasible):
+        """
+        Per-Customer 增量 PRM + z-score 归一化。
+
+        Returns:
+            dict: local_index → [(char_start, char_end, a_proc), ...]
+        """
+        K = len(group_texts)
+        n = instance["n"]
+
+        feasible_idx = [k for k in range(K) if group_feasible[k]]
+        if len(feasible_idx) < 2:
+            return {}
+
+        prm_results: dict[int, ThinkPRMResult] = {}
+        for k in feasible_idx:
+            pt = problem_type
+            if pt not in POMOPRM.SUPPORTED:
+                continue
+            prm_results[k] = self.pomo_prm.compute_think_step_rewards(
+                group_texts[k], instance, pt,
+            )
+
+        if len(prm_results) < 2:
+            return {}
+
+        prm_segments: dict[int, list] = {k: [] for k in range(K)}
+
+        for c in range(1, n + 1):
+            normal_rewards = []
+            for k in feasible_idx:
+                if k not in prm_results:
+                    continue
+                r = prm_results[k]
+                if c in r.customer_rewards and c not in r.anomaly_customers:
+                    normal_rewards.append((k, r.customer_rewards[c]))
+
+            if len(normal_rewards) < 2:
                 continue
 
-            # ── A_out: 可行解之间 z-score ────────────────────────────
-            f_outcomes = outcome_raw[s:e][f_mask]
-            A_out = (f_outcomes - f_outcomes.mean()) / (f_outcomes.std() + eps)
+            rewards_only = [rw for _, rw in normal_rewards]
+            mean_c = float(np.mean(rewards_only))
+            std_c = float(np.std(rewards_only)) + 1e-8
+            abnormal_val = min(rewards_only) - config.abnormal_margin
 
-            # ── A_proc: 每步减均值 → 聚合 → z-score ────────────────
-            f_indices = [s + j for j in range(num_gen) if f_mask[j]]
-            K = instances[s]["n"]
-            A_proc = torch.zeros(n_f, device=device)
+            for k in feasible_idx:
+                if k not in prm_results:
+                    continue
+                r = prm_results[k]
+                is_abn = c in r.anomaly_customers or c not in r.customer_rewards
 
-            if not config.disable_prm:
-                prm_matrix = torch.zeros(n_f, K, device=device)
-                valid_proc = torch.ones(n_f, dtype=torch.bool, device=device)
+                if is_abn:
+                    if c in r.customer_ranges:
+                        a_proc = (abnormal_val - mean_c) / std_c
+                        prm_segments[k].append(
+                            (*r.customer_ranges[c], a_proc)
+                        )
+                else:
+                    a_proc = (r.customer_rewards[c] - mean_c) / std_c
+                    prm_segments[k].append(
+                        (*r.customer_ranges[c], a_proc)
+                    )
 
-                for fi, idx in enumerate(f_indices):
-                    sr = all_step_rewards[idx]
-                    if sr is None or len(sr.customer_rewards) < K:
-                        valid_proc[fi] = False
-                        continue
-                    for k in range(K):
-                        prm_matrix[fi, k] = sr.customer_rewards[k]
+        return prm_segments
 
-                n_valid = valid_proc.sum().item()
+    # ── Char → Token 映射 ────────────────────────────────────────────
 
-                if n_valid >= 2:
-                    valid_prm = prm_matrix[valid_proc]
-                    delta = valid_prm - valid_prm.mean(dim=0, keepdim=True)
-                    raw = delta.mean(dim=1)
-                    normalized = raw / (raw.std() + eps)
-                    vi = 0
-                    for fi in range(n_f):
-                        if valid_proc[fi]:
-                            A_proc[fi] = normalized[vi]
-                            vi += 1
+    def _build_offset_maps(self, completions_text, B):
+        offset_maps: list = [None] * B
+        for i in range(B):
+            try:
+                enc = self.processing_class(
+                    completions_text[i],
+                    add_special_tokens=False,
+                    return_offsets_mapping=True,
+                )
+                offset_maps[i] = enc.offset_mapping
+            except (NotImplementedError, TypeError):
+                pass
+        return offset_maps
 
-            # ── 组合 ────────────────────────────────────────────────
-            A_feasible = A_out + config.proc_alpha * A_proc
-
-            # 写回 A_total
-            fi = 0
-            for j in range(num_gen):
-                if f_mask[j]:
-                    A_total[s + j] = A_feasible[fi]
-                    fi += 1
-
-            # 更新历史最小值
-            batch_min = A_feasible.min().item()
-            self._hist_min = min(self._hist_min, batch_min)
-
-        # ── 3. 不可行解赋惩罚 ────────────────────────────────────────
-        penalty = self._get_penalty()
-        # 正常组：有 >= 2 可行解做对比，即便 penalty > 0 也能通过相对关系学习
-        A_total[(~feasible) & (~fallback_mask)] = penalty
-        # fallback 组：没有足够可行解做对比，正惩罚会误导模型，强制负值
-        fb_penalty = penalty if penalty <= 0 else -1.0
-        A_total[fallback_mask] = fb_penalty
-
-        # ── Log ──────────────────────────────────────────────────────
-        feas_rate = n_feasible_total / B if B > 0 else 0.0
-        self.log({
-            "reward/feasibility_rate":    self._gather_mean(feas_rate),
-            "reward/R_parse_rate":        self._gather_mean(np.mean(all_parse)),
-            "reward/R_coverage_rate":     self._gather_mean(np.mean(all_cov)),
-            "reward/R_constraint_mean":   self._gather_mean(np.mean(all_con)),
-            "reward/R_format_mean":       self._gather_mean(np.mean(all_fmt)),
-            "reward/penalty":             self._gather_mean(penalty),
-            "reward/hist_min":            self._gather_mean(self._hist_min
-                                                            if self._hist_min != float('inf')
-                                                            else config.infeasible_default_penalty),
-            "reward/A_total_mean":        self._gather_mean(A_total.mean()),
-        })
-
-        return A_total
+    @staticmethod
+    def _char_to_token_range(char_start, char_end, offset_mapping):
+        tok_start = None
+        tok_end = None
+        for t_idx, (cs, ce) in enumerate(offset_mapping):
+            if ce <= char_start:
+                continue
+            if cs >= char_end:
+                break
+            if tok_start is None:
+                tok_start = t_idx
+            tok_end = t_idx + 1
+        return tok_start, tok_end
 
     # ══════════════════════════════════════════════════════════════════
     #  FOARL Advantage
@@ -469,7 +540,7 @@ class GRPOPRMTrainer(GRPOTrainer):
         prompt_mask     = inputs["prompt_mask"]
         completion_ids  = inputs["completion_ids"]
         completion_mask = inputs["completion_mask"]
-        advantages      = inputs["advantages"]                 # (B,)
+        advantages      = inputs["advantages"]                 # (B, T) or (B,)
         old_per_token_logps = inputs.get("old_per_token_logps")
 
         input_ids      = torch.cat([prompt_ids, completion_ids], dim=1)
@@ -497,8 +568,8 @@ class GRPOPRMTrainer(GRPOTrainer):
         eps_high = getattr(self, 'epsilon_high', 0.2)
         clipped_ratio = torch.clamp(ratio, 1 - eps_low, 1 + eps_high)
 
-        # 广播 advantage 到 (B, T)
-        adv = advantages.unsqueeze(-1)
+        # advantage: (B, T) per-token 或 (B,) 标量
+        adv = advantages.unsqueeze(-1) if advantages.dim() == 1 else advantages
 
         per_token_loss = -torch.min(ratio * adv, clipped_ratio * adv)
 

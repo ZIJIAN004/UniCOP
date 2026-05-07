@@ -70,12 +70,19 @@ class Config:
     reward_mode: str               = "prm"  # "prm" | "foarl"
 
     # ── 三信号解耦奖励（reward_mode=prm） ────────────────────────────
-    # 不可行 → A_total = 动态惩罚 (hist_min - margin)
-    # 可行   → A_total = A_out + proc_alpha · A_proc，广播到所有 token
+    # A_out = A_feasibility + A_outcome（所有 token 共享）
+    # A_proc = per-customer 增量 PRM（段内广播到步骤推理段 token）
+    # per-token advantage = A_out + α · A_proc
     disable_prm: bool              = False # ablation: 关闭 process reward，只用 outcome
-    proc_alpha: float              = 0.5   # process 信号权重（< 1，outcome 为主）
-    infeasible_margin: float       = 1.0   # 惩罚低于历史最小可行 advantage 的幅度
-    infeasible_default_penalty: float = -5.0  # 训练初始还没见过可行解时的 fallback
+    proc_alpha: float              = 0.5   # process 信号权重；段内广播已覆盖较多 token，0.5 起步
+    infeasible_margin: float       = 1.0   # (legacy) 惩罚低于历史最小可行 advantage 的幅度
+    infeasible_default_penalty: float = -5.0  # (legacy) 训练初始还没见过可行解时的 fallback
+    # A_feasibility 权重（可行解拿满 = w_p + w_c + w_k + w_f = 3.5）
+    w_p: float                     = 1.0   # R_parse 权重
+    w_c: float                     = 1.0   # R_coverage 权重
+    w_k: float                     = 1.0   # R_constraint 权重
+    w_f: float                     = 0.5   # R_format 权重
+    abnormal_margin: float         = 0.01  # 异常步比最差正常步低多少
 
     # ── FOARL 奖励（reward_mode=foarl） ──────────────────────────────
     # R = R_f + R_o
