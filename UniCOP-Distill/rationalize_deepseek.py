@@ -46,41 +46,23 @@ from openai import OpenAI
 
 SYSTEM_SUFFIX = """
 
-Your output MUST start with <reasoning> and follow this structure:
+Your output MUST start with <reasoning> and follow this exact structure:
 
 <reasoning>
-[your reasoning process]
+[your reasoning here]
 </reasoning>
 [solution in required format]
 
-Principles:
-1. Your FIRST token MUST be '<reasoning>'.
-2. Solve the problem from scratch. Explain your strategy and key decisions freely — you may use any approach (clustering, sweep, nearest-neighbor, savings, or any combination). There is no required format for the reasoning body.
-3. Every claim must reference specific node IDs and numbers. When you make a non-obvious choice (e.g., skipping a nearby node, splitting a cluster across routes), state what alternatives you considered and why you rejected them.
-4. Verify feasibility: each route's total demand must not exceed vehicle capacity. Show this check at least once per route.
-5. Do NOT use vague phrases ("logical next step", "natural choice", "obvious") without a concrete reason.
-6. Keep <reasoning> concise (300-800 words). Do NOT mention that a solution was provided to you — reason as if solving it yourself.
-7. After </reasoning>, output the solution exactly in the required format."""
+Rules:
+1. Your FIRST token MUST be '<reasoning>'. Do NOT output anything before <reasoning>.
+2. In <reasoning>, show your step-by-step decision process for constructing the route from scratch. At each step, state where you are, which nearby nodes are candidates, and why you pick the next one (e.g. nearest distance, capacity constraint, cluster boundary). Write as if you are solving this problem yourself for the first time.
+3. When you skip a closer node for a farther one, briefly note why (e.g. "Node 5 is closer but would leave an isolated node; choosing Node 8 to clear this cluster first").
+4. For each route, verify total demand does not exceed vehicle capacity before closing it.
+5. Keep <reasoning> concise (a few hundred words at most). Do NOT mention that a solution was provided or given to you. Do NOT describe your task as 'reconstructing', 'explaining', or 'justifying' a solution. You are solving this problem from scratch — your reasoning should read as original problem-solving, not as post-hoc analysis of a known answer.
+6. After </reasoning>, output the solution exactly in the required format.
+7. Do NOT output the solution before <reasoning>. The solution ONLY appears after </reasoning>."""
 
-FEWSHOT = """
-
-Here is an example showing two different valid reasoning styles:
-
-Example A (cluster-first):
-<reasoning>
-The depot is at (0.30, 0.39). I'll group nodes geographically and build one route per cluster.
-South-East cluster: Nodes 3(d=0.17), 6(d=0.17), 16(d=0.10), 19(d=0.30) — total demand 0.74, fits one vehicle. I'll sweep clockwise from Node 19...
-[continues freely]
-Feasibility: Route 1 demand = 0.74 ≤ 1.0. ✓
-</reasoning>
-
-Example B (sweep-based):
-<reasoning>
-I'll sort all nodes by polar angle from the depot and partition into routes when capacity fills up.
-Starting from angle 0: Node 8 (angle=15°, d=0.30), Node 17 (angle=28°, d=0.17)... cumulative demand 0.47.
-Node 2 (angle=35°, d=0.07) — adding it gives 0.54. Node 11 (angle=52°, d=0.27) — now 0.81. Next is Node 9 (d=0.23), but 0.81+0.23=1.04 > 1.0, so I close this route and start a new one.
-[continues freely]
-</reasoning>"""
+FEWSHOT = ""
 
 
 def build_prompt(solution: str, system: str, user: str,
