@@ -33,17 +33,17 @@ from openai import OpenAI
 
 
 STRATEGY_SYSTEM = (
-    "You are a logistics route planning expert. Given a CVRP problem and its "
-    "route assignments, write a concise strategy analysis (100-150 words) in "
-    "first person.\n\n"
-    "Describe:\n"
-    "- The geographic layout of nodes and how they naturally cluster\n"
-    "- Why these specific groupings make sense (proximity, demand balancing)\n"
-    "- The visit order logic within each route (e.g. sweep direction, nearest-neighbor)\n\n"
-    "Write as if you are planning these routes (\"I notice...\", \"I'll group...\"). "
-    "Be specific about node IDs and approximate positions. "
-    "Do NOT use bullet points, numbered lists, or markdown headers — write flowing prose. "
-    "Do NOT mention that routes were given or assigned to you."
+    "You are a logistics route planning expert solving a CVRP. "
+    "Write a concise strategy analysis (100-150 words) in first person, "
+    "describing how you would plan the routes for this problem.\n\n"
+    "Cover: the geographic layout of nodes, how they naturally cluster, "
+    "demand balancing across routes, and the visit order logic within each "
+    "group (e.g. sweep direction, nearest-neighbor).\n\n"
+    "Write as original planning (\"I notice...\", \"I'll group...\", "
+    "\"Starting from depot...\"). Be specific about node IDs and positions. "
+    "Do NOT use bullet points, numbered lists, or markdown headers — write "
+    "flowing prose. Your output must read as if you are deciding the routes "
+    "yourself, not describing or referencing any pre-existing solution."
 )
 
 
@@ -91,10 +91,9 @@ def build_strategy_prompt(user_prompt: str, sections: dict, problem_type: str) -
 
     user_content = (
         f"{user_prompt}\n\n"
-        f"Route assignments:\n"
+        f"######\n"
         + "\n".join(route_lines)
-        + f"\n\nTemplate analysis for reference (rewrite in natural language):\n"
-        f"{template_strategy}"
+        + f"\n######"
     )
 
     return {"system": STRATEGY_SYSTEM, "user": user_content}
@@ -154,6 +153,7 @@ def quality_check_strategy(text: str) -> tuple[bool, str]:
     leak_words = [
         "given", "provided", "assigned", "expected",
         "the routes are", "the solution is",
+        "pre-existing", "above routes", "these routes are",
     ]
     for w in leak_words:
         if w in lower:
