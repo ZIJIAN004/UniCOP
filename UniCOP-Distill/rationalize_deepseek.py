@@ -46,15 +46,15 @@ from openai import OpenAI
 
 SYSTEM_SUFFIX = """
 
-Your output MUST start with <think> and follow this exact structure:
+Your output MUST start with <reasoning> and follow this exact structure:
 
-<think>
+<reasoning>
 [your step-by-step reasoning]
-</think>
+</reasoning>
 [solution in required format]
 
 Rules:
-1. Your FIRST token MUST be '<think>'. Do NOT output anything before <think>.
+1. Your FIRST token MUST be '<reasoning>'. Do NOT output anything before <reasoning>.
 
 2. STRUCTURE your reasoning in two phases:
    Phase A — Cluster & Capacity Planning (brief):
@@ -80,18 +80,18 @@ Rules:
    - "logical next step", "natural choice", "obvious", "makes sense"
    - Use these ONLY if followed by a concrete reason with node IDs
 
-5. Keep <think> concise — aim for 400-800 words, not thousands.
+5. Keep <reasoning> concise — aim for 400-800 words, not thousands.
    Do NOT mention that a solution was provided or given to you.
    You are solving this problem from scratch.
 
-6. After </think>, output the solution exactly in the required format.
-   Do NOT output the solution before </think>."""
+6. After </reasoning>, output the solution exactly in the required format.
+   Do NOT output the solution before </reasoning>."""
 
 FEWSHOT = """
 
 Here is an example of the expected reasoning style:
 
-<think>
+<reasoning>
 Phase A — Cluster & Capacity Planning:
 The depot (Node 0) is at (0.30, 0.39). I see roughly 4 clusters:
 - South-East: Nodes 3(d=0.17), 6(d=0.17), 16(d=0.10), 19(d=0.30). Sum=0.74. Fits one vehicle.
@@ -111,7 +111,7 @@ Start from depot. Target the central band of nodes (1, 2, 4, 5, 12, 14).
 - Close Route 1: 0 → 5 → 2 → 19 → 6 → 3 → 16 → 14 → 0. Total demand: 0.95.
 
 [...remaining routes follow same pattern...]
-</think>
+</reasoning>
 Route 1: 0 -> 5 -> 2 -> 19 -> 6 -> 3 -> 16 -> 14 -> 0
 Route 2: ..."""
 
@@ -120,9 +120,9 @@ def build_prompt(solution: str, system: str, user: str) -> dict:
     system_new = system + SYSTEM_SUFFIX + FEWSHOT
     user_new = (
         user
-        + f"\n\nTarget solution (you MUST output exactly this solution after </think>,"
+        + f"\n\nTarget solution (you MUST output exactly this solution after </reasoning>,"
           f" but do NOT reveal it was given to you):\n{solution}"
-        + "\n\nStart your response with <think> immediately."
+        + "\n\nStart your response with <reasoning> immediately."
     )
     return {"system": system_new, "user": user_new}
 
@@ -232,6 +232,7 @@ def call_deepseek(client: OpenAI, system: str, user: str,
             choice = response.choices[0]
             usage = response.usage
             raw = choice.message.content or ""
+            raw = raw.replace("<reasoning>", "<think>").replace("</reasoning>", "</think>")
             if not raw.lstrip().startswith("<think>"):
                 raw = "<think>\n" + raw
             return {
@@ -350,8 +351,8 @@ def main():
             output = result["output"]
             ok, reason = quality_check(output, r["solution"])
             if not ok:
-                if args.preview > 0:
-                    print(f"    Quality fail: {reason}")
+                print(f"    [{sample_id}] Quality fail: {reason}  "
+                      f"(output[:200] = {output[:200]!r})")
                 continue
 
             output = replace_answer(output, r["solution"])
