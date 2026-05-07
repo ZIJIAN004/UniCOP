@@ -123,7 +123,8 @@ def _parse_multi_routes(text: str) -> tuple[list[list[int]], str]:
     return routes, "ok"
 
 
-def quality_check(output: str, solution: str) -> tuple[bool, str]:
+def quality_check(output: str, solution: str,
+                  max_output_tokens: int = 0) -> tuple[bool, str]:
     if "<think>" not in output or "</think>" not in output:
         return False, "NO_THINK_TAGS"
 
@@ -305,6 +306,10 @@ def main():
                 continue
 
             output = result["output"]
+            out_tokens = result["output_tokens"] or 0
+            if args.max_tokens and out_tokens >= args.max_tokens:
+                print(f"    [{sample_id}] Skipped: output_tokens={out_tokens} >= {args.max_tokens} (truncated)")
+                continue
             ok, reason = quality_check(output, r["solution"])
             if not ok:
                 print(f"    [{sample_id}] Quality fail: {reason}  "
