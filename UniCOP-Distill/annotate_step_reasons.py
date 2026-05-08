@@ -307,13 +307,20 @@ def call_llm(client: OpenAI, system: str, user: str,
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                max_tokens=128,
+                max_tokens=2048,
                 extra_body={"thinking": {"type": "enabled"}},
             )
-            content = response.choices[0].message.content or ""
+            msg = response.choices[0].message
+            content = msg.content or ""
             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
             if content.startswith("</think>"):
                 content = content[len("</think>"):].strip()
+
+            if not content:
+                reasoning = getattr(msg, 'reasoning_content', '') or ""
+                if reasoning:
+                    lines = [l.strip() for l in reasoning.strip().split('\n') if l.strip()]
+                    content = lines[-1] if lines else ""
 
             usage = response.usage
             return {
