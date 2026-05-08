@@ -2,10 +2,11 @@
 # Hybrid CVRP20 SFT: 在 template SFT 产物上继续训练 hybrid 数据
 #
 # 流程:
-#   Step 0: 检查基座模型——如果是 LoRA adapter 则先合并为完整权重
-#   Step 1: SFT 训练（hybrid 数据，3 epoch）
-#   Step 2: 合并 LoRA adapter
-#   Step 3: 评估
+#   Step 0:   检查基座模型——如果是 LoRA adapter 则先合并为完整权重
+#   Step 0.5: 断点续训检查——有 checkpoint 则合并其 LoRA adapter，计算剩余 epoch
+#   Step 1:   SFT 训练（hybrid 数据，首次 3 epoch / 续训剩余 epoch）
+#   Step 2:   合并 LoRA adapter
+#   Step 3:   评估
 #
 # 使用方法：
 #   sbatch submit_sft_hybrid_cvrp20.sh
@@ -125,35 +126,91 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════
-# Step 1: SFT 训练
+# Step 0.5: 断点续训检查
+#   checkpoint 保存的是 LoRA adapter，续训前需合并回基座得到完整权重，
+#   再以此为新 --model 继续 LoRA 训练剩余 epoch。
 # ══════════════════════════════════════════════════════════════════
 echo ""
-echo ">>> Step 1: SFT 训练（等待至少 ${SFT_NUM_GPUS} 张空闲 GPU）..."
+echo ">>> Step 0.5: 检查断点..."
 
-SFT_GPU_LIST=($(wait_for_free_gpus $SFT_NUM_GPUS))
-SFT_CUDA_DEVICES=$(IFS=,; echo "${SFT_GPU_LIST[*]}")
-echo "  使用 GPU: $SFT_CUDA_DEVICES"
+REMAINING_EPOCHS=$SFT_EPOCHS
+SKIP_TRAINING=false
 
-CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
-    --num_processes $SFT_NUM_GPUS \
-    --main_process_port 29601 \
-    stage2_reasoning/train_sft_stage2.py \
-    --model "$MODEL_PATH" \
-    --data "$CHAINS_FILE" \
-    --filter_problems $PROBLEM \
-    --filter_sizes $SIZE \
-    --lora_rank $SFT_LORA_RANK --lora_alpha $SFT_LORA_ALPHA \
-    --max_length $SFT_MAX_LENGTH \
-    --output_dir "$OUTPUT_DIR" \
-    --zero_stage 3 \
-    --gradient_checkpointing \
-    --epochs $SFT_EPOCHS \
-    --batch_size 1 \
-    --grad_accum 8 \
-    --lr $SFT_LR \
-    --save_steps 500
+if [ -d "$OUTPUT_DIR" ]; then
+    LATEST_CKPT=$(ls -d "$OUTPUT_DIR"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1 || true)
+    if [ -n "$LATEST_CKPT" ] && [ -f "$LATEST_CKPT/trainer_state.json" ]; then
+        echo "  检测到断点: $LATEST_CKPT"
 
-notify "Step1 完成: Hybrid SFT 训练"
+        COMPLETED_EPOCHS=$(python3 -c "
+import json, math
+with open('$LATEST_CKPT/trainer_state.json') as f:
+    state = json.load(f)
+print(int(math.floor(state['epoch'])))
+")
+        echo "  已完成 $COMPLETED_EPOCHS / $SFT_EPOCHS epochs"
+        REMAINING_EPOCHS=$((SFT_EPOCHS - COMPLETED_EPOCHS))
+
+        if [ "$REMAINING_EPOCHS" -le 0 ]; then
+            echo "  训练已完成，跳过 Step 1"
+            SKIP_TRAINING=true
+        else
+            echo "  剩余 $REMAINING_EPOCHS epochs，合并断点 LoRA adapter 为完整权重..."
+            RESUMED_MODEL="$OUTPUT_DIR/resumed_model"
+            python stage1_solution/merge_adapter.py \
+                --adapter_path "$LATEST_CKPT" \
+                --output_path "$RESUMED_MODEL"
+            MODEL_PATH="$RESUMED_MODEL"
+
+            rm -rf "$OUTPUT_DIR"/checkpoint-*
+            echo "  ✓ 断点合并完成，从 $MODEL_PATH 续训 $REMAINING_EPOCHS epochs"
+            notify "断点恢复: 合并 $(basename $LATEST_CKPT), 续训 $REMAINING_EPOCHS epochs"
+        fi
+    else
+        echo "  未发现可用断点，从头训练"
+    fi
+else
+    echo "  输出目录不存在，从头训练"
+fi
+
+# ══════════════════════════════════════════════════════════════════
+# Step 1: SFT 训练
+# ══════════════════════════════════════════════════════════════════
+if [ "$SKIP_TRAINING" = false ]; then
+    echo ""
+    echo ">>> Step 1: SFT 训练 ($REMAINING_EPOCHS epochs, 等待 ${SFT_NUM_GPUS} 张空闲 GPU)..."
+
+    SFT_GPU_LIST=($(wait_for_free_gpus $SFT_NUM_GPUS))
+    SFT_CUDA_DEVICES=$(IFS=,; echo "${SFT_GPU_LIST[*]}")
+    echo "  使用 GPU: $SFT_CUDA_DEVICES"
+
+    CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
+        --num_processes $SFT_NUM_GPUS \
+        --main_process_port 29601 \
+        stage2_reasoning/train_sft_stage2.py \
+        --model "$MODEL_PATH" \
+        --data "$CHAINS_FILE" \
+        --filter_problems $PROBLEM \
+        --filter_sizes $SIZE \
+        --lora_rank $SFT_LORA_RANK --lora_alpha $SFT_LORA_ALPHA \
+        --max_length $SFT_MAX_LENGTH \
+        --output_dir "$OUTPUT_DIR" \
+        --zero_stage 3 \
+        --gradient_checkpointing \
+        --epochs $REMAINING_EPOCHS \
+        --batch_size 1 \
+        --grad_accum 8 \
+        --lr $SFT_LR \
+        --save_steps 500
+
+    if [ -d "$OUTPUT_DIR/resumed_model" ]; then
+        rm -rf "$OUTPUT_DIR/resumed_model"
+    fi
+
+    notify "Step1 完成: Hybrid SFT 训练"
+else
+    echo ""
+    echo ">>> Step 1: 跳过（训练已完成）"
+fi
 
 # ══════════════════════════════════════════════════════════════════
 # Step 2: 合并 LoRA adapter
@@ -161,10 +218,13 @@ notify "Step1 完成: Hybrid SFT 训练"
 echo ""
 echo ">>> Step 2: 合并 LoRA adapter..."
 
-python stage1_solution/merge_adapter.py \
-    --adapter_path "$OUTPUT_DIR/final_model"
-
-notify "Step2 完成: adapter 合并"
+if [ -f "$OUTPUT_DIR/final_model/adapter_config.json" ]; then
+    python stage1_solution/merge_adapter.py \
+        --adapter_path "$OUTPUT_DIR/final_model"
+    notify "Step2 完成: adapter 合并"
+else
+    echo "  final_model 已是完整权重，跳过合并"
+fi
 
 # ══════════════════════════════════════════════════════════════════
 # Step 3: 评估
