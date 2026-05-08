@@ -19,7 +19,6 @@
 
 import argparse
 import json
-import math
 import os
 import re
 import threading
@@ -66,12 +65,6 @@ def parse_problem(user_prompt: str) -> dict | None:
     if not nodes:
         return None
     return {"capacity": capacity, "nodes": nodes}
-
-
-def _dist(nodes, a, b):
-    dx = nodes[a]["x"] - nodes[b]["x"]
-    dy = nodes[a]["y"] - nodes[b]["y"]
-    return math.sqrt(dx * dx + dy * dy)
 
 
 # ── think 结构解析 ────────────────────────────────────────────────────────────
@@ -162,8 +155,9 @@ def parse_step_line(line: str) -> dict | None:
 
     if step_num == 1:
         step_type = "route_start"
-    elif feasible and feasible[0]["node"] != selected:
-        step_type = "non_nearest"
+    elif feasible:
+        nearest = min(feasible, key=lambda c: c["dist"])
+        step_type = "non_nearest" if nearest["node"] != selected else "normal"
     else:
         step_type = "normal"
 
@@ -241,7 +235,7 @@ def build_reason_prompt(step: dict, problem: dict) -> str:
 
     if step_type == "non_nearest":
         selected = step["selected"]
-        nearest = step["feasible"][0]
+        nearest = min(step["feasible"], key=lambda c: c["dist"])
         return (
             f"CVRP, {len(nodes)-1} customers, capacity={cap}.\n"
             f"Current position: node {curr} {curr_coord}, "
