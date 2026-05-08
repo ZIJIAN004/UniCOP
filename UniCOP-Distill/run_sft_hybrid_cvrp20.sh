@@ -138,33 +138,45 @@ SKIP_TRAINING=false
 
 if [ -d "$OUTPUT_DIR" ]; then
     LATEST_CKPT=$(ls -d "$OUTPUT_DIR"/checkpoint-* 2>/dev/null | sort -t- -k2 -n | tail -1 || true)
+
     if [ -n "$LATEST_CKPT" ] && [ -f "$LATEST_CKPT/trainer_state.json" ]; then
         echo "  检测到断点: $LATEST_CKPT"
 
-        COMPLETED_EPOCHS=$(python3 -c "
+        RUN_EPOCHS=$SFT_EPOCHS
+        if [ -f "$OUTPUT_DIR/resumed_epochs" ]; then
+            RUN_EPOCHS=$(cat "$OUTPUT_DIR/resumed_epochs")
+        fi
+
+        COMPLETED_IN_RUN=$(python3 -c "
 import json, math
 with open('$LATEST_CKPT/trainer_state.json') as f:
     state = json.load(f)
 print(int(math.floor(state['epoch'])))
 ")
-        echo "  已完成 $COMPLETED_EPOCHS / $SFT_EPOCHS epochs"
-        REMAINING_EPOCHS=$((SFT_EPOCHS - COMPLETED_EPOCHS))
+        REMAINING_EPOCHS=$((RUN_EPOCHS - COMPLETED_IN_RUN))
+        echo "  本轮 $RUN_EPOCHS epochs, 已完成 $COMPLETED_IN_RUN, 剩余 $REMAINING_EPOCHS"
 
         if [ "$REMAINING_EPOCHS" -le 0 ]; then
             echo "  训练已完成，跳过 Step 1"
             SKIP_TRAINING=true
         else
-            echo "  剩余 $REMAINING_EPOCHS epochs，合并断点 LoRA adapter 为完整权重..."
+            echo "  合并断点 LoRA adapter 为完整权重..."
             RESUMED_MODEL="$OUTPUT_DIR/resumed_model"
             python stage1_solution/merge_adapter.py \
                 --adapter_path "$LATEST_CKPT" \
                 --output_path "$RESUMED_MODEL"
             MODEL_PATH="$RESUMED_MODEL"
-
+            echo "$REMAINING_EPOCHS" > "$OUTPUT_DIR/resumed_epochs"
             rm -rf "$OUTPUT_DIR"/checkpoint-*
-            echo "  ✓ 断点合并完成，从 $MODEL_PATH 续训 $REMAINING_EPOCHS epochs"
-            notify "断点恢复: 合并 $(basename $LATEST_CKPT), 续训 $REMAINING_EPOCHS epochs"
+            echo "  ✓ 从 $MODEL_PATH 续训 $REMAINING_EPOCHS epochs"
+            notify "断点恢复: 续训 $REMAINING_EPOCHS epochs"
         fi
+
+    elif [ -f "$OUTPUT_DIR/resumed_model/config.json" ] && [ -f "$OUTPUT_DIR/resumed_epochs" ]; then
+        REMAINING_EPOCHS=$(cat "$OUTPUT_DIR/resumed_epochs")
+        MODEL_PATH="$OUTPUT_DIR/resumed_model"
+        echo "  使用上次已合并的断点模型，续训 $REMAINING_EPOCHS epochs"
+
     else
         echo "  未发现可用断点，从头训练"
     fi
@@ -179,13 +191,14 @@ if [ "$SKIP_TRAINING" = false ]; then
     echo ""
     echo ">>> Step 1: SFT 训练 ($REMAINING_EPOCHS epochs)..."
 
-    if [ -n "${SLURM_JOB_ID:-}" ]; then
-        SFT_CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
-        echo "  SLURM 环境，使用已分配 GPU: $SFT_CUDA_DEVICES"
+    if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
+        SFT_CUDA_DEVICES="$CUDA_VISIBLE_DEVICES"
+        echo "  使用已有 CUDA_VISIBLE_DEVICES: $SFT_CUDA_DEVICES"
     else
+        echo "  CUDA_VISIBLE_DEVICES 未设置，等待空闲 GPU..."
         SFT_GPU_LIST=($(wait_for_free_gpus $SFT_NUM_GPUS))
         SFT_CUDA_DEVICES=$(IFS=,; echo "${SFT_GPU_LIST[*]}")
-        echo "  使用 GPU: $SFT_CUDA_DEVICES"
+        echo "  检测到 GPU: $SFT_CUDA_DEVICES"
     fi
 
     CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
@@ -207,9 +220,8 @@ if [ "$SKIP_TRAINING" = false ]; then
         --lr $SFT_LR \
         --save_steps 500
 
-    if [ -d "$OUTPUT_DIR/resumed_model" ]; then
-        rm -rf "$OUTPUT_DIR/resumed_model"
-    fi
+    rm -f "$OUTPUT_DIR/resumed_epochs"
+    rm -rf "$OUTPUT_DIR/resumed_model"
 
     notify "Step1 完成: Hybrid SFT 训练"
 else
