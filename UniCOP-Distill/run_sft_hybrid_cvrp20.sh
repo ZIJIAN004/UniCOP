@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-_SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+_SELF_DIR="$(pwd)"
 LOG_FILE="$_SELF_DIR/sft_hybrid_cvrp20_$(date '+%Y%m%d_%H%M%S').log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 echo "日志文件: $LOG_FILE"
