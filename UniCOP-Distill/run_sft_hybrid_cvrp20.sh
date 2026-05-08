@@ -177,11 +177,16 @@ fi
 # ══════════════════════════════════════════════════════════════════
 if [ "$SKIP_TRAINING" = false ]; then
     echo ""
-    echo ">>> Step 1: SFT 训练 ($REMAINING_EPOCHS epochs, 等待 ${SFT_NUM_GPUS} 张空闲 GPU)..."
+    echo ">>> Step 1: SFT 训练 ($REMAINING_EPOCHS epochs)..."
 
-    SFT_GPU_LIST=($(wait_for_free_gpus $SFT_NUM_GPUS))
-    SFT_CUDA_DEVICES=$(IFS=,; echo "${SFT_GPU_LIST[*]}")
-    echo "  使用 GPU: $SFT_CUDA_DEVICES"
+    if [ -n "${SLURM_JOB_ID:-}" ]; then
+        SFT_CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
+        echo "  SLURM 环境，使用已分配 GPU: $SFT_CUDA_DEVICES"
+    else
+        SFT_GPU_LIST=($(wait_for_free_gpus $SFT_NUM_GPUS))
+        SFT_CUDA_DEVICES=$(IFS=,; echo "${SFT_GPU_LIST[*]}")
+        echo "  使用 GPU: $SFT_CUDA_DEVICES"
+    fi
 
     CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
         --num_processes $SFT_NUM_GPUS \
