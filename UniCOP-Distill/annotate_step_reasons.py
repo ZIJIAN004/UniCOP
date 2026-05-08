@@ -286,7 +286,8 @@ def quality_check_reason(text: str) -> tuple[bool, str]:
     if re.search(r'\[R\d', text):
         return False, "CONTAINS_STEP_LABEL"
 
-    if text.count(".") > 2:
+    sentence_ends = len(re.findall(r'\.\s+[A-Z]', text)) + (1 if text.endswith(".") else 0)
+    if sentence_ends > 2:
         return False, "TOO_MANY_SENTENCES"
 
     return True, "ok"
