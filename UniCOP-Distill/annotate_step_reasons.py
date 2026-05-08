@@ -307,9 +307,8 @@ def call_llm(client: OpenAI, system: str, user: str,
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                temperature=temperature,
                 max_tokens=128,
-                extra_body={"thinking": {"type": "enabled", "budget_tokens": 1024}},
+                extra_body={"thinking": {"type": "enabled"}},
             )
             content = response.choices[0].message.content or ""
             content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
