@@ -31,11 +31,16 @@ from openai import OpenAI
 
 
 REASON_SYSTEM = (
-    "You are annotating a vehicle routing step with a brief reason for the selection. "
-    "Given the current state (capacity, feasible candidates with distances and demands, "
-    "unvisited nodes), explain in 15-30 words why this particular choice was made. "
-    "Be specific: reference node IDs, distances, demands, or capacity constraints. "
-    "Do NOT use bullet points or formatting. Write a single flowing phrase."
+    "Write a SHORT reason (10-20 words) for a vehicle routing decision. "
+    "Rules:\n"
+    "- Do NOT start with \"Node X was chosen/selected\" — start with the reason directly\n"
+    "- Use lowercase, no period at end\n"
+    "- Reference specific numbers (distances, demands, capacity) only when they drive the decision\n"
+    "- Examples of good style:\n"
+    "  \"closer to remaining southwest cluster, preserving capacity for high-demand nodes\"\n"
+    "  \"demand 0.30 fits tightly, using capacity before starting new route\"\n"
+    "  \"nearest node 14 belongs to a different cluster, so skip to node 3\"\n"
+    "  \"low remaining cap 0.04 makes serving node 1 wasteful, better restart\"\n"
 )
 
 
@@ -203,7 +208,9 @@ def build_reason_prompt(step: dict, problem: dict) -> str:
     cap = problem["capacity"]
     step_type = step["type"]
 
-    cap_m = re.search(r'cap=([\d.]+)', step["line"])
+    cap_m = re.search(r'cap=[\d.]+-[\d.]+=([\d.]+)', step["line"])
+    if not cap_m:
+        cap_m = re.search(r'cap=([\d.]+)', step["line"])
     current_cap = float(cap_m.group(1)) if cap_m else cap
 
     curr = step["current_node"]
@@ -276,7 +283,7 @@ def quality_check_reason(text: str) -> tuple[bool, str]:
     words = text.split()
     if len(words) < 5:
         return False, "TOO_SHORT"
-    if len(words) > 80:
+    if len(words) > 35:
         return False, "TOO_LONG"
 
     for c in ("→", "|", "\n", "\r"):
