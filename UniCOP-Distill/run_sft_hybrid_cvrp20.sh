@@ -172,8 +172,10 @@ print(int(math.floor(state['epoch'])))
             notify "断点恢复: 续训 $REMAINING_EPOCHS epochs"
         fi
 
-    elif [ -f "$OUTPUT_DIR/resumed_model/config.json" ] && [ -f "$OUTPUT_DIR/resumed_epochs" ]; then
-        REMAINING_EPOCHS=$(cat "$OUTPUT_DIR/resumed_epochs")
+    elif [ -f "$OUTPUT_DIR/resumed_model/config.json" ]; then
+        if [ -f "$OUTPUT_DIR/resumed_epochs" ]; then
+            REMAINING_EPOCHS=$(cat "$OUTPUT_DIR/resumed_epochs")
+        fi
         MODEL_PATH="$OUTPUT_DIR/resumed_model"
         echo "  使用上次已合并的断点模型，续训 $REMAINING_EPOCHS epochs"
 
@@ -191,17 +193,9 @@ if [ "$SKIP_TRAINING" = false ]; then
     echo ""
     echo ">>> Step 1: SFT 训练 ($REMAINING_EPOCHS epochs)..."
 
-    if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
-        SFT_CUDA_DEVICES="$CUDA_VISIBLE_DEVICES"
-        echo "  使用已有 CUDA_VISIBLE_DEVICES: $SFT_CUDA_DEVICES"
-    else
-        echo "  CUDA_VISIBLE_DEVICES 未设置，等待空闲 GPU..."
-        SFT_GPU_LIST=($(wait_for_free_gpus $SFT_NUM_GPUS))
-        SFT_CUDA_DEVICES=$(IFS=,; echo "${SFT_GPU_LIST[*]}")
-        echo "  检测到 GPU: $SFT_CUDA_DEVICES"
-    fi
+    echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 
-    CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
+    accelerate launch \
         --num_processes $SFT_NUM_GPUS \
         --main_process_port 29601 \
         stage2_reasoning/train_sft_stage2.py \
