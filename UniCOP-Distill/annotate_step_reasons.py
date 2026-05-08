@@ -309,10 +309,10 @@ def call_llm(client: OpenAI, system: str, user: str,
                 ],
                 temperature=temperature,
                 max_tokens=128,
-                extra_body={"thinking": {"type": "disabled"}},
+                extra_body={"thinking": {"type": "enabled", "budget_tokens": 1024}},
             )
             content = response.choices[0].message.content or ""
-            content = content.strip()
+            content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
             if content.startswith("</think>"):
                 content = content[len("</think>"):].strip()
 
