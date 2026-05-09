@@ -32,7 +32,7 @@ from peft import LoraConfig
 # ── 默认参数 ────────────────────────────────────────────────────────────────────
 
 DEFAULT_MODEL = "./output_sft_stage1/final_model"  # Stage 1 输出，或原始 base model 路径
-DEFAULT_DATA  = "data/chains_v3_clean.jsonl"
+DEFAULT_DATA  = ["data/chains_v3_clean.jsonl"]
 
 # generate_chains.py 中追加到 system prompt 的后验推理后缀（用于定位和剥离）
 _POSTHOC_SYSTEM_MARKER = "\n\nYour output MUST start with <think>"
@@ -131,11 +131,14 @@ def _detect_response_template(tokenizer) -> str:
     return gen_prompt
 
 
-def load_sft_dataset(data_path: str, tokenizer, max_length: int,
+def load_sft_dataset(data_path, tokenizer, max_length: int,
                      max_output_length: int = 4096,
                      filter_problems=None, filter_sizes=None) -> Dataset:
     """
     从 chains.jsonl 加载数据，构建 Stage 2 SFT 训练集。
+
+    `data_path` 可以是单个文件路径 (str) 或多个文件路径 (list[str])。
+    多文件时会按顺序读入并拼接，过滤、长度统计、首条样本验证均针对合集执行。
 
     基座模型为 Qwen2.5-Instruct（经 Stage 1 微调），其 chat_template 末尾
     不带 <think>，需手动在 prompt 末尾补 <think>\\n。
@@ -169,64 +172,70 @@ def load_sft_dataset(data_path: str, tokenizer, max_length: int,
         print("  [WARN] chat_template 末尾没有 <think> 前缀, 将在手动拼接时显式补一个")
         print(f"         (探针末尾 50 字: {probe_prompt[-50:]!r})")
 
-    with open(data_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError:
-                skipped += 1
-                continue
+    data_paths = [data_path] if isinstance(data_path, str) else list(data_path)
 
-            if filter_problems and r.get("problem_type") not in filter_problems:
-                continue
-            if filter_sizes and r.get("n") not in filter_sizes:
-                continue
+    for path in data_paths:
+        per_file_loaded = 0
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
 
-            orig_system = strip_posthoc_system(r["prompt"]["system"])
-            orig_user   = strip_posthoc_user(r["prompt"]["user"])
-            output      = r["output"]
+                if filter_problems and r.get("problem_type") not in filter_problems:
+                    continue
+                if filter_sizes and r.get("n") not in filter_sizes:
+                    continue
 
-            if not output or not output.strip():
-                skipped += 1
-                continue
+                orig_system = strip_posthoc_system(r["prompt"]["system"])
+                orig_user   = strip_posthoc_user(r["prompt"]["user"])
+                output      = r["output"]
 
-            # 1. 用 chat_template 只渲染到 <|Assistant|><think>\n 为止 (作为 prompt)
-            prompt_text = tokenizer.apply_chat_template(
-                [{"role": "system", "content": orig_system},
-                 {"role": "user",   "content": orig_user}],
-                tokenize=False, add_generation_prompt=True,
-            )
+                if not output or not output.strip():
+                    skipped += 1
+                    continue
 
-            # 2. 探针兜底: Qwen2.5-Instruct 的 chat_template 末尾无 <think>,手动补
-            #    注意不能 rstrip()，否则会吃掉 ChatML 格式中 assistant 后的换行符
-            if not probe_ends_with_think:
-                prompt_text += "<think>\n"
+                # 1. 用 chat_template 只渲染到 <|Assistant|><think>\n 为止 (作为 prompt)
+                prompt_text = tokenizer.apply_chat_template(
+                    [{"role": "system", "content": orig_system},
+                     {"role": "user",   "content": orig_user}],
+                    tokenize=False, add_generation_prompt=True,
+                )
 
-            # 3. Gemini output 开头必有 <think> (generate_chains.py 强制),
-            #    和 prompt 末尾的 <think> 重复,剥掉
-            output_stripped = output.lstrip()
-            if output_stripped.startswith("<think>"):
-                output_stripped = output_stripped[len("<think>"):].lstrip("\n")
+                # 2. 探针兜底: Qwen2.5-Instruct 的 chat_template 末尾无 <think>,手动补
+                #    注意不能 rstrip()，否则会吃掉 ChatML 格式中 assistant 后的换行符
+                if not probe_ends_with_think:
+                    prompt_text += "<think>\n"
 
-            # 4. completion = thinking + </think> + answer + eos
-            #    (eos_token 显式加, 让模型学会"完整答案结束就停止")
-            completion_text = output_stripped + tokenizer.eos_token
+                # 3. Gemini output 开头必有 <think> (generate_chains.py 强制),
+                #    和 prompt 末尾的 <think> 重复,剥掉
+                output_stripped = output.lstrip()
+                if output_stripped.startswith("<think>"):
+                    output_stripped = output_stripped[len("<think>"):].lstrip("\n")
 
-            # output token 超长过滤
-            completion_token_len = len(tokenizer.encode(completion_text))
-            if completion_token_len > max_output_length:
-                skipped_too_long += 1
-                continue
+                # 4. completion = thinking + </think> + answer + eos
+                #    (eos_token 显式加, 让模型学会"完整答案结束就停止")
+                completion_text = output_stripped + tokenizer.eos_token
 
-            records.append({
-                "prompt":     prompt_text,
-                "completion": completion_text,
-                "problem_type": r.get("problem_type", "unknown"),
-                "n": r.get("n", 0),
-            })
+                # output token 超长过滤
+                completion_token_len = len(tokenizer.encode(completion_text))
+                if completion_token_len > max_output_length:
+                    skipped_too_long += 1
+                    continue
+
+                records.append({
+                    "prompt":     prompt_text,
+                    "completion": completion_text,
+                    "problem_type": r.get("problem_type", "unknown"),
+                    "n": r.get("n", 0),
+                })
+                per_file_loaded += 1
+        print(f"  [{path}] 加载 {per_file_loaded} 条")
 
     # ── 抽样打印第 1 条的 prompt 末尾 + completion 开头, 人眼验证结构 ──
     if records:
@@ -278,8 +287,8 @@ def main():
     parser.add_argument("--lora_alpha",   type=int, default=32)
 
     # 数据
-    parser.add_argument("--data",         type=str, default=DEFAULT_DATA,
-                        help="chains.jsonl 文件路径")
+    parser.add_argument("--data",         type=str, nargs="+", default=DEFAULT_DATA,
+                        help="chains.jsonl 文件路径，可传多个（按顺序拼接训练集）")
     parser.add_argument("--filter_problems", type=str, nargs="+", default=None,
                         help="只训练指定问题类型，如 tsp cvrp")
     parser.add_argument("--filter_sizes", type=int, nargs="+", default=None,
@@ -325,7 +334,8 @@ def main():
     print(f"{'='*60}")
     print(f"  SFT 蒸馏训练")
     print(f"  模型:       {args.model}")
-    print(f"  数据:       {args.data}")
+    _data_show = args.data if isinstance(args.data, str) else ", ".join(args.data)
+    print(f"  数据:       {_data_show}")
     print(f"  LoRA:       {'关闭' if args.no_lora else f'rank={args.lora_rank}'}")
     print(f"  最大序列长: {args.max_length}")
     print(f"  最大output: {args.max_output_length}")

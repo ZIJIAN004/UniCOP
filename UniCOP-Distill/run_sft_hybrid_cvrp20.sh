@@ -33,8 +33,9 @@ SIZE=20
 # 基座模型: template SFT 产物
 INPUT_MODEL_DIR="output_sft_template_${PROBLEM}${SIZE}/final_model"
 
-# 训练数据
+# 训练数据：原始 chains + annotated（关键步骤带 LLM 简短理由）一起喂入
 CHAINS_FILE="data/chains_hybrid_${PROBLEM}${SIZE}.jsonl"
+CHAINS_ANNOTATED="data/chains_hybrid_${PROBLEM}${SIZE}_annotated.jsonl"
 
 # 输出目录
 OUTPUT_DIR="output_sft_hybrid_${PROBLEM}${SIZE}"
@@ -89,19 +90,25 @@ trap 'notify "❌ Hybrid CVRP20 SFT 失败: line $LINENO"' ERR
 cd "$DISTILL_DIR"
 
 # ── 检查数据 ──────────────────────────────────────────────────────────────────
-if [ ! -f "$CHAINS_FILE" ]; then
-    echo "ERROR: 数据文件 $CHAINS_FILE 不存在"
-    exit 1
-fi
+for f in "$CHAINS_FILE" "$CHAINS_ANNOTATED"; do
+    if [ ! -f "$f" ]; then
+        echo "ERROR: 数据文件 $f 不存在"
+        exit 1
+    fi
+done
 DATA_COUNT=$(grep -c '^{' "$CHAINS_FILE" 2>/dev/null || echo 0)
+DATA_COUNT_ANN=$(grep -c '^{' "$CHAINS_ANNOTATED" 2>/dev/null || echo 0)
+DATA_TOTAL=$((DATA_COUNT + DATA_COUNT_ANN))
 
 echo "============================================================"
 echo "  Hybrid CVRP20 SFT + 评估"
-echo "  基座模型:  $INPUT_MODEL_DIR"
-echo "  数据:      $CHAINS_FILE ($DATA_COUNT 条)"
-echo "  GPU:       $SFT_NUM_GPUS 张"
-echo "  输出:      $OUTPUT_DIR"
-echo "  时间:      $(date)"
+echo "  基座模型:    $INPUT_MODEL_DIR"
+echo "  原始 chains: $CHAINS_FILE ($DATA_COUNT 条)"
+echo "  annotated:   $CHAINS_ANNOTATED ($DATA_COUNT_ANN 条)"
+echo "  合计:        $DATA_TOTAL 条"
+echo "  GPU:         $SFT_NUM_GPUS 张"
+echo "  输出:        $OUTPUT_DIR"
+echo "  时间:        $(date)"
 echo "============================================================"
 
 # ══════════════════════════════════════════════════════════════════
@@ -200,7 +207,7 @@ if [ "$SKIP_TRAINING" = false ]; then
         --main_process_port 29601 \
         stage2_reasoning/train_sft_stage2.py \
         --model "$MODEL_PATH" \
-        --data "$CHAINS_FILE" \
+        --data "$CHAINS_FILE" "$CHAINS_ANNOTATED" \
         --filter_problems $PROBLEM \
         --filter_sizes $SIZE \
         --lora_rank $SFT_LORA_RANK --lora_alpha $SFT_LORA_ALPHA \
@@ -267,12 +274,12 @@ python evaluate.py \
     --save_dir "$EVAL_SAVE_DIR"
 cd "$DISTILL_DIR"
 
-notify "✅ Hybrid CVRP20 全部完成" "模型: $OUTPUT_DIR, 数据: $DATA_COUNT 条, 评估结果在 eval_results_hybrid/"
+notify "✅ Hybrid CVRP20 全部完成" "模型: $OUTPUT_DIR, 数据: $DATA_TOTAL 条 (原 $DATA_COUNT + annotated $DATA_COUNT_ANN), 评估结果在 eval_results_hybrid/"
 
 echo ""
 echo "============================================================"
 echo "  完成! $(date)"
-echo "  数据:     $CHAINS_FILE ($DATA_COUNT 条)"
+echo "  数据:     $CHAINS_FILE ($DATA_COUNT) + $CHAINS_ANNOTATED ($DATA_COUNT_ANN) = $DATA_TOTAL 条"
 echo "  模型:     $OUTPUT_DIR/final_model"
 echo "  评估:     $EVAL_SAVE_DIR/"
 echo "============================================================"
