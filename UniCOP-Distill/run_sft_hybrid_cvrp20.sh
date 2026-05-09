@@ -214,9 +214,6 @@ if [ "$SKIP_TRAINING" = false ]; then
         --lr $SFT_LR \
         --save_steps 500
 
-    rm -f "$OUTPUT_DIR/resumed_epochs"
-    rm -rf "$OUTPUT_DIR/resumed_model"
-
     notify "Step1 完成: Hybrid SFT 训练"
 else
     echo ""
@@ -225,6 +222,9 @@ fi
 
 # ══════════════════════════════════════════════════════════════════
 # Step 2: 合并 LoRA adapter
+#   注意：必须在清理 resumed_model 之前完成，
+#   因为 final_model/adapter_config.json 的 base_model_name_or_path
+#   指向 resumed_model（断点续训分支）。
 # ══════════════════════════════════════════════════════════════════
 echo ""
 echo ">>> Step 2: 合并 LoRA adapter..."
@@ -236,6 +236,10 @@ if [ -f "$OUTPUT_DIR/final_model/adapter_config.json" ]; then
 else
     echo "  final_model 已是完整权重，跳过合并"
 fi
+
+# Step 2 完成后再清理断点续训的中间产物
+rm -f "$OUTPUT_DIR/resumed_epochs"
+rm -rf "$OUTPUT_DIR/resumed_model"
 
 # ══════════════════════════════════════════════════════════════════
 # Step 3: 评估
