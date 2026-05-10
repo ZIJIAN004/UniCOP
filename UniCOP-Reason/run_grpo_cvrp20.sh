@@ -26,15 +26,8 @@ echo "日志文件: $LOG_FILE"
 
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# vLLM 0.4.3~0.10.1.1 内部强制 NCCL_CUMEM_ENABLE=0 绕 NCCL bug;
-# 外部训练进程连入 vLLM NCCL 组时必须对齐, 否则 init_communicator 后 hang.
-# 参见: https://docs.vllm.ai/en/v0.7.2/getting_started/troubleshooting.html
-export NCCL_CUMEM_ENABLE=0
 # NCCL 环境不一致 / handshake 失败时立刻打 WARN, 不刷屏.
 export NCCL_DEBUG=WARN
-# PyTorch NCCL watchdog 默认 30min 才 abort, 缩到 5min;
-# ZeRO-3 + LoRA init 阶段的 4-rank ALLREDUCE 实测 < 30s, 5min 阈值充足.
-export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=300
 # SIGABRT/SIGSEGV 时强制打印 Python 调用栈, 否则只看到 'Signal 6 received'.
 export PYTHONFAULTHANDLER=1
 
