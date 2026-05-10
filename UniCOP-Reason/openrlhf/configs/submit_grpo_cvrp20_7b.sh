@@ -1,13 +1,16 @@
 #!/bin/bash
-# zhuoyi 主机 sbatch 提交脚本: CVRP n=100 · 7B · GRPO · LoRA · 5 卡
+# zhuoyi 主机 sbatch 提交脚本: CVRP n=20 · 7B · GRPO · LoRA · 5 卡
 #
 # 用法:
 #   sbatch openrlhf/configs/submit_grpo_cvrp20_7b.sh
 #
-# QOS=long: 5 天上限,优先级 5 (与现有 SFT 任务相同档位)
-# 5 张 GPU: 1 vLLM (含 reward server colocate) + 4 ZeRO-3 训练
+# QOS=large: 8 天上限,优先级 0,单 job ≤24 GPU。
+# 选 large 不选 long: 实测 long 单 job ≤2 GPU (QOSMaxGRESPerJob),5 卡被拒
+# 选 large 不选 normal: normal 单 job ≤4 GPU,本任务需 1 vLLM + 4 训练 = 5 卡
+# (训练侧 batch_size=32 与 train_gpus=4 绑定,grad_accum=8,降卡数会破坏整除关系)
+# 风险: 优先级 0,可能被高优先级作业抢占 (terminated and requeued)
 #
-#SBATCH --qos=long
+#SBATCH --qos=large
 #SBATCH --gpus=5
 #SBATCH --job-name=grpo_cvrp20
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason/openrlhf/logs/grpo_cvrp20_%j.log
