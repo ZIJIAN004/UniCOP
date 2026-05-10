@@ -138,6 +138,11 @@ trap 'on_exit' EXIT INT TERM
 cd "$WORK_DIR"
 
 echo "============================================================"
+echo "  GPU 拓扑 (诊断 NCCL 通信路径)"
+echo "============================================================"
+nvidia-smi topo -m 2>&1 || echo "(nvidia-smi topo unavailable)"
+echo ""
+echo "============================================================"
 echo "  GRPO + POMO PRM · CVRP n=$SIZE"
 echo "  基座模型:  $MODEL_BASE"
 echo "  GPU:       1 vLLM (GPU $VLLM_GPU) + $TRAIN_PROC 训练 (GPU $TRAIN_GPUS_CSV)"
