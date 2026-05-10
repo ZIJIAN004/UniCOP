@@ -26,6 +26,10 @@ echo "日志文件: $LOG_FILE"
 
 export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# vLLM 0.4.3~0.10.1.1 内部强制 NCCL_CUMEM_ENABLE=0 绕 NCCL bug;
+# 外部训练进程连入 vLLM NCCL 组时必须对齐, 否则 init_communicator 后 hang.
+# 参见: https://docs.vllm.ai/en/v0.7.2/getting_started/troubleshooting.html
+export NCCL_CUMEM_ENABLE=0
 
 # ── 配置 ──────────────────────────────────────────────────────────────
 PROBLEM="cvrp"
