@@ -46,6 +46,7 @@ OpenRLHF /get_reward 请求格式 (0.10.2):
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
