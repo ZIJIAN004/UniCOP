@@ -85,7 +85,7 @@ start_vllm_server() {
         --gpu_memory_utilization "$VLLM_GPU_MEM_UTIL" \
         --max_model_len "$VLLM_MAX_MODEL_LEN" \
         --dtype "$VLLM_DTYPE" \
-        --enable_prefix_caching \
+        --enable_prefix_caching True \
         > "$VLLM_LOG" 2>&1 &
     VLLM_PID=$!
 
