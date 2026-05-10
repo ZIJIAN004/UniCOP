@@ -30,6 +30,14 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export NCCL_DEBUG=WARN
 # SIGABRT/SIGSEGV 时强制打印 Python 调用栈, 否则只看到 'Signal 6 received'.
 export PYTHONFAULTHANDLER=1
+# NCCL 2.21.5 在 PCIe-only / 跨 PCIe Host Bridge 拓扑 (NODE/PHB/SYS) 下,
+# P2P 不可用 + cuMem allocator 有已知 bug (NVIDIA/nccl#1838, #2079),
+# ZeRO-3 init 第一次 collective 会进入 deadlock spin-wait。
+# 兜底方案: 禁用 P2P + 禁用 SHM 共享内存, 强制走 sockets。
+# 代价: 通信慢 30-50% (ZeRO-3 影响大, GRPO 因 generation 主导影响小)。
+# zhuoyi 拓扑无 NVLink, 实测同 NUMA NODE 拓扑下也会触发, 所以必须开。
+export NCCL_P2P_DISABLE=1
+export NCCL_SHM_DISABLE=1
 
 # ── 配置 ──────────────────────────────────────────────────────────────
 PROBLEM="cvrp"
