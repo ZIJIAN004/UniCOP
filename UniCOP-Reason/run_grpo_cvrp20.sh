@@ -43,10 +43,14 @@ if [ ! -d "$MODEL_BASE" ]; then
 fi
 echo "[MODEL_BASE] $MODEL_BASE"
 
-# GPU 分配: 总 5 卡, GPU 0 跑 vLLM server, GPU 1-4 跑训练
+# GPU 分配: zhuoyi 5 卡布局是 GPU0-3 同 NUMA 0 (NODE 互连),
+# GPU4 单独在 NUMA 1 (跟 GPU0-3 是 SYS 跨 NUMA)。
+# 训练 NCCL 集合通信对拓扑敏感, NCCL 2.21.5 在跨 NUMA + 无 NVLink 拓扑下
+# 会触发 #2079 的 collective deadlock。所以训练放在同 NUMA 同 PCIe bridge
+# 的 GPU0-3, vLLM 单独丢到 NUMA 1 的 GPU4 (跟训练隔离, NUMA 边界即可)。
 TOTAL_GPUS=5
-VLLM_GPU=0
-TRAIN_GPUS_CSV="1,2,3,4"
+VLLM_GPU=4
+TRAIN_GPUS_CSV="0,1,2,3"
 TRAIN_PROC=4
 
 ZERO_STAGE=3
