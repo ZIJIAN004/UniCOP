@@ -172,9 +172,12 @@ class GRPOPRMTrainer(GRPOTrainer):
         eos_id = self.processing_class.eos_token_id
         total_resampled = 0
 
-        # ── 一次性诊断: 单 rank 看到的 B vs num_gen ──────────────────────
+        # ── 一次性诊断: 单 rank 看到的 B vs num_gen + prompt 分布 ──────
         # B // num_gen == 0 时, 下面的 for g 循环跑 0 次, resample/A_outcome/
-        # A_feasibility z-score 全失效. 用这条 print 实证一次.
+        # A_feasibility z-score 全失效.
+        # 跨 rank 比对 prompt_hash 区分:
+        #   - hash 全不同  → 每 rank 看到独立 prompts (情况 A 或 B, 看 num_groups)
+        #   - hash 全相同  → 同一 prompt 的 num_gen 被切到多 rank (情况 C, 需跨 rank gather)
         if not getattr(self, "_batch_diag_logged", False):
             rank = self.accelerator.process_index
             feas_per_group = []
@@ -186,10 +189,18 @@ class GRPOPRMTrainer(GRPOTrainer):
                         completions_text[i], instances[i], problem_type_list[i]
                     )
                 ))
+            # 用 prompt_ids 前 32 token 求和当 hash, 跨 rank 比对
+            p_ids = batch["prompt_ids"]
+            first_prompt_hash = int(p_ids[0, :32].sum().item()) if B >= 1 else -1
+            last_prompt_hash  = int(p_ids[-1, :32].sum().item()) if B >= 1 else -1
+            distinct_in_rank  = len({
+                int(p_ids[i, :32].sum().item()) for i in range(min(B, 16))
+            })
             print(
                 f"[BATCH_DIAG rank={rank}] B={B} num_gen={num_gen} "
                 f"num_groups={B // num_gen}  feas_per_group={feas_per_group}  "
-                f"(num_groups=0 -> resample/z-score 全跑不到)",
+                f"prompt_hash_first={first_prompt_hash} prompt_hash_last={last_prompt_hash} "
+                f"distinct_prompts_in_rank={distinct_in_rank}",
                 flush=True,
             )
             self._batch_diag_logged = True
