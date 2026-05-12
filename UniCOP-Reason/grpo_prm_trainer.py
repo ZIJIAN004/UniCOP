@@ -172,6 +172,28 @@ class GRPOPRMTrainer(GRPOTrainer):
         eos_id = self.processing_class.eos_token_id
         total_resampled = 0
 
+        # ── 一次性诊断: 单 rank 看到的 B vs num_gen ──────────────────────
+        # B // num_gen == 0 时, 下面的 for g 循环跑 0 次, resample/A_outcome/
+        # A_feasibility z-score 全失效. 用这条 print 实证一次.
+        if not getattr(self, "_batch_diag_logged", False):
+            rank = self.accelerator.process_index
+            feas_per_group = []
+            for g in range(B // num_gen):
+                s = g * num_gen
+                feas_per_group.append(sum(
+                    1 for i in range(s, s + num_gen)
+                    if is_fully_feasible(
+                        completions_text[i], instances[i], problem_type_list[i]
+                    )
+                ))
+            print(
+                f"[BATCH_DIAG rank={rank}] B={B} num_gen={num_gen} "
+                f"num_groups={B // num_gen}  feas_per_group={feas_per_group}  "
+                f"(num_groups=0 -> resample/z-score 全跑不到)",
+                flush=True,
+            )
+            self._batch_diag_logged = True
+
         for _ in range(_MAX_RETRIES):
             local_requests = []
             for g in range(B // num_gen):
