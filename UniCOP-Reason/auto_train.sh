@@ -157,63 +157,143 @@ split_gpus() {
     TRAIN_GPUS="${FREE_GPUS#*,}"                         # 剩余所有
 }
 
-# ── 启动 vLLM server（后台，返回 PID 到 VLLM_PID） ────────────────────
+# ── 启动 vLLM server（后台 + 自动重启 + 监控） ────────────────────────
+# 双层保险:
+#   1. vLLM 进程死了 supervisor 自动重启 (最多 N 次)
+#   2. supervisor 后台跑 4 路监控 (vLLM RSS / GPU mem / 节点 RAM / dmesg)
+# 训练端配合: train.py 里 monkey-patch VLLMClient.generate 加 retry,
+# vLLM 重启的 30-60s 内 trainer 等待不死.
+VLLM_MAX_RESTART=5
+VLLM_MONITOR_INTERVAL=60     # 进程级监控间隔 (秒)
+VLLM_NODE_MON_INTERVAL=300   # 节点级监控间隔 (秒)
+
 start_vllm_server() {
     local vllm_gpu=$1
     local port=$2
     local log_file=$3
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 vLLM server | GPU=$vllm_gpu | port=$port"
-    # 注意：TRL server 模式把 LoRA merge 进 base 后推完整权重，不走 vLLM 的
-    # LoRA adapter 接口，所以不加 --enable-lora（加了反而触发 vLLM LoRA 模块 bug）
-    # vllm_serve_ngram.py 内部调用 trl vllm-serve 入口
-    # FLASHINFER_DISABLE_VERSION_CHECK=1: 绕过 flashinfer/flashinfer-cubin 版本不一致检查
-    #
-    # ── 自定义 LogitsProcessor (n_gram=6) ──
-    # vLLM 0.7.3 默认 V0 引擎,通过 monkey-patch SamplingParams.__init__
-    # 注入 NoRepeatNgramLogitsProcessor,对 TRL 透明。
-    # (V1 entry-point 方式需要 extra_args,vLLM 0.7.3 不支持)
-    PYTHONPATH="$WORK_DIR:${PYTHONPATH:-}" \
-    CUDA_VISIBLE_DEVICES="$vllm_gpu" \
-    CUDA_HOME="$CUDA_HOME" \
-    FLASHINFER_DISABLE_VERSION_CHECK=1 \
-        python "$WORK_DIR/utils/vllm_serve_ngram.py" \
-        --no_repeat_ngram_size "$VLLM_NGRAM_SIZE" \
-        --model "$MODEL_BASE" \
-        --tensor_parallel_size 1 \
-        --port "$port" \
-        --gpu_memory_utilization "$VLLM_GPU_MEM_UTIL" \
-        --max_model_len "$VLLM_MAX_MODEL_LEN" \
-        --dtype "$VLLM_DTYPE" \
-        $VLLM_PREFIX_CACHE_FLAG \
-        > "$log_file" 2>&1 &
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 vLLM supervisor | GPU=$vllm_gpu | port=$port"
+
+    # ── Supervisor: 后台 while loop, vLLM 死了自动重启 ──
+    # 把 vLLM 启动包在 ( ... ) & 里, 外层 supervisor 用 wait 等子进程, 死了 retry
+    local job_tag="${SLURM_JOB_ID:-noslurm}"
+    local rss_log="$LOG_DIR/vllm_rss_${job_tag}.log"
+    local gpu_log="$LOG_DIR/gpu_mem_${job_tag}.log"
+    local node_ram_log="$LOG_DIR/node_ram_${job_tag}.log"
+    local dmesg_log="$LOG_DIR/dmesg_user_${job_tag}.log"
+
+    (
+        local retry=0
+        while [ "$retry" -lt "$VLLM_MAX_RESTART" ]; do
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [vLLM-supervisor] start attempt #$retry" >> "$log_file"
+            PYTHONPATH="$WORK_DIR:${PYTHONPATH:-}" \
+            CUDA_VISIBLE_DEVICES="$vllm_gpu" \
+            CUDA_HOME="$CUDA_HOME" \
+            FLASHINFER_DISABLE_VERSION_CHECK=1 \
+                python "$WORK_DIR/utils/vllm_serve_ngram.py" \
+                --no_repeat_ngram_size "$VLLM_NGRAM_SIZE" \
+                --host 127.0.0.1 \
+                --model "$MODEL_BASE" \
+                --tensor_parallel_size 1 \
+                --port "$port" \
+                --gpu_memory_utilization "$VLLM_GPU_MEM_UTIL" \
+                --max_model_len "$VLLM_MAX_MODEL_LEN" \
+                --dtype "$VLLM_DTYPE" \
+                $VLLM_PREFIX_CACHE_FLAG \
+                >> "$log_file" 2>&1
+            local exit_code=$?
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [vLLM-supervisor] vLLM exited code=$exit_code, retry #$retry" >> "$log_file"
+            retry=$((retry + 1))
+            sleep 10
+        done
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [vLLM-supervisor] 达到最大重启次数 $VLLM_MAX_RESTART, 放弃" >> "$log_file"
+    ) &
     VLLM_PID=$!
 
-    # 等健康检查通过
+    # 等健康检查通过 (worker 进程会被 supervisor fork, 我们 check 端口而不是 pid)
     local waited=0
     while [ "$waited" -lt "$VLLM_STARTUP_TIMEOUT" ]; do
         if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ vLLM server 启动失败，详见 $log_file"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ vLLM supervisor 死了, 详见 $log_file"
             return 1
         fi
         if curl -s "http://localhost:${port}/health/" > /dev/null 2>&1; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ vLLM server 就绪 (pid=$VLLM_PID, 用时 ${waited}s)"
-            return 0
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ vLLM server 就绪 (supervisor pid=$VLLM_PID, 用时 ${waited}s)"
+            break
         fi
         sleep 3
         waited=$((waited + 3))
     done
+    if [ "$waited" -ge "$VLLM_STARTUP_TIMEOUT" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ vLLM server 启动超时 (${VLLM_STARTUP_TIMEOUT}s)"
+        kill -- -"$VLLM_PID" 2>/dev/null || kill "$VLLM_PID" 2>/dev/null || true
+        return 1
+    fi
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ vLLM server 启动超时 (${VLLM_STARTUP_TIMEOUT}s)"
-    kill "$VLLM_PID" 2>/dev/null || true
-    return 1
+    # ── 启动 4 路监控 ──────────────────────────────────────────────
+    # 监控 1: vLLM 当前 worker 进程 RAM (RSS/VSZ/%mem)
+    # 用 lsof 找占 port 的 PID, 不依赖 VLLM_PID (因为 supervisor wrap 后 PID 已经不是 vLLM 自己)
+    ( while kill -0 "$VLLM_PID" 2>/dev/null; do
+        local pid=$(lsof -ti:"$port" 2>/dev/null | head -1)
+        if [ -n "$pid" ]; then
+            local stats=$(ps -o rss=,vsz=,%mem= -p "$pid" 2>/dev/null | tr -s ' ')
+            echo "$(date '+%H:%M:%S') pid=$pid rss_vsz_pmem=$stats" >> "$rss_log"
+        fi
+        sleep "$VLLM_MONITOR_INTERVAL"
+    done ) &
+    VLLM_MON_RSS_PID=$!
+
+    # 监控 2: GPU memory (vLLM 用的那张卡)
+    ( while kill -0 "$VLLM_PID" 2>/dev/null; do
+        local row=$(nvidia-smi --query-gpu=index,memory.used,memory.free,utilization.gpu \
+                     --format=csv,noheader,nounits -i "$vllm_gpu" 2>/dev/null \
+                     | tr -d ' ')
+        echo "$(date '+%H:%M:%S') $row" >> "$gpu_log"
+        sleep "$VLLM_MONITOR_INTERVAL"
+    done ) &
+    VLLM_MON_GPU_PID=$!
+
+    # 监控 3: 节点 RAM (看是不是其他用户也在涨)
+    ( while kill -0 "$VLLM_PID" 2>/dev/null; do
+        free -m | awk -v ts="$(date '+%H:%M:%S')" \
+            'NR==2 {print ts" total="$2" used="$3" free="$4" available="$7}' \
+            >> "$node_ram_log"
+        sleep "$VLLM_NODE_MON_INTERVAL"
+    done ) &
+    VLLM_MON_NODE_PID=$!
+
+    # 监控 4: dmesg (无 sudo 也能看自己进程的 kernel msg)
+    ( while kill -0 "$VLLM_PID" 2>/dev/null; do
+        dmesg --user 2>/dev/null | tail -10 >> "$dmesg_log"
+        echo "--- $(date '+%H:%M:%S') ---" >> "$dmesg_log"
+        sleep "$VLLM_NODE_MON_INTERVAL"
+    done ) &
+    VLLM_MON_DMESG_PID=$!
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ 监控已启动 (RSS=$VLLM_MON_RSS_PID GPU=$VLLM_MON_GPU_PID NODE=$VLLM_MON_NODE_PID DMESG=$VLLM_MON_DMESG_PID)"
+    echo "  日志: rss=$rss_log  gpu=$gpu_log  node=$node_ram_log  dmesg=$dmesg_log"
+    return 0
 }
 
-# ── 关闭 vLLM server ─────────────────────────────────────────────────
+# ── 关闭 vLLM server (含 supervisor + 监控) ──────────────────────────
 stop_vllm_server() {
+    # 杀监控 loop
+    for mon_pid in "${VLLM_MON_RSS_PID:-}" "${VLLM_MON_GPU_PID:-}" \
+                   "${VLLM_MON_NODE_PID:-}" "${VLLM_MON_DMESG_PID:-}"; do
+        [ -n "$mon_pid" ] && kill "$mon_pid" 2>/dev/null || true
+    done
+    VLLM_MON_RSS_PID=""; VLLM_MON_GPU_PID=""
+    VLLM_MON_NODE_PID=""; VLLM_MON_DMESG_PID=""
+
+    # 杀 supervisor (它会杀子 vLLM 进程, 但保险起见用 -P 杀进程组)
     if [ -n "${VLLM_PID:-}" ] && kill -0 "$VLLM_PID" 2>/dev/null; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 关闭 vLLM server (pid=$VLLM_PID)"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 关闭 vLLM supervisor (pid=$VLLM_PID)"
+        # 先 SIGTERM, 不响应就 SIGKILL 进程组
         kill "$VLLM_PID" 2>/dev/null || true
+        sleep 2
+        # 杀整个进程组 (supervisor + vLLM worker)
+        pkill -P "$VLLM_PID" 2>/dev/null || true
+        kill -9 "$VLLM_PID" 2>/dev/null || true
         wait "$VLLM_PID" 2>/dev/null || true
     fi
     VLLM_PID=""
@@ -306,7 +386,16 @@ run_train() {
         return 99
     fi
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ 非 OOM 错误 (exit=$exit_code, $label)"
+    # ── vLLM 死亡型错误也走重试路径 ─────────────────────────────────
+    # 训练端 retry monkey-patch 应该挡住, 但如果连续 retry 都失败 (vLLM
+    # supervisor 也耗尽重启次数), train.py 还是会 exit. 这种情况让 auto_train
+    # 整体重试 (重新等空闲卡 + 启动 vLLM + train.py resume from checkpoint).
+    if grep -qiE "RemoteDisconnected|ConnectionError.*localhost|Connection refused.*8000|HTTPConnectionPool" "$train_log"; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠️ vLLM 死亡型错误 ($label), 走重试路径"
+        return 99
+    fi
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ 非 OOM/vLLM 错误 (exit=$exit_code, $label)"
     return 1
 }
 

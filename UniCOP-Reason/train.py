@@ -28,6 +28,63 @@ from peft import LoraConfig, get_peft_model
 # 性能损耗: 几乎为零 (只在元数据对比那一步多记录信息)
 torch_checkpoint.set_checkpoint_debug_enabled(True)
 
+
+# ── VLLMClient retry monkey-patch ─────────────────────────────────────
+# trl.extras.vllm_client.VLLMClient.generate 默认无 retry, 一旦 vLLM 进程
+# 闪挂 (auto_train.sh 的 supervisor 正在重启) 立刻 RemoteDisconnected → exit 1.
+# 包一层指数 backoff retry, vLLM 重启的 30-60 秒内 trainer 等待不死.
+import time
+import requests
+import urllib3
+from trl.extras.vllm_client import VLLMClient
+
+def _patch_vllm_client_retry(max_retries: int = 10, base_backoff: float = 3.0):
+    """Monkey-patch VLLMClient.generate 和 update_named_param 加 retry."""
+    _orig_generate = VLLMClient.generate
+    _orig_update_named_param = getattr(VLLMClient, "update_named_param", None)
+    _exc_types = (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.Timeout,
+        urllib3.exceptions.ProtocolError,
+        ConnectionError,
+        ConnectionResetError,
+    )
+
+    def _retry(orig_fn, fn_name):
+        def wrapped(self, *args, **kwargs):
+            last_exc = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return orig_fn(self, *args, **kwargs)
+                except _exc_types as e:
+                    last_exc = e
+                    if attempt == max_retries:
+                        break
+                    wait = base_backoff * (2 ** min(attempt, 4))  # 3, 6, 12, 24, 48, 48...
+                    print(
+                        f"⚠️ VLLMClient.{fn_name} attempt {attempt+1}/{max_retries+1} "
+                        f"failed: {type(e).__name__}: {str(e)[:120]}; "
+                        f"等 {wait}s 后重试 (vLLM supervisor 应该正在重启 vLLM)",
+                        flush=True,
+                    )
+                    time.sleep(wait)
+            print(
+                f"❌ VLLMClient.{fn_name} 重试 {max_retries+1} 次后仍失败, 抛出",
+                flush=True,
+            )
+            raise last_exc
+        return wrapped
+
+    VLLMClient.generate = _retry(_orig_generate, "generate")
+    if _orig_update_named_param is not None:
+        VLLMClient.update_named_param = _retry(_orig_update_named_param, "update_named_param")
+    print(
+        f"✓ VLLMClient.generate / update_named_param retry patched "
+        f"(max_retries={max_retries}, base_backoff={base_backoff}s)"
+    )
+
+_patch_vllm_client_retry()
+
 from config import config
 from data.generate import build_dataset, build_mixed_dataset
 from problems import get_problem, SUPPORTED_PROBLEMS
@@ -398,7 +455,20 @@ def main():
     except Exception as e:
         print(f"⚠️ 读取 DeepSpeed 配置失败: {e}")
 
-    trainer.train()
+    # ── resume_from_checkpoint: 自动从最新 checkpoint 恢复 ──────────────
+    # 配合 auto_train.sh 的 vLLM-disconnect 重试逻辑: vLLM 死亡后整个 job
+    # 重启时, trainer.train(resume_from_checkpoint=True) 让 transformers
+    # Trainer 自动找 output_dir 下最新 checkpoint-{step}, 加载 model/optimizer
+    # /scheduler/rng 状态, 接着训.
+    # - 第一次启动 (output_dir 下没 checkpoint): 自动从 step 0 开始, 无副作用
+    # - 重启时 (有 checkpoint): 从最新 step 恢复
+    # 配 save_steps=10 时, 崩溃丢失上限 10 步.
+    _has_ckpt = os.path.isdir(config.output_dir) and any(
+        d.startswith("checkpoint-") for d in os.listdir(config.output_dir)
+    )
+    if _has_ckpt:
+        print(f"\n检测到 {config.output_dir} 下有 checkpoint, 从最新一份恢复训练...")
+    trainer.train(resume_from_checkpoint=_has_ckpt)
 
     # ── 保存 ─────────────────────────────────────────────────────────────
     # trainer.save_model 内部已有 rank 守卫（ZeRO-3 gather + 主 rank 写）；
