@@ -121,7 +121,16 @@ _THINK_MARKER_PATTERN = re.compile(
 
 def parse_think_segments(completion: str):
     """
-    从 <think> 段扫描 [R{r},{s}] 标记，提取逐步决策并做链校验。
+    从 think 段扫描 [R{r},{s}] 标记，提取逐步决策并做链校验。
+
+    Think 段边界处理 (兼容 chat template 已加 <think> 的场景):
+        - 有 <think> + 有 </think>:  [<think>+7, </think>) 为 think 段
+        - 无 <think> + 有 </think>:  [0, </think>) 为 think 段
+          (常见: chat template 在 prompt 已经加了 <think>, completion 就从
+           think 段开始, batch_decode 后看不到开头标签)
+        - 有 <think> + 无 </think>:  [<think>+7, len) 为 think 段
+          (模型还没生成完答案区)
+        - 都没有:                     entire completion 为 think 段
 
     新格式 (适配 SFT prompt 模板):
         src 隐式由 prev_dst 推断 (起点 depot=0)
@@ -135,11 +144,14 @@ def parse_think_segments(completion: str):
     """
     think_start = completion.find("<think>")
     think_end = completion.find("</think>")
-    if think_start == -1 or think_end == -1:
-        return [0], [], None
 
-    think_text = completion[think_start + len("<think>"):think_end]
-    think_offset = think_start + len("<think>")
+    think_offset = (think_start + len("<think>")) if think_start != -1 else 0
+    if think_end != -1:
+        think_text = completion[think_offset:think_end]
+    else:
+        think_text = completion[think_offset:]
+    if not think_text:
+        return [0], [], None
 
     markers = list(_THINK_MARKER_PATTERN.finditer(think_text))
     if not markers:
