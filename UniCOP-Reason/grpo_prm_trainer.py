@@ -445,13 +445,21 @@ class GRPOPRMTrainer(GRPOTrainer):
                     anomaly_lookup[(p_hash, c)].add(gidx)
 
             # 对每个 (p_hash, c) 算 z-score, 写 normalized_proc[gidx][c] = a_proc
+            # std=0 退化保护: 同 (p_hash, c) 跨 rank 正常 reward 全相同时 (理论
+            # 罕见但需防), 正常步 z-score 自动 = 0 (numerator 也 0), 但异常步
+            # (abnormal_val - mean) 不为 0 + 极小 std → blow up 到 ±1e6+.
+            # 用 std_floor 作为最小有效 std, 跳过完全退化的组.
+            std_floor = 1e-6
             normalized_proc: dict[int, dict[int, float]] = defaultdict(dict)
             for (p_hash, c), pairs in normal_rewards.items():
                 if len(pairs) < 2:
                     continue   # 子集太小无法 z-score
                 rewards_only = [r for _, r in pairs]
                 mean_c = float(np.mean(rewards_only))
-                std_c  = float(np.std(rewards_only)) + eps
+                std_raw = float(np.std(rewards_only))
+                if std_raw < std_floor:
+                    continue   # 组内方差太小, 跳过 (含异常步), 避免数值爆炸
+                std_c  = std_raw + eps
                 abnormal_val = min(rewards_only) - config.abnormal_margin
 
                 # 正常步 z-score
@@ -637,74 +645,6 @@ class GRPOPRMTrainer(GRPOTrainer):
                  + all_a_outcome_norm[my_start:my_start + B])
 
         return a_out, is_feasible_local, components
-
-    # ── Per-Customer PRM（仅可行 completion） ────────────────────────
-
-    def _compute_per_customer_prm(self, group_texts, instance,
-                                   problem_type, group_feasible):
-        """
-        Per-Customer 增量 PRM + z-score 归一化。
-
-        Returns:
-            dict: local_index → [(char_start, char_end, a_proc), ...]
-        """
-        K = len(group_texts)
-        n = instance["n"]
-
-        feasible_idx = [k for k in range(K) if group_feasible[k]]
-        if len(feasible_idx) < 2:
-            return {}
-
-        prm_results: dict[int, ThinkPRMResult] = {}
-        for k in feasible_idx:
-            pt = problem_type
-            if pt not in POMOPRM.SUPPORTED:
-                continue
-            prm_results[k] = self.pomo_prm.compute_think_step_rewards(
-                group_texts[k], instance, pt,
-            )
-
-        if len(prm_results) < 2:
-            return {}
-
-        prm_segments: dict[int, list] = {k: [] for k in range(K)}
-
-        for c in range(1, n + 1):
-            normal_rewards = []
-            for k in feasible_idx:
-                if k not in prm_results:
-                    continue
-                r = prm_results[k]
-                if c in r.customer_rewards and c not in r.anomaly_customers:
-                    normal_rewards.append((k, r.customer_rewards[c]))
-
-            if len(normal_rewards) < 2:
-                continue
-
-            rewards_only = [rw for _, rw in normal_rewards]
-            mean_c = float(np.mean(rewards_only))
-            std_c = float(np.std(rewards_only)) + 1e-8
-            abnormal_val = min(rewards_only) - config.abnormal_margin
-
-            for k in feasible_idx:
-                if k not in prm_results:
-                    continue
-                r = prm_results[k]
-                is_abn = c in r.anomaly_customers or c not in r.customer_rewards
-
-                if is_abn:
-                    if c in r.customer_ranges:
-                        a_proc = (abnormal_val - mean_c) / std_c
-                        prm_segments[k].append(
-                            (*r.customer_ranges[c], a_proc)
-                        )
-                else:
-                    a_proc = (r.customer_rewards[c] - mean_c) / std_c
-                    prm_segments[k].append(
-                        (*r.customer_ranges[c], a_proc)
-                    )
-
-        return prm_segments
 
     # ── Char → Token 映射 ────────────────────────────────────────────
 

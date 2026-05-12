@@ -455,6 +455,27 @@ def main():
     except Exception as e:
         print(f"⚠️ 读取 DeepSpeed 配置失败: {e}")
 
+    # ── 启动总览: 主要 step 数, 便于跟实测对照 ─────────────────────────
+    # effective_batch_in_completions = per_device * num_processes * grad_accum
+    # effective_batch_in_prompts     = effective_batch_in_completions / num_generations
+    # total_train_steps              = num_train * num_epochs / effective_batch_in_prompts
+    _eff_comp = (config.per_device_train_batch_size
+                 * max(1, config.num_gpus)
+                 * config.gradient_accumulation_steps)
+    _eff_prompt = max(1, _eff_comp // config.num_generations)
+    _total_steps = (config.num_train * config.num_train_epochs) // _eff_prompt
+    print(
+        f"\n=== 训练 step 总览 ===\n"
+        f"  per_device_batch={config.per_device_train_batch_size}  num_gpus={config.num_gpus}  "
+        f"grad_accum={config.gradient_accumulation_steps}  num_gen={config.num_generations}\n"
+        f"  effective_batch (completions) = {_eff_comp}\n"
+        f"  effective_batch (prompts)     = {_eff_prompt}\n"
+        f"  total_train_steps             = {_total_steps}  "
+        f"(num_train={config.num_train} × epochs={config.num_train_epochs} / {_eff_prompt})\n"
+        f"  save_steps={config.save_steps}  logging_steps={config.logging_steps}  "
+        f"resample_start_step={getattr(config, 'resample_start_step', 100)}\n"
+    )
+
     # ── resume_from_checkpoint: 自动从最新 checkpoint 恢复 ──────────────
     # 配合 auto_train.sh 的 vLLM-disconnect 重试逻辑: vLLM 死亡后整个 job
     # 重启时, trainer.train(resume_from_checkpoint=True) 让 transformers
@@ -462,12 +483,11 @@ def main():
     # /scheduler/rng 状态, 接着训.
     # - 第一次启动 (output_dir 下没 checkpoint): 自动从 step 0 开始, 无副作用
     # - 重启时 (有 checkpoint): 从最新 step 恢复
-    # 配 save_steps=10 时, 崩溃丢失上限 10 步.
     _has_ckpt = os.path.isdir(config.output_dir) and any(
         d.startswith("checkpoint-") for d in os.listdir(config.output_dir)
     )
     if _has_ckpt:
-        print(f"\n检测到 {config.output_dir} 下有 checkpoint, 从最新一份恢复训练...")
+        print(f"检测到 {config.output_dir} 下有 checkpoint, 从最新一份恢复训练...")
     trainer.train(resume_from_checkpoint=_has_ckpt)
 
     # ── 保存 ─────────────────────────────────────────────────────────────
