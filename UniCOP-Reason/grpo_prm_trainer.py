@@ -126,6 +126,32 @@ class GRPOPRMTrainer(GRPOTrainer):
         )
         instances = [self._deserialize_instance(pd) for pd in problem_data_list]
 
+        # ── 一次性诊断: dump 第一条 completion 看 think 段实际格式 ────
+        # PRM_DIAG 显示 customer_groups_with_signal=0/0 但 hybrid SFT 训练
+        # 数据 [R*,*] 标记完整, 怀疑 RL 阶段实际生成的 completion 格式跟
+        # 训练数据有差异 (如 <think> 标签缺失/[R*,*] 形态变化). 抓一条看.
+        if not getattr(self, "_completion_dump_logged", False):
+            if self.accelerator.is_main_process and len(completions_text) > 0:
+                import re as _re
+                txt = completions_text[0]
+                has_think_open  = "<think>" in txt
+                has_think_close = "</think>" in txt
+                te = txt.find("</think>")
+                # 抓 [R*,*] 类标记 (宽松正则)
+                br_matches = _re.findall(r'\[R?\d+\s*,\s*\d+\]', txt)
+                print(
+                    f"\n[COMPLETION_DUMP idx=0] len={len(txt)} "
+                    f"has<think>={has_think_open} has</think>={has_think_close} "
+                    f"bracket_count={len(br_matches)}\n"
+                    f"--- 前 800 char ---\n{txt[:800]}\n"
+                    f"--- think 末尾前 600 char (</think> 之前) ---\n"
+                    f"{txt[max(0, te-600):te] if te > 0 else '(no </think>)'}\n"
+                    f"--- 末尾 300 char ---\n{txt[-300:]}\n"
+                    f"--- 前 10 个 [R*,*] 标记 ---\n{br_matches[:10]}",
+                    flush=True,
+                )
+            self._completion_dump_logged = True
+
         if config.reward_mode == "foarl":
             advantages = self._build_foarl_advantages(
                 completions_text, instances, problem_type_list,
