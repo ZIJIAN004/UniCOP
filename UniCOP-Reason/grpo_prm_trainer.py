@@ -2,9 +2,10 @@
 GRPOPRMTrainer: 继承 trl.GRPOTrainer，Per-Customer 增量 PRM + 段内广播。
 
 设计（A_feasibility + A_outcome + Per-Customer PRM → per-token advantage）：
-    1. A_feasibility：4D 信号加权（可行拿满，不可行按维度给部分分）
-    2. A_outcome：可行解之间 z-score(-distance)，不可行 = 0
-    3. A_out = A_feasibility + A_outcome → 所有 token 共享
+    1. A_feasibility：4D 信号加权 (parse/coverage/constraint/format)
+       → 全组 num_gen 条做 z-score（零均值），GRPO 标准 baseline 中心化
+    2. A_outcome：可行子集 z-score(-distance)，子集 ≥ 2 才算，不可行 = 0
+    3. A_out = A_feasibility_norm + A_outcome_norm → 所有 token 共享（整组零均值）
     4. A_proc：per-customer 增量 PRM，段内广播到 [R{r},{s}] 标记对应的推理段
        - 仅可行 completion 计算；不可行 A_proc = 0
        - per-customer 跨 completion z-score 归一化
@@ -278,8 +279,8 @@ class GRPOPRMTrainer(GRPOTrainer):
                                    problem_type_list,
                                    B, num_gen, T, device):
         """
-        A_out = A_outcome + A_feasibility  （所有 token 共享）
-        A_proc = per-customer 增量 PRM     （段内广播，仅可行解）
+        A_out  = A_feasibility_norm + A_outcome_norm （所有 token 共享，整组零均值）
+        A_proc = per-customer 增量 PRM            （段内广播，仅可行解）
         → per-token advantage (B, T)
         """
         # ── 1. A_out（A_outcome + A_feasibility） ────────────────────
@@ -341,18 +342,19 @@ class GRPOPRMTrainer(GRPOTrainer):
 
         return advantages
 
-    # ── A_out = A_outcome + A_feasibility ────────────────────────────
+    # ── A_out = A_feasibility (组内 z-score) + A_outcome (可行子集 z-score) ──
 
     def _compute_a_out(self, completions_text, instances,
                        problem_type_list, B, num_gen, device):
         """
-        A_feasibility: 4D 加权（可行拿满, 不可行部分分）
-        A_outcome:     可行解之间 z-score(-distance)（组内 ≥2 才有）
+        A_feasibility: 4D 加权 → 全组 num_gen 条做 z-score（零均值）
+        A_outcome:     可行子集 z-score(-distance)，子集 ≥ 2 才计算，不可行 = 0
+        a_out = A_feasibility_norm + A_outcome_norm（整组零均值）
 
         Returns: a_out (B,), is_feasible list[bool], components list[dict]
         """
         eps = 1e-8
-        a_out = torch.zeros(B, device=device)
+        a_feas_raw = torch.zeros(B, device=device)
         is_feasible: list[bool] = []
         components: list[dict] = []
         distances: list[float | None] = []
@@ -367,9 +369,8 @@ class GRPOPRMTrainer(GRPOTrainer):
                     and c["constraint"] == 1.0 and c["format"] == 1.0)
             is_feasible.append(feas)
 
-            a_feas = (config.w_p * c["parse"] + config.w_c * c["coverage"]
-                      + config.w_k * c["constraint"] + config.w_f * c["format"])
-            a_out[i] = a_feas
+            a_feas_raw[i] = (config.w_p * c["parse"] + config.w_c * c["coverage"]
+                             + config.w_k * c["constraint"] + config.w_f * c["format"])
 
             if feas:
                 prob = _PROBLEM_OBJS.get(problem_type_list[i])
@@ -380,6 +381,20 @@ class GRPOPRMTrainer(GRPOTrainer):
                 distances.append(None)
 
         num_groups = B // num_gen
+
+        # ── A_feasibility: 整组 z-score（GRPO 标准 baseline 中心化） ──
+        # 不中心化会导致 a_out 持续正偏置，PPO ratio≈1 时 loss ≈ -mean(a_out)，
+        # 退化为"整体抬升所有 sampled token 的 logp"而非学相对好坏。
+        a_feas_norm = torch.zeros(B, device=device)
+        for g in range(num_groups):
+            s = g * num_gen
+            grp = a_feas_raw[s:s + num_gen]
+            a_feas_norm[s:s + num_gen] = (grp - grp.mean()) / (grp.std() + eps)
+
+        # ── A_outcome: 可行子集 z-score(-distance) ───────────────────
+        # 不可行 completion 的 distance 不可比较，所以只在可行子集内归一化；
+        # 子集 < 2 时整段跳过（k=0/1 完全依赖 A_feasibility_norm 提供相对信号）。
+        a_outcome_norm = torch.zeros(B, device=device)
         for g in range(num_groups):
             s = g * num_gen
             feas_in_grp = [
@@ -395,7 +410,9 @@ class GRPOPRMTrainer(GRPOTrainer):
                 mean_d = neg_dists.mean()
                 std_d = neg_dists.std() + eps
                 for idx, (j, _) in enumerate(feas_in_grp):
-                    a_out[s + j] += (neg_dists[idx] - mean_d) / std_d
+                    a_outcome_norm[s + j] = (neg_dists[idx] - mean_d) / std_d
+
+        a_out = a_feas_norm + a_outcome_norm
 
         return a_out, is_feasible, components
 
