@@ -336,37 +336,120 @@ class GRPOPRMTrainer(GRPOTrainer):
         # ── 2. 初始化 advantage tensor: 所有 token 先赋 A_out ────────
         advantages = a_out.unsqueeze(-1).expand(-1, T).contiguous()
 
-        # ── 3. Per-group PRM 段内广播 ────────────────────────────────
+        # ── 3. PRM 段内广播 (跨 rank) ────────────────────────────────
+        # 跨 rank 设计 (跟 _compute_a_out 同样原因, 单 rank B < num_gen 时
+        # rank-local group 不完整):
+        #   step 1: rank-local 算每条可行 completion 的 ThinkPRMResult
+        #           (parse_think_segments + POMO batch evaluate, rank-local)
+        #   step 2: gather_object 跨 rank 收集 ThinkPRMResult (dict, 非 tensor)
+        #   step 3: 按 (prompt_hash, customer_id) 跨 rank 分组 z-score 增量 reward
+        #   step 4: 切回本 rank, 段内广播到 token (offset_maps 是 rank-local 的,
+        #           所以广播必须 rank-local)
         if not config.disable_prm and self.pomo_prm is not None:
+            from accelerate.utils import gather_object
+            from collections import defaultdict
+            from pomo_prm import ThinkPRMResult
+
+            eps = 1e-8
             offset_maps = self._build_offset_maps(completions_text, B)
 
-            num_groups = B // num_gen
-            for g in range(num_groups):
-                s = g * num_gen
-                group_texts = completions_text[s:s + num_gen]
-                group_feasible = is_feasible[s:s + num_gen]
-                inst = instances[s]
-                pt = problem_type_list[s]
-
-                prm_segments = self._compute_per_customer_prm(
-                    group_texts, inst, pt, group_feasible
-                )
-
-                for j in range(num_gen):
-                    k = s + j
-                    segs = prm_segments.get(j)
-                    if not segs or offset_maps[k] is None:
-                        continue
-                    om = offset_maps[k]
-                    for (seg_cs, seg_ce, a_proc) in segs:
-                        tok_s, tok_e = self._char_to_token_range(
-                            seg_cs, seg_ce, om
+            # ── step 1: rank-local 算 ThinkPRMResult (仅可行 completion) ──
+            rank_prm_results: list[ThinkPRMResult | None] = []
+            for i in range(B):
+                pt = problem_type_list[i]
+                if is_feasible[i] and pt in self.pomo_prm.SUPPORTED:
+                    rank_prm_results.append(
+                        self.pomo_prm.compute_think_step_rewards(
+                            completions_text[i], instances[i], pt,
                         )
-                        if tok_s is not None and tok_e is not None:
-                            tok_e = min(tok_e, T)
-                            advantages[k, tok_s:tok_e] += (
-                                config.proc_alpha * a_proc
-                            )
+                    )
+                else:
+                    rank_prm_results.append(None)
+
+            # ── step 2: 跨 rank gather ──────────────────────────────────
+            # gather_object: 各 rank list[B] → 拼接全 rank list[G]
+            # 同时 gather prompt row hash 用作分组 key (与 _compute_a_out 一致)
+            all_prm_results = gather_object(rank_prm_results)   # list of (Result|None) 长度 G
+
+            masked_ids = prompt_ids.long() * prompt_mask.long()
+            row_id_sum = masked_ids.sum(dim=-1)
+            row_len    = prompt_mask.long().sum(dim=-1)
+            row_hash   = (row_id_sum * 1000003 + row_len).contiguous()
+            all_row_hash = self.accelerator.gather(row_hash).cpu().tolist()
+            G = len(all_prm_results)
+            assert G == len(all_row_hash), (
+                f"PRM gather size mismatch: prm={G} hash={len(all_row_hash)}"
+            )
+
+            # ── step 3: 按 (prompt_hash, customer_id) 跨 rank z-score ──
+            # 收集每个 (p_hash, c) 的正常 reward 列表 + anomaly global_idx 集合
+            normal_rewards: dict = defaultdict(list)   # (p_hash, c) -> [(gidx, reward), ...]
+            anomaly_lookup: dict = defaultdict(set)    # (p_hash, c) -> {gidx, ...}
+
+            for gidx, prm_res in enumerate(all_prm_results):
+                if prm_res is None:
+                    continue
+                p_hash = all_row_hash[gidx]
+                for c, r in prm_res.customer_rewards.items():
+                    normal_rewards[(p_hash, c)].append((gidx, r))
+                for c in prm_res.anomaly_customers:
+                    anomaly_lookup[(p_hash, c)].add(gidx)
+
+            # 对每个 (p_hash, c) 算 z-score, 写 normalized_proc[gidx][c] = a_proc
+            normalized_proc: dict[int, dict[int, float]] = defaultdict(dict)
+            for (p_hash, c), pairs in normal_rewards.items():
+                if len(pairs) < 2:
+                    continue   # 子集太小无法 z-score
+                rewards_only = [r for _, r in pairs]
+                mean_c = float(np.mean(rewards_only))
+                std_c  = float(np.std(rewards_only)) + eps
+                abnormal_val = min(rewards_only) - config.abnormal_margin
+
+                # 正常步 z-score
+                for gidx, r in pairs:
+                    normalized_proc[gidx][c] = (r - mean_c) / std_c
+
+                # 异常步惩罚: 跨 rank 同 (p_hash, c) 出现在 anomaly 的 gidx
+                # (不覆盖已在 normal_rewards 的 gidx, 防 think 假回溯重复触发)
+                for gidx in anomaly_lookup.get((p_hash, c), set()):
+                    if c not in normalized_proc.get(gidx, {}):
+                        normalized_proc[gidx][c] = (abnormal_val - mean_c) / std_c
+
+            # ── step 4: 切回本 rank, 段内广播 ───────────────────────────
+            rank = self.accelerator.process_index
+            my_start = rank * B
+            for j in range(B):
+                gidx = my_start + j
+                if gidx not in normalized_proc:
+                    continue
+                # 本 rank 的 ThinkPRMResult (用来取 char_range)
+                prm_res = rank_prm_results[j]
+                if prm_res is None or offset_maps[j] is None:
+                    continue
+                om = offset_maps[j]
+                for c, a_proc in normalized_proc[gidx].items():
+                    seg = prm_res.customer_ranges.get(c)
+                    if seg is None:
+                        continue
+                    seg_cs, seg_ce = seg
+                    tok_s, tok_e = self._char_to_token_range(seg_cs, seg_ce, om)
+                    if tok_s is not None and tok_e is not None:
+                        tok_e = min(tok_e, T)
+                        advantages[j, tok_s:tok_e] += config.proc_alpha * a_proc
+
+            # ── 诊断: 一次性 print PRM 跨 rank 统计 ─────────────────────
+            if not getattr(self, "_prm_diag_logged", False):
+                n_results_global = sum(1 for r in all_prm_results if r is not None)
+                n_groups_with_signal = sum(
+                    1 for pairs in normal_rewards.values() if len(pairs) >= 2
+                )
+                print(
+                    f"[PRM_DIAG rank={rank}] all_prm_results: {n_results_global}/{G} non-None  "
+                    f"customer_groups_with_signal={n_groups_with_signal}/{len(normal_rewards)}  "
+                    f"normalized_proc 覆盖 {len(normalized_proc)} completions",
+                    flush=True,
+                )
+                self._prm_diag_logged = True
 
         # ── 4. Log ───────────────────────────────────────────────────
         n_feasible = sum(is_feasible)

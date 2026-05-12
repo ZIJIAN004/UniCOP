@@ -94,14 +94,39 @@ class ThinkPRMResult:
     n: int
 
 
+# ── PRM 标记正则 (匹配 SFT prompt 模板与实际输出格式) ──────────────────
+#
+# 目标格式 (来自 cvrp.py 的 _SYSTEM, 实测 SFT 输出与之结构一致, 仅空格丢失):
+#   正常步:     [R1,5]cap=...feasible:...→ select 17     (dst = 17)
+#   主动 depot: [R1,5]cap=...→ ... return depot          (dst = 0)
+#   被迫 depot: [R1,5]cap=...→ no feasible → return depot (dst = 0)
+#
+# 关键设计:
+#   - [^\[\n]{0,800}? 非贪婪扫到下个 [ 或换行 (800 char 上限防 catastrophic backtracking)
+#   - select / return depot 两条 alternative
+#   - \s* 兼容 detokenize 后空格丢失
+#   - IGNORECASE 兼容大小写变化
+#
+# Group 编号:
+#   1 = route_id
+#   2 = step_idx
+#   3 = dst (None if "return depot" branch matched)
 _THINK_MARKER_PATTERN = re.compile(
-    r'\[R?(\d+)(?:,(\d+))?\]\s*at\s+(\d+)\s*[-→>]+\s*(\d+)'
+    r'\[R(\d+),(\d+)\]'                            # [R{r},{s}]
+    r'[^\[\n]{0,800}?'                              # 非贪婪扫中间 (可能含 feasible: A(...))
+    r'(?:select\s*(\d+)|return\s*depot)',           # → select N 或 return depot
+    re.IGNORECASE,
 )
 
 
 def parse_think_segments(completion: str):
     """
     从 <think> 段扫描 [R{r},{s}] 标记，提取逐步决策并做链校验。
+
+    新格式 (适配 SFT prompt 模板):
+        src 隐式由 prev_dst 推断 (起点 depot=0)
+        dst 来自 → select N 或 → return depot
+        链异常检测: 客户重复访问 (旧逻辑 src != prev_target 不再可用)
 
     Returns:
         full_steps:    完整节点序列（含 depot）
@@ -111,35 +136,38 @@ def parse_think_segments(completion: str):
     think_start = completion.find("<think>")
     think_end = completion.find("</think>")
     if think_start == -1 or think_end == -1:
-        return [0], [], 0
+        return [0], [], None
 
     think_text = completion[think_start + len("<think>"):think_end]
     think_offset = think_start + len("<think>")
 
     markers = list(_THINK_MARKER_PATTERN.finditer(think_text))
     if not markers:
-        return [0], [], 0
+        return [0], [], None
 
     full_steps = [0]
     customer_steps: list[ThinkStep] = []
-    prev_target = 0
+    visited: set[int] = set()      # 检测重复访问 (代替原 src != prev_target 假回溯)
     anomaly_start = None
 
     for i, m in enumerate(markers):
-        src = int(m.group(3))
-        dst = int(m.group(4))
+        dst_str = m.group(3)
+        is_return_depot = dst_str is None
 
         seg_start = think_offset + m.start()
         seg_end = (think_offset + markers[i + 1].start()
                    if i + 1 < len(markers) else think_end)
 
-        if anomaly_start is None and src != prev_target:
-            anomaly_start = len(customer_steps)
-
-        if dst == 0:
+        if is_return_depot:
+            # depot 回访: dst=0, 不进 customer_steps, 重置 (无需 visited 操作)
             full_steps.append(0)
-            prev_target = 0
             continue
+
+        dst = int(dst_str)
+
+        # 链异常: 重复访问已访问过的客户
+        if anomaly_start is None and dst in visited:
+            anomaly_start = len(customer_steps)
 
         full_steps.append(dst)
         customer_steps.append(ThinkStep(
@@ -147,7 +175,7 @@ def parse_think_segments(completion: str):
             char_range=(seg_start, seg_end),
             full_step_idx=len(full_steps) - 1,
         ))
-        prev_target = dst
+        visited.add(dst)
 
     return full_steps, customer_steps, anomaly_start
 
