@@ -84,6 +84,10 @@ class Config:
     w_cc: float                    = 2.0   # R_coverage × R_constraint 联合权重
     w_f: float                     = 0.5   # R_format 权重
     abnormal_margin: float         = 0.01  # 异常步比最差正常步低多少
+    # resample 门控: 前 N step 跳过可行性重采样
+    # 训练初期可行率低 (<20%), resample 也大概率失败, 反复 vLLM 调用浪费时间.
+    # step >= N 之后模型应已学到基本可行模式, resample 救剩余 outlier 才有意义.
+    resample_start_step: int       = 100
 
     # ── FOARL 奖励（reward_mode=foarl） ──────────────────────────────
     # R = R_f + R_o

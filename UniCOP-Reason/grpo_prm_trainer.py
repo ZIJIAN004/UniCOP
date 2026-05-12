@@ -212,6 +212,29 @@ class GRPOPRMTrainer(GRPOTrainer):
             )
             self._batch_diag_logged = True
 
+        # ── Step 门控: 前 resample_start_step 步跳过 resample ──────────
+        # 训练初期可行率低 (<20%), resample 也大概率失败, 反复 vLLM 调用
+        # 浪费时间. 等模型学到基本可行模式后再开 resample 救少数 outlier.
+        # 所有 rank 同步跳过 (self.state.global_step 跨 rank 一致), 不会
+        # collective deadlock.
+        resample_start_step = getattr(config, "resample_start_step", 100)
+        current_step = (
+            self.state.global_step
+            if hasattr(self, "state") and self.state is not None
+            else 0
+        )
+        if current_step < resample_start_step:
+            if not getattr(self, "_resample_skip_logged", False):
+                if self.accelerator.is_main_process:
+                    print(
+                        f"[RESAMPLE_GATE] current_step={current_step} < "
+                        f"resample_start_step={resample_start_step}, "
+                        f"前期 resample 关闭 (模型可行率低时浪费 vLLM 时间)",
+                        flush=True,
+                    )
+                self._resample_skip_logged = True
+            return
+
         for _ in range(_MAX_RETRIES):
             local_requests = []
             for g in range(B // num_gen):
