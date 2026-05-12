@@ -143,6 +143,8 @@ class GRPOPRMTrainer(GRPOTrainer):
             advantages = self._build_unified_advantages(
                 completions_text, instances, problem_type_list,
                 B, num_gen, T, device=completion_ids.device,
+                prompt_ids=batch["prompt_ids"],
+                prompt_mask=batch["prompt_mask"],
             )
 
         batch["advantages"] = advantages
@@ -164,7 +166,12 @@ class GRPOPRMTrainer(GRPOTrainer):
 
     def _resample_infeasible(self, batch, completions_text, instances,
                               problem_type_list, num_gen):
-        """每组可行解 < 2 时，通过 vLLM 重新生成替换不可行 completion，循环至 >= 2。"""
+        """每组可行解 < 2 时，通过 vLLM 重新生成替换不可行 completion，循环至 >= 2。
+
+        注意: 单 rank B < num_gen 时 (BATCH_DIAG 实证场景), for g in range(0) 跳过,
+        gather_object([]) 在所有 rank 同步空调用, 自然 no-op 安全退出.
+        rank 内 group 不完整时本来 resample 判断也没意义, 跳过是正确行为.
+        """
         _MAX_RETRIES = 5
         B, T = batch["completion_ids"].shape
         device = batch["completion_ids"].device
@@ -311,15 +318,19 @@ class GRPOPRMTrainer(GRPOTrainer):
 
     def _build_unified_advantages(self, completions_text, instances,
                                    problem_type_list,
-                                   B, num_gen, T, device):
+                                   B, num_gen, T, device,
+                                   prompt_ids, prompt_mask):
         """
         A_out  = A_feasibility_norm + A_outcome_norm （所有 token 共享，整组零均值）
         A_proc = per-customer 增量 PRM            （段内广播，仅可行解）
         → per-token advantage (B, T)
+
+        prompt_ids/prompt_mask 传入是为了让 _compute_a_out 跨 rank 按 prompt 分组.
         """
-        # ── 1. A_out（A_outcome + A_feasibility） ────────────────────
+        # ── 1. A_out (A_feasibility 跨 rank z-score + A_outcome 子集 z-score) ──
         a_out, is_feasible, components = self._compute_a_out(
-            completions_text, instances, problem_type_list, B, num_gen, device
+            completions_text, instances, problem_type_list, B, num_gen, device,
+            prompt_ids, prompt_mask,
         )
 
         # ── 2. 初始化 advantage tensor: 所有 token 先赋 A_out ────────
@@ -376,22 +387,32 @@ class GRPOPRMTrainer(GRPOTrainer):
 
         return advantages
 
-    # ── A_out = A_feasibility (组内 z-score) + A_outcome (可行子集 z-score) ──
+    # ── A_out = A_feasibility (跨 rank z-score) + A_outcome (可行子集 z-score) ──
 
     def _compute_a_out(self, completions_text, instances,
-                       problem_type_list, B, num_gen, device):
+                       problem_type_list, B, num_gen, device,
+                       prompt_ids, prompt_mask):
         """
-        A_feasibility: 4D 加权 → 全组 num_gen 条做 z-score（零均值）
-        A_outcome:     可行子集 z-score(-distance)，子集 ≥ 2 才计算，不可行 = 0
-        a_out = A_feasibility_norm + A_outcome_norm（整组零均值）
+        A_feasibility: parse + cov*con + format 加权 → 跨 rank 同 prompt 做 z-score
+        A_outcome:     同 prompt 可行子集 z-score(-distance), 子集 ≥ 2 才算
+        a_out = A_feasibility_norm + A_outcome_norm
+
+        跨 rank 设计 (BATCH_DIAG 实证 B=4 < num_gen=8, 同 prompt 跨多 rank):
+            单 rank B 可能不是 num_gen 的整数倍, 同 prompt 的 num_gen 条
+            generation 散在多 rank. 必须 accelerator.gather 聚合后, 按
+            prompt row hash 分组归一化, 再 slice 回本 rank.
+            兼容 B 恰好 = k*num_gen 的情况 (gather 后同 group 仍在一起).
 
         Returns: a_out (B,), is_feasible list[bool], components list[dict]
         """
+        from collections import defaultdict
         eps = 1e-8
+
+        # ── 1. 本 rank 算 raw 信号 ──────────────────────────────────
         a_feas_raw = torch.zeros(B, device=device)
-        is_feasible: list[bool] = []
+        is_feasible_local: list[bool] = []
         components: list[dict] = []
-        distances: list[float | None] = []
+        distances_local: list[float] = []  # nan 占位不可行, 跨 rank 用 tensor 传
 
         for i in range(B):
             c = compute_terminal_components(
@@ -401,56 +422,89 @@ class GRPOPRMTrainer(GRPOTrainer):
 
             feas = (c["parse"] == 1.0 and c["coverage"] == 1.0
                     and c["constraint"] == 1.0 and c["format"] == 1.0)
-            is_feasible.append(feas)
+            is_feasible_local.append(feas)
 
-            # cov × con 乘积合并: cov=0 时 con 无效, 防止"丢覆盖换约束"hack
+            # cov × con 乘积合并: cov=0 时 con 无效, 防"丢覆盖换约束"hack
             a_feas_raw[i] = (config.w_p * c["parse"]
                              + config.w_cc * (c["coverage"] * c["constraint"])
                              + config.w_f * c["format"])
 
             if feas:
                 prob = _PROBLEM_OBJS.get(problem_type_list[i])
-                dist = (prob.get_tour_distance(completions_text[i], instances[i])
-                        if prob else None)
-                distances.append(dist)
+                d = (prob.get_tour_distance(completions_text[i], instances[i])
+                     if prob else None)
+                distances_local.append(d if d is not None else float("nan"))
             else:
-                distances.append(None)
+                distances_local.append(float("nan"))
 
-        num_groups = B // num_gen
+        # ── 2. prompt row hash (抗跨 rank padding 长度差异) ────────
+        # prompt_ids / prompt_mask 跨 rank 形状可能不同 (不同 pad 长度),
+        # 不能直接 gather. 改 gather row-wise hash = (sum-of-valid-token-ids,
+        # valid-length) 合并值. 同 prompt 不同 rank 的 hash 必相同, 不同
+        # prompt 碰撞概率极低.
+        masked_ids = prompt_ids.long() * prompt_mask.long()
+        row_id_sum = masked_ids.sum(dim=-1)              # (B,)
+        row_len    = prompt_mask.long().sum(dim=-1)      # (B,)
+        row_hash   = row_id_sum * 1000003 + row_len      # (B,) int
 
-        # ── A_feasibility: 整组 z-score（GRPO 标准 baseline 中心化） ──
-        # 不中心化会导致 a_out 持续正偏置，PPO ratio≈1 时 loss ≈ -mean(a_out)，
-        # 退化为"整体抬升所有 sampled token 的 logp"而非学相对好坏。
-        a_feas_norm = torch.zeros(B, device=device)
-        for g in range(num_groups):
-            s = g * num_gen
-            grp = a_feas_raw[s:s + num_gen]
-            a_feas_norm[s:s + num_gen] = (grp - grp.mean()) / (grp.std() + eps)
+        # ── 3. 跨 rank gather (所有 rank 必须同时调用) ─────────────
+        all_a_feas_raw = self.accelerator.gather(a_feas_raw.contiguous())   # (G,)
+        feas_t  = torch.tensor(is_feasible_local, device=device, dtype=torch.bool)
+        all_feas_t = self.accelerator.gather(feas_t.contiguous())            # (G,) bool
+        dist_t  = torch.tensor(distances_local, device=device, dtype=torch.float32)
+        all_dist_t = self.accelerator.gather(dist_t.contiguous())            # (G,) nan-for-infeas
+        all_row_hash = self.accelerator.gather(row_hash.contiguous())        # (G,) int
 
-        # ── A_outcome: 可行子集 z-score(-distance) ───────────────────
-        # 不可行 completion 的 distance 不可比较，所以只在可行子集内归一化；
-        # 子集 < 2 时整段跳过（k=0/1 完全依赖 A_feasibility_norm 提供相对信号）。
-        a_outcome_norm = torch.zeros(B, device=device)
-        for g in range(num_groups):
-            s = g * num_gen
-            feas_in_grp = [
-                (j, distances[s + j])
-                for j in range(num_gen)
-                if is_feasible[s + j] and distances[s + j] is not None
-            ]
-            if len(feas_in_grp) >= 2:
-                neg_dists = torch.tensor(
-                    [-d for _, d in feas_in_grp], device=device,
-                    dtype=torch.float32,
+        G = all_a_feas_raw.shape[0]
+
+        # ── 4. 按 prompt hash 分组 ──────────────────────────────────
+        hash_cpu = all_row_hash.cpu().tolist()
+        groups = defaultdict(list)
+        for i, h in enumerate(hash_cpu):
+            groups[h].append(i)
+
+        # ── 5. 每组 z-score (A_feasibility 全组, A_outcome 仅可行子集) ──
+        all_a_feas_norm    = torch.zeros_like(all_a_feas_raw)
+        all_a_outcome_norm = torch.zeros_like(all_a_feas_raw)
+
+        for h, idxs in groups.items():
+            if len(idxs) < 2:
+                continue   # 单条 group 无法 z-score, 全 0
+            idx_t = torch.tensor(idxs, device=device, dtype=torch.long)
+
+            # A_feasibility: 整组 z-score
+            grp = all_a_feas_raw[idx_t]
+            all_a_feas_norm[idx_t] = (grp - grp.mean()) / (grp.std() + eps)
+
+            # A_outcome: 可行子集 z-score
+            feas_mask = all_feas_t[idx_t] & ~torch.isnan(all_dist_t[idx_t])
+            feas_local_pos = feas_mask.nonzero(as_tuple=True)[0]   # 子集在 idxs 中的位置
+            if feas_local_pos.numel() >= 2:
+                feas_idx_t = idx_t[feas_local_pos]
+                neg_d = -all_dist_t[feas_idx_t]
+                all_a_outcome_norm[feas_idx_t] = (
+                    (neg_d - neg_d.mean()) / (neg_d.std() + eps)
                 )
-                mean_d = neg_dists.mean()
-                std_d = neg_dists.std() + eps
-                for idx, (j, _) in enumerate(feas_in_grp):
-                    a_outcome_norm[s + j] = (neg_dists[idx] - mean_d) / std_d
 
-        a_out = a_feas_norm + a_outcome_norm
+        # ── 6. 一次性诊断: gather 后的 group 分布 ────────────────────
+        if not getattr(self, "_aout_diag_logged", False):
+            rank = self.accelerator.process_index
+            group_sizes = [len(v) for v in groups.values()]
+            print(
+                f"[A_OUT_DIAG rank={rank}] B={B} G={G} num_groups_after_gather={len(groups)} "
+                f"group_sizes={group_sizes[:8]}{'...' if len(group_sizes)>8 else ''}  "
+                f"(每组应 = num_gen={num_gen})",
+                flush=True,
+            )
+            self._aout_diag_logged = True
 
-        return a_out, is_feasible, components
+        # ── 7. 切回本 rank ──────────────────────────────────────────
+        rank = self.accelerator.process_index
+        my_start = rank * B
+        a_out = (all_a_feas_norm[my_start:my_start + B]
+                 + all_a_outcome_norm[my_start:my_start + B])
+
+        return a_out, is_feasible_local, components
 
     # ── Per-Customer PRM（仅可行 completion） ────────────────────────
 
