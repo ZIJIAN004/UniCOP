@@ -167,10 +167,71 @@ VLLM_MAX_RESTART=5
 VLLM_MONITOR_INTERVAL=60     # 进程级监控间隔 (秒)
 VLLM_NODE_MON_INTERVAL=300   # 节点级监控间隔 (秒)
 
+# ── 端口工具: 自动扫描 + 孤儿清理 ────────────────────────────────────
+# 用 Python socket bind 测试端口是否空闲, 从 desired 起向后扫 max_tries 个
+find_free_port() {
+    local desired=${1:-8000}
+    local max_tries=${2:-200}
+    python3 -c "
+import socket, sys
+for p in range($desired, $desired + $max_tries):
+    try:
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(('0.0.0.0', p))
+        s.close()
+        print(p); sys.exit(0)
+    except OSError:
+        continue
+sys.exit(1)
+" 2>/dev/null
+}
+
+# 杀本用户的孤儿 vLLM 进程 (上次 sbatch 异常退出留下的)
+cleanup_orphan_vllm() {
+    local pids
+    pids=$(pgrep -u "$USER" -f "vllm_serve_ngram\.py" 2>/dev/null)
+    if [ -n "$pids" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 发现 vLLM 孤儿进程 ($pids), 清理后释放端口..."
+        kill -9 $pids 2>/dev/null || true
+        sleep 5
+    fi
+}
+
+# 用 lsof 验证 vLLM 进程实际监听的端口 (兜底: 万一 trl 忽略 --port)
+verify_vllm_port() {
+    local expected_port=$1
+    # 找占 expected_port 的进程的真实命令行, 判断是不是 vLLM
+    local pid
+    pid=$(lsof -ti:"$expected_port" 2>/dev/null | head -1)
+    if [ -z "$pid" ]; then
+        echo "WARN: 端口 $expected_port 上没有进程监听"
+        return 1
+    fi
+    local cmd
+    cmd=$(ps -o cmd= -p "$pid" 2>/dev/null | head -c 200)
+    echo "✓ 端口 $expected_port 监听者 pid=$pid cmd: $cmd"
+    return 0
+}
+
 start_vllm_server() {
     local vllm_gpu=$1
-    local port=$2
+    local desired_port=$2
     local log_file=$3
+
+    # ── 启动前清理 + 找空闲端口 ──────────────────────────────────────
+    cleanup_orphan_vllm
+    local port
+    port=$(find_free_port "$desired_port" 200)
+    if [ -z "$port" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ 找不到空闲端口 [$desired_port, $((desired_port + 199)))"
+        return 1
+    fi
+    if [ "$port" != "$desired_port" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] desired_port=$desired_port 被占, 改用 port=$port"
+    fi
+    # 全局变量给调用方使用 (train.py 也要连这个端口)
+    VLLM_ACTUAL_PORT="$port"
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] 启动 vLLM supervisor | GPU=$vllm_gpu | port=$port"
 
@@ -219,6 +280,7 @@ start_vllm_server() {
         fi
         if curl -s "http://localhost:${port}/health/" > /dev/null 2>&1; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ vLLM server 就绪 (supervisor pid=$VLLM_PID, 用时 ${waited}s)"
+            verify_vllm_port "$port" || true   # informational, 不 fail
             break
         fi
         sleep 3
@@ -226,6 +288,9 @@ start_vllm_server() {
     done
     if [ "$waited" -ge "$VLLM_STARTUP_TIMEOUT" ]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ vLLM server 启动超时 (${VLLM_STARTUP_TIMEOUT}s)"
+        # 诊断: 检查 vLLM 是不是在别的端口监听 (trl 忽略 --port 的情况)
+        echo "  ── 诊断: 全节点 LISTEN 端口 (我们的 user) ──"
+        lsof -u "$USER" -i -P 2>/dev/null | grep LISTEN | head -10 || true
         kill -- -"$VLLM_PID" 2>/dev/null || kill "$VLLM_PID" 2>/dev/null || true
         return 1
     fi
@@ -338,14 +403,18 @@ run_train() {
     local train_log="$LOG_DIR/train_${label}_${ts}.log"
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Task | problem=$problem | size=$size"
-    echo "  vLLM GPU:  $VLLM_GPU    port=$port    log=$vllm_log"
+    echo "  vLLM GPU:  $VLLM_GPU    desired_port=$port    log=$vllm_log"
     echo "  训练 GPUs: $TRAIN_GPUS ($train_proc 进程)    log=$train_log"
 
     # 启动 vLLM server (后台,阻塞到健康检查通过)
+    # start_vllm_server 内部会清理孤儿 + 找空闲端口, 实际端口写到 VLLM_ACTUAL_PORT
     if ! start_vllm_server "$VLLM_GPU" "$port" "$vllm_log"; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ vLLM server 启动失败,终止本任务"
         return 1
     fi
+    # 用 vLLM 实际监听的端口 (可能因为 desired 被占而扫到其他端口)
+    port="${VLLM_ACTUAL_PORT:-$port}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] vLLM 实际端口: $port (train.py 将连接此端口)"
 
     # 启动训练 (剩余 train_proc 张卡)
     # PYTHONPATH 给训练侧,让 utils.vllm_ngram_processor 和其它 utils 能被 import
