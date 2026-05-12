@@ -2,7 +2,8 @@
 GRPOPRMTrainer: 继承 trl.GRPOTrainer，Per-Customer 增量 PRM + 段内广播。
 
 设计（A_feasibility + A_outcome + Per-Customer PRM → per-token advantage）：
-    1. A_feasibility：4D 信号加权 (parse/coverage/constraint/format)
+    1. A_feasibility：parse / (coverage × constraint) / format 三项加权
+       - cov 与 con 用乘积合并: cov=0 时 con 无效, 防"丢覆盖换约束"hack
        → 全组 num_gen 条做 z-score（零均值），GRPO 标准 baseline 中心化
     2. A_outcome：可行子集 z-score(-distance)，子集 ≥ 2 才算，不可行 = 0
     3. A_out = A_feasibility_norm + A_outcome_norm → 所有 token 共享（整组零均值）
@@ -369,8 +370,10 @@ class GRPOPRMTrainer(GRPOTrainer):
                     and c["constraint"] == 1.0 and c["format"] == 1.0)
             is_feasible.append(feas)
 
-            a_feas_raw[i] = (config.w_p * c["parse"] + config.w_c * c["coverage"]
-                             + config.w_k * c["constraint"] + config.w_f * c["format"])
+            # cov × con 乘积合并: cov=0 时 con 无效, 防止"丢覆盖换约束"hack
+            a_feas_raw[i] = (config.w_p * c["parse"]
+                             + config.w_cc * (c["coverage"] * c["constraint"])
+                             + config.w_f * c["format"])
 
             if feas:
                 prob = _PROBLEM_OBJS.get(problem_type_list[i])

@@ -105,18 +105,18 @@ def compute_a_feasibility(
     instance: dict,
     problem_type: str,
     w_p: float = 1.0,
-    w_c: float = 1.0,
-    w_k: float = 1.0,
+    w_cc: float = 2.0,
     w_f: float = 0.5,
 ) -> float:
     """
-    A_feasibility = 4D 信号加权求和。
-    可行解四项全 1.0 → 拿满 (w_p + w_c + w_k + w_f = 3.5)。
-    不可行解根据实际得分拿部分分。
+    A_feasibility = w_p*parse + w_cc*(coverage × constraint) + w_f*format
+    可行解三项全 1.0 → 拿满 (w_p + w_cc + w_f = 3.5)。
+    cov × con 乘积合并: cov=0 时 con 无效, 防"丢覆盖换约束"hack。
     """
     c = compute_terminal_components(completion, instance, problem_type)
-    return (w_p * c["parse"] + w_c * c["coverage"]
-            + w_k * c["constraint"] + w_f * c["format"])
+    return (w_p * c["parse"]
+            + w_cc * (c["coverage"] * c["constraint"])
+            + w_f * c["format"])
 
 
 def _constraint_score(problem_type: str, route_or_routes, instance: dict) -> float:

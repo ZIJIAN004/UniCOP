@@ -77,10 +77,11 @@ class Config:
     proc_alpha: float              = 0.5   # process 信号权重；段内广播已覆盖较多 token，0.5 起步
     infeasible_margin: float       = 1.0   # (legacy) 惩罚低于历史最小可行 advantage 的幅度
     infeasible_default_penalty: float = -5.0  # (legacy) 训练初始还没见过可行解时的 fallback
-    # A_feasibility 权重（可行解拿满 = w_p + w_c + w_k + w_f = 3.5）
+    # A_feasibility 权重（可行解拿满 = w_p + w_cc + w_f = 3.5）
+    # cov 与 con 用乘积合并：cov=0 时 con 多少都无效，防 reward hack
+    # （之前各占 1.0 独立加权时，模型可能优化 con 牺牲 cov，coverage 反向漂移）
     w_p: float                     = 1.0   # R_parse 权重
-    w_c: float                     = 1.0   # R_coverage 权重
-    w_k: float                     = 1.0   # R_constraint 权重
+    w_cc: float                    = 2.0   # R_coverage × R_constraint 联合权重
     w_f: float                     = 0.5   # R_format 权重
     abnormal_margin: float         = 0.01  # 异常步比最差正常步低多少
 
