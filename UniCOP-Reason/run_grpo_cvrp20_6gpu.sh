@@ -68,7 +68,9 @@ TRAIN_GPUS_CSV="0,1,2,3,4,5"
 TRAIN_PROC=6
 
 ZERO_STAGE=3
-NUM_TRAIN=2000
+# num_train 2000 → 4000: 总 update 数 250 → 500, 加 update 频率, GRPO 主流
+# (DAPO/DeepSeek-R1) 推荐数千 update, 250 偏少. 代价: 总训练时间翻倍 ~160h.
+NUM_TRAIN=4000
 OUTPUT_DIR_BASE="$WORK_DIR/output_6gpu"
 
 # vLLM server 参数 (与 auto_train.sh 对齐)

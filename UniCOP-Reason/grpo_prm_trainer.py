@@ -179,6 +179,23 @@ class GRPOPRMTrainer(GRPOTrainer):
                      "prm_mask", "prm_denom"):
             batch.pop(key, None)
 
+        # completion 长度分布 (跨 rank gather, 用于判断 max_completion_length 余量)
+        # p95 是关键: 若长期 >0.9 × max_completion_length, 截断率上升, 需扩 max_len
+        # 或砍 think 长度. p50 反映典型长度, max 反映极值.
+        try:
+            comp_len_local = completion_mask.sum(-1).float().contiguous()
+            all_lens = self.accelerator.gather(comp_len_local).cpu().numpy()
+            self.log({
+                "completion/p50": float(np.percentile(all_lens, 50)),
+                "completion/p95": float(np.percentile(all_lens, 95)),
+                "completion/max": float(all_lens.max()),
+            })
+        except Exception as _e:
+            # log 失败不应阻塞训练
+            if not getattr(self, "_completion_log_warned", False):
+                print(f"⚠️ completion length log 失败: {_e}", flush=True)
+                self._completion_log_warned = True
+
         if _record and torch.cuda.is_available():
             torch.cuda.synchronize()
         if _record:
