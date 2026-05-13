@@ -433,33 +433,38 @@ class GRPOPRMTrainer(GRPOTrainer):
                 f"PRM gather size mismatch: prm={G} hash={len(all_row_hash)}"
             )
 
-            # ── step 3: 按 (prompt_hash, customer_id) 跨 rank z-score ──
-            # 收集每个 (p_hash, c) 的正常 reward 列表 + anomaly global_idx 集合
-            normal_rewards: dict = defaultdict(list)   # (p_hash, c) -> [(gidx, reward), ...]
-            anomaly_lookup: dict = defaultdict(set)    # (p_hash, c) -> {gidx, ...}
+            # ── step 3: 按 (prompt_hash, step_index) 跨 rank z-score ───
+            # 收集每个 (p_hash, step_idx) 的正常 reward 列表 + anomaly global_idx 集合.
+            # key 用 step_index (think 段内第几个 customer step), 不是 customer_id:
+            #   - 跨 trajectory 同 step_index 表示"经过相同步数后的决策点", prefix
+            #     长度一致, POMO state 量级可比.
+            #   - 用 customer_id 会让 "≥2 可行但选的 customer 不重叠" 时整组 pairs=1,
+            #     导致 PRM 信号完全失活 (n_zscore=0 的根因).
+            normal_rewards: dict = defaultdict(list)   # (p_hash, step_idx) -> [(gidx, reward), ...]
+            anomaly_lookup: dict = defaultdict(set)    # (p_hash, step_idx) -> {gidx, ...}
 
             for gidx, prm_res in enumerate(all_prm_results):
                 if prm_res is None:
                     continue
                 p_hash = all_row_hash[gidx]
-                for c, r in prm_res.customer_rewards.items():
-                    normal_rewards[(p_hash, c)].append((gidx, r))
-                for c in prm_res.anomaly_customers:
-                    anomaly_lookup[(p_hash, c)].add(gidx)
+                for step_idx, r in prm_res.step_rewards.items():
+                    normal_rewards[(p_hash, step_idx)].append((gidx, r))
+                for step_idx in prm_res.anomaly_step_indices:
+                    anomaly_lookup[(p_hash, step_idx)].add(gidx)
 
-            # 对每个 (p_hash, c) 算信号, 写 normalized_proc[gidx][c] = a_proc.
+            # 对每个 (p_hash, step_idx) 算信号, 写 normalized_proc[gidx][step_idx] = a_proc.
             # 三条路径:
             #   ≥2 normal + std>0    → z-score (anomaly 用 z(min) - σ, bounded)
             #   ≥2 normal + std=0    → normal 退化为 0 (无区分度), anomaly 用 fallback 常数
-            #   <2 normal            → fallback 常数 (含单可行 + 孤儿 anomaly)
+            #   <2 normal            → fallback 常数 (含单可行 / trajectory 长度差异 / 孤儿 anomaly)
             # 不再用 std_floor: 新 anomaly 公式 z(min) - σ 与 std 解耦, 不会爆;
-            # POMO 增量 reward 天然在 1e-3 量级, std_floor=1e-6 会误伤正常信号.
-            # 遍历 normal_rewards ∪ anomaly_lookup 的 keys, 防止"孤儿 anomaly"
-            # (anomaly_lookup 有但 normal_rewards 完全没出现的 customer) 被漏掉.
+            # POMO 增量 reward 天然在 0.1-1 量级 (实测 std_raw_mean ≈ 0.3),
+            # std_floor=1e-6 在这个量级下会误伤正常信号.
+            # 遍历 normal_rewards ∪ anomaly_lookup 的 keys, 防止"孤儿 anomaly"被漏掉.
             normalized_proc: dict[int, dict[int, float]] = defaultdict(dict)
             all_keys = set(normal_rewards.keys()) | set(anomaly_lookup.keys())
             for key in all_keys:
-                p_hash, c = key
+                p_hash, step_idx = key
                 pairs = normal_rewards.get(key, [])
                 anomaly_gidx_set = anomaly_lookup.get(key, set())
 
@@ -473,24 +478,24 @@ class GRPOPRMTrainer(GRPOTrainer):
                         std_c  = std_raw + eps
                         abnormal_val = min(rewards_only) - config.abnormal_sigma * std_c
                         for gidx, r in pairs:
-                            normalized_proc[gidx][c] = (r - mean_c) / std_c
+                            normalized_proc[gidx][step_idx] = (r - mean_c) / std_c
                         for gidx in anomaly_gidx_set:
-                            if c not in normalized_proc.get(gidx, {}):
-                                normalized_proc[gidx][c] = (abnormal_val - mean_c) / std_c
+                            if step_idx not in normalized_proc.get(gidx, {}):
+                                normalized_proc[gidx][step_idx] = (abnormal_val - mean_c) / std_c
                         n_with_zscore += 1
                     else:
                         # 完全退化 (所有 normal reward 精确相等): normal 无信号, anomaly 仍要罚
                         for gidx in anomaly_gidx_set:
-                            if c not in normalized_proc.get(gidx, {}):
-                                normalized_proc[gidx][c] = config.fallback_anomaly_value
+                            if step_idx not in normalized_proc.get(gidx, {}):
+                                normalized_proc[gidx][step_idx] = config.fallback_anomaly_value
                         n_with_fallback += 1
                 else:
-                    # Fallback: 单条 normal 或孤儿 anomaly, 用绝对常数
+                    # Fallback: 单条 normal / trajectory 长度差异 / 孤儿 anomaly, 用绝对常数
                     for gidx, _ in pairs:
-                        normalized_proc[gidx][c] = config.fallback_normal_value
+                        normalized_proc[gidx][step_idx] = config.fallback_normal_value
                     for gidx in anomaly_gidx_set:
-                        if c not in normalized_proc.get(gidx, {}):
-                            normalized_proc[gidx][c] = config.fallback_anomaly_value
+                        if step_idx not in normalized_proc.get(gidx, {}):
+                            normalized_proc[gidx][step_idx] = config.fallback_anomaly_value
                     n_with_fallback += 1
 
             # ── step 4: 切回本 rank, 段内广播 ───────────────────────────
@@ -505,8 +510,8 @@ class GRPOPRMTrainer(GRPOTrainer):
                 if prm_res is None or offset_maps[j] is None:
                     continue
                 om = offset_maps[j]
-                for c, a_proc in normalized_proc[gidx].items():
-                    seg = prm_res.customer_ranges.get(c)
+                for step_idx, a_proc in normalized_proc[gidx].items():
+                    seg = prm_res.step_ranges.get(step_idx)
                     if seg is None:
                         continue
                     seg_cs, seg_ce = seg

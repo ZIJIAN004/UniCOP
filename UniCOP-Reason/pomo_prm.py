@@ -87,10 +87,16 @@ class ThinkStep:
 
 @dataclass
 class ThinkPRMResult:
-    """单条 completion 的 think 段 PRM 结果。"""
-    customer_rewards: dict     # customer_id → 增量 reward（仅正常步）
-    customer_ranges: dict      # customer_id → (char_start, char_end)
-    anomaly_customers: set     # 异常的 customer ID 集合
+    """单条 completion 的 think 段 PRM 结果。
+
+    关键: key 是 step_index (think 段内 customer step 的位置索引), 不是 customer_id.
+    这样跨 trajectory 比较时, 同 step_index 表示"经过相同步数后的下一个决策点",
+    prefix 长度一致, POMO state 量级可比. 用 customer_id 做 key 会导致两条
+    trajectory 即使 ≥2 可行, 只要选择的 customer 集合不重叠就 0 个 z-score 组.
+    """
+    step_rewards: dict         # step_index → 增量 reward（仅正常步）
+    step_ranges: dict          # step_index → (char_start, char_end)
+    anomaly_step_indices: set  # 异常的 step_index 集合
     n: int
 
 
@@ -441,9 +447,11 @@ class POMOPRM:
         )
 
         if not customer_steps:
+            # 没解析出任何 customer step, 整条 think 视为最早期 anomaly.
+            # 没有 step_index 可指, 返回空 result, 由上层 A_feasibility 整条广播负信号.
             return ThinkPRMResult(
-                customer_rewards={}, customer_ranges={},
-                anomaly_customers=set(range(1, n + 1)), n=n,
+                step_rewards={}, step_ranges={},
+                anomaly_step_indices=set(), n=n,
             )
 
         # ── 约束校验 → valid_full_length ──────────────────────────────
@@ -464,11 +472,14 @@ class POMOPRM:
         effective_anomaly = min(chain_limit, constraint_anomaly)
 
         normal_steps = customer_steps[:effective_anomaly]
-        customer_rewards: dict[int, float] = {}
-        customer_ranges: dict[int, tuple] = {}
-        anomaly_customers: set[int] = set()
+        step_rewards: dict[int, float] = {}
+        step_ranges: dict[int, tuple] = {}
+        anomaly_step_indices: set[int] = set()
 
         # ── POMO 评估正常步 ──────────────────────────────────────────
+        # key 是 step_index (think 段内 customer step 的位置), 不是 customer_id.
+        # 跨 trajectory 同 step_index 对比的是"经过相同步数后的决策点", prefix 长度
+        # 一致, POMO state 量级可比.
         if normal_steps:
             cust_indices = [s.full_step_idx for s in normal_steps]
             pomo_values = self._batch_evaluate_prefixes(
@@ -481,28 +492,24 @@ class POMOPRM:
                 if i < len(pomo_values):
                     R_step = pomo_values[i] - pomo_prev
                     pomo_prev = pomo_values[i]
-                    customer_rewards[step.customer_id] = R_step
-                    customer_ranges[step.customer_id] = step.char_range
+                    step_rewards[i] = R_step
+                    step_ranges[i] = step.char_range
                 else:
-                    anomaly_customers.add(step.customer_id)
+                    anomaly_step_indices.add(i)
 
-        # ── 异常步（含未访问客户） ─────────────────────────────────────
-        # 若 customer 已在正常区获得 reward，不覆盖（防 think 中假回溯）
-        for step in customer_steps[effective_anomaly:]:
-            c = step.customer_id
-            if c not in customer_rewards:
-                anomaly_customers.add(c)
-            customer_ranges.setdefault(c, step.char_range)
-
-        visited = {s.customer_id for s in customer_steps}
-        for c in range(1, n + 1):
-            if c not in visited and c not in customer_rewards:
-                anomaly_customers.add(c)
+        # ── 异常步: effective_anomaly 起所有 customer step ─────────────
+        # "未访问客户" 不再加 anomaly: 它们没出现在 customer_steps 里, 没有
+        # step_index 可指, 也没有 char_range 可广播. 这部分信号靠 A_feasibility
+        # 整条广播 (feasibility=False → 负 z-score 罚整条).
+        for i, step in enumerate(customer_steps[effective_anomaly:]):
+            step_idx = effective_anomaly + i
+            anomaly_step_indices.add(step_idx)
+            step_ranges.setdefault(step_idx, step.char_range)
 
         return ThinkPRMResult(
-            customer_rewards=customer_rewards,
-            customer_ranges=customer_ranges,
-            anomaly_customers=anomaly_customers,
+            step_rewards=step_rewards,
+            step_ranges=step_ranges,
+            anomaly_step_indices=anomaly_step_indices,
             n=n,
         )
 
