@@ -394,6 +394,9 @@ class GRPOPRMTrainer(GRPOTrainer):
         #   step 3: 按 (prompt_hash, customer_id) 跨 rank 分组 z-score 增量 reward
         #   step 4: 切回本 rank, 段内广播到 token (offset_maps 是 rank-local 的,
         #           所以广播必须 rank-local)
+        prm_std_raw_values: list[float] = []   # 给 log 用, 兼容 disable_prm 路径
+        n_with_zscore = 0
+        n_with_fallback = 0
         if not config.disable_prm and self.pomo_prm is not None:
             from accelerate.utils import gather_object
             from collections import defaultdict
@@ -455,8 +458,6 @@ class GRPOPRMTrainer(GRPOTrainer):
             # (anomaly_lookup 有但 normal_rewards 完全没出现的 customer) 被漏掉.
             normalized_proc: dict[int, dict[int, float]] = defaultdict(dict)
             all_keys = set(normal_rewards.keys()) | set(anomaly_lookup.keys())
-            n_with_zscore = 0
-            n_with_fallback = 0
             for key in all_keys:
                 p_hash, c = key
                 pairs = normal_rewards.get(key, [])
@@ -466,6 +467,7 @@ class GRPOPRMTrainer(GRPOTrainer):
                     rewards_only = [r for _, r in pairs]
                     mean_c = float(np.mean(rewards_only))
                     std_raw = float(np.std(rewards_only))
+                    prm_std_raw_values.append(std_raw)
                     if std_raw > 0.0:
                         # 标准 z-score 路径
                         std_c  = std_raw + eps
@@ -525,9 +527,14 @@ class GRPOPRMTrainer(GRPOTrainer):
                 self._prm_diag_logged = True
 
         # ── 4. Log ───────────────────────────────────────────────────
+        # PRM std_raw 量级判断: POMO 增量 reward 期望 ~1e-3, 若 std_raw 长期
+        # 落在 1e-6 以下意味着 rollout 高度同质化, z-score 信号被 +eps 压扁,
+        # 需要靠 fallback 兜住. n_zscore/n_fallback 组数反映分流分布.
+        # advantage 实际信号: A_total_mean 因 z-score 强制零均值无意义,
+        # 用 abs().mean() 看 token 级平均信号大小, std() 看分散度.
         n_feasible = sum(is_feasible)
         feas_rate = n_feasible / B if B > 0 else 0.0
-        self.log({
+        log_dict = {
             "reward/feasibility_rate":    self._gather_mean(feas_rate),
             "reward/R_parse_rate":        self._gather_mean(
                 np.mean([c["parse"] for c in components])),
@@ -537,9 +544,17 @@ class GRPOPRMTrainer(GRPOTrainer):
                 np.mean([c["constraint"] for c in components])),
             "reward/R_format_mean":       self._gather_mean(
                 np.mean([c["format"] for c in components])),
-            "reward/A_out_mean":          self._gather_mean(a_out.mean()),
-            "reward/A_total_mean":        self._gather_mean(advantages.mean()),
-        })
+            "reward/A_abs_mean":          self._gather_mean(advantages.abs().mean()),
+            "reward/A_std":               self._gather_mean(advantages.std()),
+            "prm/n_zscore_groups":        float(n_with_zscore),
+            "prm/n_fallback_groups":      float(n_with_fallback),
+        }
+        if prm_std_raw_values:
+            std_arr = np.array(prm_std_raw_values)
+            log_dict["prm/std_raw_mean"] = float(std_arr.mean())
+            log_dict["prm/std_raw_min"]  = float(std_arr.min())
+            log_dict["prm/std_raw_max"]  = float(std_arr.max())
+        self.log(log_dict)
 
         return advantages
 
