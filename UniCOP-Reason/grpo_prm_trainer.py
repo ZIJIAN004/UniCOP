@@ -445,17 +445,18 @@ class GRPOPRMTrainer(GRPOTrainer):
                     anomaly_lookup[(p_hash, c)].add(gidx)
 
             # 对每个 (p_hash, c) 算信号, 写 normalized_proc[gidx][c] = a_proc.
-            # 两种路径:
-            #   ≥2 条 normal reward → z-score (anomaly 用 z(min) - σ)
-            #   <2 条 normal reward → fallback 常数 (含单可行 + 孤儿 anomaly).
-            # std=0 退化保护: 同 (p_hash, c) 跨 rank 正常 reward 全相同时,
-            # 正常步 z-score 自动 = 0 (numerator 也 0), 但 anomaly 量级仍受
-            # abnormal_sigma 控制 (现在用 std 倍数, 不会爆), 仍跳过该组避免无信号.
+            # 三条路径:
+            #   ≥2 normal + std>0    → z-score (anomaly 用 z(min) - σ, bounded)
+            #   ≥2 normal + std=0    → normal 退化为 0 (无区分度), anomaly 用 fallback 常数
+            #   <2 normal            → fallback 常数 (含单可行 + 孤儿 anomaly)
+            # 不再用 std_floor: 新 anomaly 公式 z(min) - σ 与 std 解耦, 不会爆;
+            # POMO 增量 reward 天然在 1e-3 量级, std_floor=1e-6 会误伤正常信号.
             # 遍历 normal_rewards ∪ anomaly_lookup 的 keys, 防止"孤儿 anomaly"
             # (anomaly_lookup 有但 normal_rewards 完全没出现的 customer) 被漏掉.
-            std_floor = 1e-6
             normalized_proc: dict[int, dict[int, float]] = defaultdict(dict)
             all_keys = set(normal_rewards.keys()) | set(anomaly_lookup.keys())
+            n_with_zscore = 0
+            n_with_fallback = 0
             for key in all_keys:
                 p_hash, c = key
                 pairs = normal_rewards.get(key, [])
@@ -465,15 +466,22 @@ class GRPOPRMTrainer(GRPOTrainer):
                     rewards_only = [r for _, r in pairs]
                     mean_c = float(np.mean(rewards_only))
                     std_raw = float(np.std(rewards_only))
-                    if std_raw < std_floor:
-                        continue
-                    std_c  = std_raw + eps
-                    abnormal_val = min(rewards_only) - config.abnormal_sigma * std_c
-                    for gidx, r in pairs:
-                        normalized_proc[gidx][c] = (r - mean_c) / std_c
-                    for gidx in anomaly_gidx_set:
-                        if c not in normalized_proc.get(gidx, {}):
-                            normalized_proc[gidx][c] = (abnormal_val - mean_c) / std_c
+                    if std_raw > 0.0:
+                        # 标准 z-score 路径
+                        std_c  = std_raw + eps
+                        abnormal_val = min(rewards_only) - config.abnormal_sigma * std_c
+                        for gidx, r in pairs:
+                            normalized_proc[gidx][c] = (r - mean_c) / std_c
+                        for gidx in anomaly_gidx_set:
+                            if c not in normalized_proc.get(gidx, {}):
+                                normalized_proc[gidx][c] = (abnormal_val - mean_c) / std_c
+                        n_with_zscore += 1
+                    else:
+                        # 完全退化 (所有 normal reward 精确相等): normal 无信号, anomaly 仍要罚
+                        for gidx in anomaly_gidx_set:
+                            if c not in normalized_proc.get(gidx, {}):
+                                normalized_proc[gidx][c] = config.fallback_anomaly_value
+                        n_with_fallback += 1
                 else:
                     # Fallback: 单条 normal 或孤儿 anomaly, 用绝对常数
                     for gidx, _ in pairs:
@@ -481,6 +489,7 @@ class GRPOPRMTrainer(GRPOTrainer):
                     for gidx in anomaly_gidx_set:
                         if c not in normalized_proc.get(gidx, {}):
                             normalized_proc[gidx][c] = config.fallback_anomaly_value
+                    n_with_fallback += 1
 
             # ── step 4: 切回本 rank, 段内广播 ───────────────────────────
             rank = self.accelerator.process_index
@@ -507,12 +516,9 @@ class GRPOPRMTrainer(GRPOTrainer):
             # ── 诊断: 一次性 print PRM 跨 rank 统计 ─────────────────────
             if not getattr(self, "_prm_diag_logged", False):
                 n_results_global = sum(1 for r in all_prm_results if r is not None)
-                n_groups_with_signal = sum(
-                    1 for pairs in normal_rewards.values() if len(pairs) >= 2
-                )
                 print(
                     f"[PRM_DIAG rank={rank}] all_prm_results: {n_results_global}/{G} non-None  "
-                    f"customer_groups_with_signal={n_groups_with_signal}/{len(normal_rewards)}  "
+                    f"keys_total={len(all_keys)} (zscore={n_with_zscore}, fallback={n_with_fallback})  "
                     f"normalized_proc 覆盖 {len(normalized_proc)} completions",
                     flush=True,
                 )
