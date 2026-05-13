@@ -83,7 +83,15 @@ class Config:
     w_p: float                     = 1.0   # R_parse 权重
     w_cc: float                    = 2.0   # R_coverage × R_constraint 联合权重
     w_f: float                     = 0.5   # R_format 权重
-    abnormal_margin: float         = 0.01  # 异常步比最差正常步低多少
+    # 异常步固定在 "min - k*std" 位置 (原始 reward 空间), 归一化后等价于
+    # z(min) - k, 与 std 绝对大小脱钩, 避免早期 rollout 同质化时
+    # margin/std → 10^4 的爆炸. k=3 = 3σ 落在正常分布之外, 惩罚显著且稳定.
+    abnormal_sigma: float          = 3.0   # 异常步比最差正常步低多少个 σ
+    # 单可行 / 孤儿 anomaly fallback: 当某 (prompt, customer) 上 normal reward
+    # 不足 2 条无法 z-score 时, 给绝对常数信号 (量级粗略对齐 ≥2 可行场景的
+    # z-score 输出: normal z 量级 ±1~2, anomaly z 量级 -3).
+    fallback_normal_value: float   = 1.0   # 单条 normal 时的信号
+    fallback_anomaly_value: float  = -3.0  # 对应的 anomaly 信号
     # resample 门控: 前 N step 跳过可行性重采样
     # 训练初期可行率低 (<20%), resample 也大概率失败, 反复 vLLM 调用浪费时间.
     # step >= N 之后模型应已学到基本可行模式, resample 救剩余 outlier 才有意义.
