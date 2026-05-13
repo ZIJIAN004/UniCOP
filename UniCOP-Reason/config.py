@@ -27,7 +27,7 @@ class Config:
     # max_completion_length=4096: 平衡显存与截断率，不够再调
     num_generations: int               = 8
     max_prompt_length: int             = 768
-    max_completion_length: int         = 4096
+    max_completion_length: int         = 3456    # 27×128, 距 p95 估算值 ~3400 最近的 128 倍数
     learning_rate: float               = 1e-5   # GRPO + LoRA rank 64 推荐 5e-6~2e-5 (原 1e-6 过低,SFT 已升到 1e-4)
                                                 # 6 卡 effective batch 192 (vs 4 卡 128, +50%) + grad_norm 长期 ~0.1 远低于 clip 阈值
                                                 # 说明信号空间还有, 从 5e-6 上调到 1e-5 (~2x, 比 linear scaling 1.5x 略激进)
