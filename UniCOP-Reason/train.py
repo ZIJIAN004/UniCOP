@@ -29,17 +29,74 @@ from peft import LoraConfig, get_peft_model
 torch_checkpoint.set_checkpoint_debug_enabled(True)
 
 
-# ── VLLMClient retry monkey-patch ─────────────────────────────────────
-# trl.extras.vllm_client.VLLMClient.generate 默认无 retry, 一旦 vLLM 进程
-# 闪挂 (auto_train.sh 的 supervisor 正在重启) 立刻 RemoteDisconnected → exit 1.
-# 包一层指数 backoff retry, vLLM 重启的 30-60 秒内 trainer 等待不死.
+# ── VLLMClient monkey-patch (两层): retry + logprobs 暴露 ─────────────
+# Layer 1 (retry):
+#   trl.extras.vllm_client.VLLMClient.generate 默认无 retry, 一旦 vLLM 进程
+#   闪挂 (auto_train.sh 的 supervisor 正在重启) 立刻 RemoteDisconnected → exit 1.
+#   包一层指数 backoff retry, vLLM 重启的 30-60 秒内 trainer 等待不死.
+# Layer 2 (logprobs):
+#   完全替换 VLLMClient.generate 实现, 始终发 return_logprobs=True 给服务端
+#   (utils/vllm_serve_ngram.py 已注册新路由支持这个字段), 解析 response 拿
+#   per-token sampled logprobs, 缓存到 self._last_logprobs 实例属性供训练端
+#   读取算 IS ratio. 保持原方法签名返回 list[list[int]] (token_ids), 父类
+#   GRPOTrainer._generate_and_score_completions 不受影响.
 import time
 import requests
 import urllib3
 from trl.extras.vllm_client import VLLMClient
 
+
+def _patch_vllm_client_logprobs():
+    """Layer 2: 替换 VLLMClient.generate 实现, 暴露 logprobs 到 self._last_logprobs.
+
+    注意: 必须在 retry patch 之前装好, 让 retry 包装 layer 2 后的实现.
+    """
+    def _new_generate(
+        self,
+        prompts,
+        n: int = 1,
+        repetition_penalty: float = 1.0,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+        top_k: int = -1,
+        min_p: float = 0.0,
+        max_tokens: int = 16,
+        guided_decoding_regex=None,
+    ):
+        url = f"http://{self.host}:{self.server_port}/generate/"
+        body = {
+            "prompts": prompts,
+            "n": n,
+            "repetition_penalty": repetition_penalty,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "min_p": min_p,
+            "max_tokens": max_tokens,
+            "guided_decoding_regex": guided_decoding_regex,
+            "return_logprobs": True,  # 始终拿 logprobs
+        }
+        response = self.session.post(url, json=body)
+        if response.status_code != 200:
+            raise Exception(f"Request failed: {response.status_code}, {response.text}")
+        data = response.json()
+        # 缓存 logprobs 到实例属性 (供训练端 _generate_and_score_completions 读)
+        # 注意: 多次调用 generate 会覆盖, 训练端读取要 race-safe
+        self._last_logprobs = data.get("logprobs")  # list[list[float]] 或 None
+        return data["completion_ids"]
+
+    VLLMClient.generate = _new_generate
+    # 初始化默认值, 避免读未设置属性
+    VLLMClient._last_logprobs = None
+    print("✓ VLLMClient.generate replaced (始终发 return_logprobs=True, "
+          "结果缓存到 self._last_logprobs)")
+
+
 def _patch_vllm_client_retry(max_retries: int = 10, base_backoff: float = 3.0):
-    """Monkey-patch VLLMClient.generate 和 update_named_param 加 retry."""
+    """Layer 1: Monkey-patch VLLMClient.generate 和 update_named_param 加 retry.
+
+    必须在 logprobs patch 之后调用, 让 retry 包装 logprobs-aware 的实现.
+    """
     _orig_generate = VLLMClient.generate
     _orig_update_named_param = getattr(VLLMClient, "update_named_param", None)
     _exc_types = (
@@ -83,6 +140,10 @@ def _patch_vllm_client_retry(max_retries: int = 10, base_backoff: float = 3.0):
         f"(max_retries={max_retries}, base_backoff={base_backoff}s)"
     )
 
+# 顺序敏感: logprobs patch 先装 (替换 generate 实现), 再装 retry (包装 logprobs-aware
+# 版本). retry 反过来不行 - 它会包装原 _orig_generate, 后续 logprobs patch 把 retry
+# 包装的版本替换掉, 失去 retry.
+_patch_vllm_client_logprobs()
 _patch_vllm_client_retry()
 
 from config import config

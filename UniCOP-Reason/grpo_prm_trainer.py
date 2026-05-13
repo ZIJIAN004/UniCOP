@@ -96,6 +96,45 @@ class GRPOPRMTrainer(GRPOTrainer):
         B, T = completion_ids.shape
         num_gen = self.args.num_generations
 
+        # ── vLLM logprobs broadcast + pad → batch["vllm_per_token_logps"] ────
+        # train.py 已 patch VLLMClient.generate 始终 return_logprobs=True 并把
+        # logprobs 缓存到 self.vllm_client._last_logprobs (只 main process 有值,
+        # 因为 TRL 父类只在 main process 调 generate). 立刻在 super() 之后取出
+        # 并 broadcast 给所有 rank, 防止后续 _resample_infeasible 的 generate 调用
+        # 覆盖 _last_logprobs.
+        try:
+            if self.accelerator.is_main_process:
+                lp_all = getattr(self.vllm_client, "_last_logprobs", None)
+            else:
+                lp_all = None
+            lp_holder = [lp_all]
+            broadcast_object_list(lp_holder, from_process=0)
+            lp_all_global = lp_holder[0]  # list[list[float]] 长度 G=num_gpus*B, 或 None
+
+            vllm_lp_tensor = torch.zeros(B, T, device=completion_ids.device,
+                                          dtype=torch.float32)
+            if lp_all_global is not None:
+                rank = self.accelerator.process_index
+                my_start = rank * B
+                for j in range(B):
+                    global_idx = my_start + j
+                    if global_idx >= len(lp_all_global):
+                        continue
+                    lp_j = lp_all_global[global_idx]
+                    if lp_j is None or len(lp_j) == 0:
+                        continue
+                    actual_len = min(len(lp_j), T)
+                    vllm_lp_tensor[j, :actual_len] = torch.tensor(
+                        lp_j[:actual_len], dtype=torch.float32,
+                        device=completion_ids.device,
+                    )
+                batch["vllm_per_token_logps"] = vllm_lp_tensor
+        except Exception as _e:
+            if not getattr(self, "_vllm_logprob_warn", False):
+                print(f"⚠️ vLLM logprobs 处理失败 (IS 校正退化为不校正): "
+                      f"{type(_e).__name__}: {_e}", flush=True)
+                self._vllm_logprob_warn = True
+
         # 展开 problem_data / problem_type
         if isinstance(inputs, list):
             problem_data_raw = [x["problem_data"] for x in inputs]
@@ -840,16 +879,44 @@ class GRPOPRMTrainer(GRPOTrainer):
 
         per_token_loss = -torch.min(ratio * adv, clipped_ratio * adv)
 
-        # vLLM IS 校正
-        is_ratio = inputs.get("importance_sampling_ratio")
-        if is_ratio is not None:
-            per_token_loss = per_token_loss * is_ratio
-        elif not getattr(self, '_is_ratio_warning_emitted', False):
-            print(
-                f"⚠️ WARNING: inputs 里没找到 importance_sampling_ratio。\n"
-                f"   当前 inputs keys: {sorted(inputs.keys())}"
-            )
-            self._is_ratio_warning_emitted = True
+        # vLLM IS 校正 (Truncated IS)
+        # 修正 vLLM PagedAttention 跟训练 transformers attention kernel 在同 weights 下
+        # 算 logprob 的数值差异. GRPO/PPO 的 importance sampling 假设要求 "采样分布 =
+        # 训练时 old_logps 分布", 但 vLLM 实际采样用的是 vllm_logps (kernel 不同).
+        # IS ratio = exp(old_logps - vllm_logps) 把 vLLM 实际采样分布换算回 old_logps
+        # 分布, 让公式严格成立.
+        #
+        # vllm_per_token_logps 优先 (我们 patched VLLMClient 拿到的);
+        # importance_sampling_ratio 后备 (TRL 0.23+ 自带, 此项目用 0.16 不会有).
+        vllm_logps = inputs.get("vllm_per_token_logps")
+        is_correction_log = None   # for self.log 用
+        if vllm_logps is not None:
+            # padding 位置 vllm_logps=0, old_logps 可能非零 → diff 大 → exp 爆炸.
+            # 用 completion_mask 把 padding 位置的 diff 置 0 → ratio=1 (无影响).
+            diff = (old_per_token_logps - vllm_logps) * completion_mask
+            is_correction = torch.exp(diff).clamp(max=3.0)   # Truncated IS, cap=3.0 同 TRL 默认
+            per_token_loss = per_token_loss * is_correction
+            # 监控 IS 校正幅度: 健康范围 mean ≈ 1.0, max < 3.0 (没频繁撞 cap)
+            valid = completion_mask.bool()
+            if valid.any():
+                vals = is_correction[valid]
+                is_correction_log = {
+                    "is/ratio_mean": vals.mean(),
+                    "is/ratio_std":  vals.std(),
+                    "is/ratio_max":  vals.max(),
+                    "is/ratio_cap_hit_rate": (vals >= 3.0).float().mean(),
+                }
+        else:
+            is_ratio = inputs.get("importance_sampling_ratio")
+            if is_ratio is not None:
+                per_token_loss = per_token_loss * is_ratio
+            elif not getattr(self, '_is_ratio_warning_emitted', False):
+                print(
+                    f"⚠️ WARNING: inputs 里既没找到 vllm_per_token_logps 也没找到 "
+                    f"importance_sampling_ratio, IS 校正未生效。\n"
+                    f"   当前 inputs keys: {sorted(inputs.keys())}"
+                )
+                self._is_ratio_warning_emitted = True
 
         # KL 正则
         beta_kl = getattr(self, 'beta', 0.0)
@@ -873,10 +940,14 @@ class GRPOPRMTrainer(GRPOTrainer):
                / completion_mask.sum().clamp(min=1.0)
 
         truncation_rate = (completion_mask.sum(-1) == 0).float().mean()
-        self.log({
+        loss_log = {
             "loss/total":                self._gather_mean(loss),
             "stats/truncation_rate":     self._gather_mean(truncation_rate),
-        })
+        }
+        if is_correction_log is not None:
+            for k, v in is_correction_log.items():
+                loss_log[k] = self._gather_mean(v)
+        self.log(loss_log)
 
         return loss
 
