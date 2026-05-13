@@ -405,11 +405,19 @@ class GRPOPRMTrainer(GRPOTrainer):
             eps = 1e-8
             offset_maps = self._build_offset_maps(completions_text, B)
 
-            # ── step 1: rank-local 算 ThinkPRMResult (仅可行 completion) ──
+            # ── step 1: rank-local 算 ThinkPRMResult (所有 completion) ──
+            # 不再用 is_feasible gating: PRM 的同组条件是"同 step_idx 上跨 trajectory
+            # 有 ≥2 条 normal", 不是"trajectory 整体可行". 不可行 completion 的 think
+            # 链路前 N 步可能仍是 valid prefix (compute_think_step_rewards 内部用
+            # _validate_prefix 切出 effective_anomaly), 这部分 step 应该参与跨
+            # trajectory 比较, 不能丢掉.
+            # 即使整条 completion 完全无 valid prefix (step 0 就违规), PRM 也会返回
+            # normal_steps=[]+anomaly_step_indices=全部 的 result, 自动走 fallback
+            # anomaly 路径, 不会污染信号.
             rank_prm_results: list[ThinkPRMResult | None] = []
             for i in range(B):
                 pt = problem_type_list[i]
-                if is_feasible[i] and pt in self.pomo_prm.SUPPORTED:
+                if pt in self.pomo_prm.SUPPORTED:
                     rank_prm_results.append(
                         self.pomo_prm.compute_think_step_rewards(
                             completions_text[i], instances[i], pt,
