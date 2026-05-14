@@ -89,19 +89,10 @@ def main():
 
     from vllm import LLM, SamplingParams
 
-    # 跟 vllm_serve_ngram.py 一致, monkey-patch SamplingParams.__init__ 注入 processor.
-    # 直接 SamplingParams(logits_processors=[probe]) 在 vLLM 0.7.3 不一定 honor.
-    # (上次跑 probe 发现 processor.records 全空, 即 processor 没被调用.)
+    # vLLM 0.7.3 SamplingParams 是 msgspec.Struct (C-level __init__),
+    # monkey-patch __init__ 不生效 (上次 probe 验证: sampling.logits_processors = None)
+    # 改用实例字段直接赋值的方式注入.
     probe = ProbeProcessor()
-    orig_sp_init = SamplingParams.__init__
-    def _patched_sp_init(self, *args, **kwargs):
-        procs = list(kwargs.get("logits_processors") or [])
-        procs.append(probe)
-        kwargs["logits_processors"] = procs
-        orig_sp_init(self, *args, **kwargs)
-    SamplingParams.__init__ = _patched_sp_init
-    print("[probe] SamplingParams.__init__ monkey-patched, all SamplingParams will inject probe")
-    print()
 
     llm = LLM(
         model=base_model,
@@ -111,16 +102,33 @@ def main():
         enforce_eager=True,
     )
 
+    # 先构造 SamplingParams, 再用实例赋值注入 logits_processors.
+    # msgspec.Struct 默认 mutable, 字段赋值应该工作.
     sampling = SamplingParams(
         n=N_SEQUENCES,
         temperature=1.0,
         max_tokens=MAX_TOKENS,
     )
-    # probe 已通过 monkey-patch 自动加入 sampling.logits_processors
-    # 用 stderr 强制刷新, 防止跟 vLLM stdout 混淆
-    print(f"!!! [probe] sampling.__class__={sampling.__class__.__module__}.{sampling.__class__.__name__}",
+    print(f"!!! [probe] BEFORE assign: sampling.logits_processors = {sampling.logits_processors}",
           file=sys.stderr, flush=True)
-    print(f"!!! [probe] sampling.logits_processors = {sampling.logits_processors}",
+    try:
+        sampling.logits_processors = [probe]
+        print(f"!!! [probe] AFTER assign: sampling.logits_processors = {sampling.logits_processors}",
+              file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f"!!! [probe] FAIL to assign: {type(e).__name__}: {e}",
+              file=sys.stderr, flush=True)
+        # 备用: 直接构造时传入
+        sampling = SamplingParams(
+            n=N_SEQUENCES,
+            temperature=1.0,
+            max_tokens=MAX_TOKENS,
+            logits_processors=[probe],
+        )
+        print(f"!!! [probe] FALLBACK construct: sampling.logits_processors = {sampling.logits_processors}",
+              file=sys.stderr, flush=True)
+
+    print(f"!!! [probe] sampling.__class__={sampling.__class__.__module__}.{sampling.__class__.__name__}",
           file=sys.stderr, flush=True)
     print(f"!!! [probe] expected probe instance id = {id(probe)}",
           file=sys.stderr, flush=True)
@@ -129,7 +137,7 @@ def main():
             print(f"!!! [probe]   processor[{i}] = {p!r} (id={id(p)})",
                   file=sys.stderr, flush=True)
     else:
-        print(f"!!! [probe] WARN: sampling.logits_processors is None or empty after init!",
+        print(f"!!! [probe] WARN: sampling.logits_processors is None or empty!",
               file=sys.stderr, flush=True)
 
     print(f"[probe] sampling.logits_processors length: "
