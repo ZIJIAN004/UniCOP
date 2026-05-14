@@ -42,6 +42,7 @@ UNVISITED_RESET_RE = re.compile(r"Unvisited:\s*\{([^}]*)\}")  # reflexion reset 
 @dataclass
 class MaskConfig:
     """Mask 行为的所有超参数. 跟 config.py 字段对齐."""
+    enabled: bool = False                   # 总开关 (跟 config.py mask_enabled 对齐)
     n: int = 20                             # CVRP n
     apply_select: bool = True               # R1
     apply_block_end: bool = True            # R2
