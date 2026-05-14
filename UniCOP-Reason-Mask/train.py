@@ -260,9 +260,6 @@ def main():
                         help="DeepSpeed ZeRO stage：0=关闭 | 2=梯度分片(1.5B) | 3=完全分片(7B)")
     parser.add_argument("--gradient_checkpointing", action="store_true",
                         help="开启梯度重计算节省显存，ZeRO-3 + 7B 时建议加上")
-    parser.add_argument("--no_repeat_ngram_size", type=int,
-                        default=config.no_repeat_ngram_size,
-                        help="GRPO 生成时的 n-gram 硬禁，0=关闭")
     parser.add_argument("--clip_epsilon_low", type=float,
                         default=config.clip_epsilon_low,
                         help="GRPO ratio clip 下界 ε_low (默认 0.20)")
@@ -298,7 +295,6 @@ def main():
     config.num_gpus               = args.num_gpus
     config.zero_stage             = args.zero_stage
     config.gradient_checkpointing = args.gradient_checkpointing or config.gradient_checkpointing
-    config.no_repeat_ngram_size   = args.no_repeat_ngram_size
     config.clip_epsilon_low       = args.clip_epsilon_low
     config.clip_epsilon_high      = args.clip_epsilon_high
     config.reward_mode            = args.reward_mode
@@ -325,8 +321,6 @@ def main():
     print(f"输出路径:  {config.output_dir}")
     print(f"GPU 数量:  {config.num_gpus}  ZeRO stage: {config.zero_stage}"
           f"  梯度重计算: {config.gradient_checkpointing}")
-    print(f"no_repeat_ngram_size: {config.no_repeat_ngram_size}"
-          f"{'（已关闭）' if config.no_repeat_ngram_size == 0 else ''}")
     _clip_mode = ("asymmetric (Clip-Higher)"
                   if config.clip_epsilon_high > config.clip_epsilon_low
                   else "symmetric")

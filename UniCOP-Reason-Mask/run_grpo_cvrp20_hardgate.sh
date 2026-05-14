@@ -72,7 +72,6 @@ VLLM_PORT=8001
 VLLM_GPU_MEM_UTIL=0.85
 VLLM_MAX_MODEL_LEN=5120
 VLLM_DTYPE=bfloat16
-VLLM_NGRAM_SIZE=0
 VLLM_STARTUP_TIMEOUT=300
 
 SCKEY="${SCKEY:-SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp}"
@@ -94,8 +93,7 @@ start_vllm_server() {
     CUDA_VISIBLE_DEVICES="$VLLM_GPU" \
     CUDA_HOME="$CUDA_HOME" \
     FLASHINFER_DISABLE_VERSION_CHECK=1 \
-        python "$WORK_DIR/utils/vllm_serve_ngram.py" \
-        --no_repeat_ngram_size "$VLLM_NGRAM_SIZE" \
+        python "$WORK_DIR/utils/vllm_serve_logprobs.py" \
         --model "$MODEL_BASE" \
         --tensor_parallel_size 1 \
         --port "$VLLM_PORT" \
@@ -198,7 +196,6 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPUS_CSV" \
     --num_gpus "$TRAIN_PROC" \
     --zero_stage "$ZERO_STAGE" \
     --gradient_checkpointing \
-    --no_repeat_ngram_size 0 \
     --output_dir "$OUTPUT_DIR_BASE" \
     --pomo_ckpt_dir "$POMO_CKPT_DIR" \
     --pomo_baseline_dir "$POMO_BASELINE_DIR" \

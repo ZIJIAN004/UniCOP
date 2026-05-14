@@ -36,8 +36,6 @@ class Config:
     num_train_epochs: int              = 3
     warmup_ratio: float                = 0.05
     kl_coef: float                     = 0.01
-    # n-gram 硬禁，0=关闭；与 evaluate.py 同义，抑制 think 段长程退化循环
-    no_repeat_ngram_size: int          = 6
 
     # ── DAPO Clip-Higher (非对称 ratio clipping，缓解熵坍缩) ─────
     # ε_high > ε_low：加概率快、扣概率慢，让低概率"探索 token"指数累积逃出

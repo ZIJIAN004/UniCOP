@@ -49,7 +49,6 @@ if [ "$VLLM_ENABLE_PREFIX_CACHING" = "True" ]; then
 else
     VLLM_PREFIX_CACHE_FLAG=""
 fi
-VLLM_NGRAM_SIZE=6        # no_repeat_ngram_size（V0 monkey-patch 注入）
 VLLM_STARTUP_TIMEOUT=300 # server 启动最长等待（秒）
 
 # ── 训练资源路径（从 paths.sh 获取） ─────────────────────────
@@ -190,7 +189,7 @@ sys.exit(1)
 # 杀本用户的孤儿 vLLM 进程 (上次 sbatch 异常退出留下的)
 cleanup_orphan_vllm() {
     local pids
-    pids=$(pgrep -u "$USER" -f "vllm_serve_ngram\.py" 2>/dev/null)
+    pids=$(pgrep -u "$USER" -f "vllm_serve_logprobs\.py" 2>/dev/null)
     if [ -n "$pids" ]; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 发现 vLLM 孤儿进程 ($pids), 清理后释放端口..."
         kill -9 $pids 2>/dev/null || true
@@ -251,8 +250,7 @@ start_vllm_server() {
             CUDA_VISIBLE_DEVICES="$vllm_gpu" \
             CUDA_HOME="$CUDA_HOME" \
             FLASHINFER_DISABLE_VERSION_CHECK=1 \
-                python "$WORK_DIR/utils/vllm_serve_ngram.py" \
-                --no_repeat_ngram_size "$VLLM_NGRAM_SIZE" \
+                python "$WORK_DIR/utils/vllm_serve_logprobs.py" \
                 --host 127.0.0.1 \
                 --model "$MODEL_BASE" \
                 --tensor_parallel_size 1 \

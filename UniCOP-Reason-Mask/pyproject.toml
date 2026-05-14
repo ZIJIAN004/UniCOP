@@ -11,27 +11,9 @@ requires-python = ">=3.10"
 # 这个 pyproject.toml 的唯一作用: 让 pip install -e . 注册 vllm.logits_processors
 # entry point,让 vLLM 启动时自动 discover 我们的 NoRepeatNgramAdapterLP。
 
-# ══════════════════════════════════════════════════════════════════════
-# vLLM 自定义 LogitsProcessor 注册 (核心!)
-# ──────────────────────────────────────────────────────────────────────
-# 背景: trl vllm-serve 的 CLI 不支持 --logits-processors flag (ValueError:
-# Some specified arguments are not used by the HfArgumentParser)。
-# 唯一稳健方案是用 vLLM 的 entry point 机制:
-#   - vLLM 启动时自动 scan 所有已安装 package 的 [vllm.logits_processors]
-#     entry point,注册其中的 AdapterLogitsProcessor 子类。
-#   - 完全不依赖 TRL 或 vLLM 的 CLI 参数透传。
-#
-# 使用步骤 (只要装一次):
-#   cd /home/ntu/lzj/UniCOP/UniCOP-Reason
-#   pip install -e .
-#
-# 验证注册成功:
-#   python -c "from importlib.metadata import entry_points; \
-#              print(list(entry_points(group='vllm.logits_processors')))"
-# 参考: https://docs.vllm.ai/en/stable/features/custom_logitsprocs/
-# ══════════════════════════════════════════════════════════════════════
-[project.entry-points."vllm.logits_processors"]
-no_repeat_ngram = "utils.vllm_ngram_processor:NoRepeatNgramAdapterLP"
+# (entry point 已删除: 原 NoRepeatNgramAdapterLP 不再使用, 改用 CVRP-specific
+#  mask processor, 通过 vllm_serve_logprobs.py 的 SamplingParams 实例字段赋值注入,
+#  不走 vLLM entry point 路径)
 
 # ── setuptools 包发现 ──
 # 只把项目里的三个 package (utils / problems / data) 纳入 editable install,

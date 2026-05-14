@@ -1,16 +1,17 @@
 """
-Wrapper: monkey-patch SamplingParams 注入 NoRepeatNgram + 替换 /generate/ 暴露 logprobs,
-然后启动 trl vllm-serve.
+Wrapper: 替换 /generate/ 路由暴露 sampled-token logprobs, 然后启动 trl vllm-serve.
 
-两个 patch (顺序敏感):
-  1. NoRepeatNgramLogitsProcessor: vLLM 0.7.3 SamplingParams 支持 logits_processors,
-     TRL 不暴露, 自己塞进去.
-  2. /generate/ endpoint 返回 sampled-token logprob (for GRPO Importance Sampling 校正):
-     - 扩展 GenerateRequest 加 return_logprobs: bool 字段
-     - 扩展 GenerateResponse 加 logprobs: Optional[list[list[float]]] 字段
-     - 替换 handler 内 SamplingParams 时设 logprobs=1, 从 output 取 sampled token logprob
-     这样训练端能算 IS ratio = exp(train_logps - vllm_logps), 修正 vLLM 跟训练
-     attention kernel 数值差异造成的 GRPO policy gradient 偏差.
+仅一个 patch:
+  /generate/ endpoint 返回 sampled-token logprob (for GRPO Importance Sampling 校正):
+    - 扩展 GenerateRequest 加 return_logprobs: bool 字段
+    - 扩展 GenerateResponse 加 logprobs: Optional[list[list[float]]] 字段
+    - 替换 handler 内 SamplingParams 时设 logprobs=1, 从 output 取 sampled token logprob
+
+  这样训练端能算 IS ratio = exp(train_logps - vllm_logps), 修正 vLLM 跟训练
+  attention kernel 数值差异造成的 GRPO policy gradient 偏差.
+
+(NoRepeatNgram patch 已删除: 用户决定不用 ngram 抑制, 改用 CVRP-specific mask processor.
+ Mask processor 的集成见 vllm_cvrp_mask_processor.py 和 Phase 3 改动.)
 
 技术细节: TRL 0.16.0 trl/scripts/vllm_serve.py 把 `app = FastAPI()` 和 `@app.post`
 装饰器都放在 main() 函数内 (不是模块顶层), 所以 import 时无法 patch 路由.
@@ -19,68 +20,11 @@ Wrapper: monkey-patch SamplingParams 注入 NoRepeatNgram + 替换 /generate/ �
 然后注销原路由 + 注册新路由 (新 handler 用提取到的 llm 闭包).
 
 用法 (替代 trl vllm-serve):
-    python utils/vllm_serve_ngram.py \
-        --no_repeat_ngram_size 6 \
+    python utils/vllm_serve_logprobs.py \
         --model /path/to/model \
         --port 8000 \
         [其他 trl vllm-serve 参数原样传递]
 """
-import sys
-
-
-def _extract_ngram_size():
-    ngram_size = 0
-    new_argv = [sys.argv[0]]
-    i = 1
-    while i < len(sys.argv):
-        if sys.argv[i] == "--no_repeat_ngram_size" and i + 1 < len(sys.argv):
-            ngram_size = int(sys.argv[i + 1])
-            i += 2
-        else:
-            new_argv.append(sys.argv[i])
-            i += 1
-    sys.argv = new_argv
-    return ngram_size
-
-
-def _patch_sampling_params(ngram_size: int):
-    import torch
-    from vllm import SamplingParams
-
-    class _NoRepeatNgramV0:
-        """vLLM V0 logits_processor: 3-arg signature (prompt_ids, output_ids, logits).
-        V0 uses inspect.signature to detect arg count; 3-arg gets separated lists."""
-        __slots__ = ("n",)
-
-        def __init__(self, n: int):
-            self.n = n
-
-        def __call__(self, prompt_token_ids: list[int], output_token_ids: list[int],
-                     logits: torch.Tensor) -> torch.Tensor:
-            n = self.n
-            all_ids = prompt_token_ids + output_token_ids
-            if len(all_ids) < n:
-                return logits
-            suffix = tuple(all_ids[-(n - 1) :])
-            banned = []
-            for i in range(len(all_ids) - n + 1):
-                if tuple(all_ids[i : i + n - 1]) == suffix:
-                    banned.append(all_ids[i + n - 1])
-            if banned:
-                logits[banned] = float("-inf")
-            return logits
-
-    proc = _NoRepeatNgramV0(ngram_size)
-    orig_init = SamplingParams.__init__
-
-    def patched_init(self, *args, **kwargs):
-        procs = list(kwargs.get("logits_processors") or [])
-        procs.append(proc)
-        kwargs["logits_processors"] = procs
-        orig_init(self, *args, **kwargs)
-
-    SamplingParams.__init__ = patched_init
-    print(f"[ngram] NoRepeatNgramLogitsProcessor(n={ngram_size}) injected")
 
 
 def _install_logprobs_patch():
@@ -227,11 +171,6 @@ def _replace_generate_route(app):
 
 
 if __name__ == "__main__":
-    ngram_size = _extract_ngram_size()
-
-    if ngram_size > 1:
-        _patch_sampling_params(ngram_size)
-
     # 在 runpy 之前 hook uvicorn.run, 这样 TRL main() 调 uvicorn.run 时我们抢先替换路由
     _install_logprobs_patch()
 
