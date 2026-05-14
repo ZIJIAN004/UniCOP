@@ -81,7 +81,7 @@ def main():
     llm = LLM(
         model=base_model,
         max_model_len=512,
-        gpu_memory_utilization=0.4,
+        gpu_memory_utilization=0.85,   # 7B 模型权重 14.3 GiB, 0.4 不够
         dtype="bfloat16",
         enforce_eager=True,  # 避免 cuda graph capture, probe 更直接
     )
