@@ -74,22 +74,24 @@ def _patch_vllm_client_logprobs():
             "min_p": min_p,
             "max_tokens": max_tokens,
             "guided_decoding_regex": guided_decoding_regex,
-            "return_logprobs": True,  # 始终拿 logprobs
+            "return_logprobs": True,        # 始终拿 logprobs
+            "return_mask_hits": True,       # 始终拿 mask_hits (server 未启用 mask 时返 None)
         }
         response = self.session.post(url, json=body)
         if response.status_code != 200:
             raise Exception(f"Request failed: {response.status_code}, {response.text}")
         data = response.json()
-        # 缓存 logprobs 到实例属性 (供训练端 _generate_and_score_completions 读)
-        # 注意: 多次调用 generate 会覆盖, 训练端读取要 race-safe
-        self._last_logprobs = data.get("logprobs")  # list[list[float]] 或 None
+        # 缓存 logprobs + mask_hits 到实例属性 (供训练端 _generate_and_score_completions 读)
+        self._last_logprobs = data.get("logprobs")    # list[list[float]] 或 None
+        self._last_mask_hits = data.get("mask_hits")  # list[list[bool]] 或 None
         return data["completion_ids"]
 
     VLLMClient.generate = _new_generate
     # 初始化默认值, 避免读未设置属性
     VLLMClient._last_logprobs = None
-    print("✓ VLLMClient.generate replaced (始终发 return_logprobs=True, "
-          "结果缓存到 self._last_logprobs)")
+    VLLMClient._last_mask_hits = None
+    print("✓ VLLMClient.generate replaced (始终发 return_logprobs=True + return_mask_hits=True, "
+          "结果缓存到 self._last_logprobs / self._last_mask_hits)")
 
 
 def _patch_vllm_client_retry(max_retries: int = 10, base_backoff: float = 3.0):

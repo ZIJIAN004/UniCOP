@@ -96,23 +96,26 @@ class GRPOPRMTrainer(GRPOTrainer):
         B, T = completion_ids.shape
         num_gen = self.args.num_generations
 
-        # ── vLLM logprobs broadcast + pad → batch["vllm_per_token_logps"] ────
-        # train.py 已 patch VLLMClient.generate 始终 return_logprobs=True 并把
-        # logprobs 缓存到 self.vllm_client._last_logprobs (只 main process 有值,
-        # 因为 TRL 父类只在 main process 调 generate). 立刻在 super() 之后取出
-        # 并 broadcast 给所有 rank, 防止后续 _resample_infeasible 的 generate 调用
-        # 覆盖 _last_logprobs.
+        # ── vLLM logprobs + mask_hits broadcast → batch["vllm_per_token_logps"] / batch["mask_hits"] ──
+        # train.py 已 patch VLLMClient.generate 始终 return_logprobs=True + return_mask_hits=True
+        # 并把 logprobs + mask_hits 缓存到 vllm_client (只 main process 有值, 因为 TRL 父类
+        # 只在 main process 调 generate). 立刻在 super() 之后取出并 broadcast 给所有 rank.
         try:
             if self.accelerator.is_main_process:
                 lp_all = getattr(self.vllm_client, "_last_logprobs", None)
+                mh_all = getattr(self.vllm_client, "_last_mask_hits", None)
             else:
                 lp_all = None
-            lp_holder = [lp_all]
-            broadcast_object_list(lp_holder, from_process=0)
-            lp_all_global = lp_holder[0]  # list[list[float]] 长度 G=num_gpus*B, 或 None
+                mh_all = None
+            # 一起 broadcast 节省通信
+            payload = [lp_all, mh_all]
+            broadcast_object_list(payload, from_process=0)
+            lp_all_global, mh_all_global = payload  # 各自 list[list[...]] 或 None
 
             vllm_lp_tensor = torch.zeros(B, T, device=completion_ids.device,
                                           dtype=torch.float32)
+            mask_hits_tensor = torch.zeros(B, T, device=completion_ids.device,
+                                           dtype=torch.float32)  # 0/1
             if lp_all_global is not None:
                 rank = self.accelerator.process_index
                 my_start = rank * B
@@ -128,10 +131,21 @@ class GRPOPRMTrainer(GRPOTrainer):
                         lp_j[:actual_len], dtype=torch.float32,
                         device=completion_ids.device,
                     )
+                    # mask_hits 同长度 (跟 lp 配对), 可能为 None (server 未启用 mask)
+                    if mh_all_global is not None and global_idx < len(mh_all_global):
+                        mh_j = mh_all_global[global_idx]
+                        if mh_j is not None and len(mh_j) > 0:
+                            mh_len = min(len(mh_j), T)
+                            mask_hits_tensor[j, :mh_len] = torch.tensor(
+                                [1.0 if x else 0.0 for x in mh_j[:mh_len]],
+                                dtype=torch.float32,
+                                device=completion_ids.device,
+                            )
                 batch["vllm_per_token_logps"] = vllm_lp_tensor
+                batch["mask_hits"] = mask_hits_tensor
         except Exception as _e:
             if not getattr(self, "_vllm_logprob_warn", False):
-                print(f"⚠️ vLLM logprobs 处理失败 (IS 校正退化为不校正): "
+                print(f"⚠️ vLLM logprobs/mask_hits 处理失败 (IS 校正退化为不校正): "
                       f"{type(_e).__name__}: {_e}", flush=True)
                 self._vllm_logprob_warn = True
 
@@ -905,14 +919,21 @@ class GRPOPRMTrainer(GRPOTrainer):
         # vllm_per_token_logps 优先 (我们 patched VLLMClient 拿到的);
         # importance_sampling_ratio 后备 (TRL 0.23+ 自带, 此项目用 0.16 不会有).
         vllm_logps = inputs.get("vllm_per_token_logps")
+        mask_hits = inputs.get("mask_hits")     # 0/1 tensor, mask 触发位置=1
         is_correction_log = None   # for self.log 用
         if vllm_logps is not None:
             # padding 位置 vllm_logps=0, old_logps 可能非零 → diff 大 → exp 爆炸.
             # 用 completion_mask 把 padding 位置的 diff 置 0 → ratio=1 (无影响).
             diff = (old_per_token_logps - vllm_logps) * completion_mask
-            is_correction = torch.exp(diff).clamp(max=3.0)   # Truncated IS, cap=3.0 同 TRL 默认
+            # Mask 位置跳过 IS 校正 (方案 C): mask 强约束让 vllm_logp 是 post-mask 的,
+            # 跟 train_logp (raw) 量纲不一致, 算出来 ratio 会被 Z 因子污染. 设 ratio=1
+            # 等价于 "信任 mask 强制选择是 on-policy", 误差 < 10%, 比直接用错误 ratio
+            # (Z 因子误差 50-95%) 好得多. 见 CVRP-LLM-Mask-完整规则.md 第 9 节.
+            if mask_hits is not None:
+                diff = diff * (1.0 - mask_hits)
+            is_correction = torch.exp(diff).clamp(max=3.0)   # Truncated IS, cap=3.0
             per_token_loss = per_token_loss * is_correction
-            # 监控 IS 校正幅度: 健康范围 mean ≈ 1.0, max < 3.0 (没频繁撞 cap)
+            # 监控: 健康范围 mean ≈ 1.0, max < 3.0
             valid = completion_mask.bool()
             if valid.any():
                 vals = is_correction[valid]
@@ -922,6 +943,14 @@ class GRPOPRMTrainer(GRPOTrainer):
                     "is/ratio_max":  vals.max(),
                     "is/ratio_cap_hit_rate": (vals >= 3.0).float().mean(),
                 }
+                if mask_hits is not None:
+                    valid_mh = mask_hits[valid]
+                    is_correction_log["is/mask_hit_rate"] = valid_mh.mean()
+                    # 区分 mask 位置 vs 非 mask 位置的 IS (诊断用)
+                    non_mask = valid & (mask_hits == 0)
+                    if non_mask.any():
+                        nm_vals = is_correction[non_mask]
+                        is_correction_log["is/non_mask_ratio_mean"] = nm_vals.mean()
         else:
             is_ratio = inputs.get("importance_sampling_ratio")
             if is_ratio is not None:
