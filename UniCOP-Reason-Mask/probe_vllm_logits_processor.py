@@ -78,21 +78,36 @@ def main():
 
     from vllm import LLM, SamplingParams
 
+    # 跟 vllm_serve_ngram.py 一致, monkey-patch SamplingParams.__init__ 注入 processor.
+    # 直接 SamplingParams(logits_processors=[probe]) 在 vLLM 0.7.3 不一定 honor.
+    # (上次跑 probe 发现 processor.records 全空, 即 processor 没被调用.)
+    probe = ProbeProcessor()
+    orig_sp_init = SamplingParams.__init__
+    def _patched_sp_init(self, *args, **kwargs):
+        procs = list(kwargs.get("logits_processors") or [])
+        procs.append(probe)
+        kwargs["logits_processors"] = procs
+        orig_sp_init(self, *args, **kwargs)
+    SamplingParams.__init__ = _patched_sp_init
+    print("[probe] SamplingParams.__init__ monkey-patched, all SamplingParams will inject probe")
+    print()
+
     llm = LLM(
         model=base_model,
         max_model_len=512,
-        gpu_memory_utilization=0.85,   # 7B 模型权重 14.3 GiB, 0.4 不够
+        gpu_memory_utilization=0.85,
         dtype="bfloat16",
-        enforce_eager=True,  # 避免 cuda graph capture, probe 更直接
+        enforce_eager=True,
     )
 
-    probe = ProbeProcessor()
     sampling = SamplingParams(
         n=N_SEQUENCES,
         temperature=1.0,
         max_tokens=MAX_TOKENS,
-        logits_processors=[probe],
     )
+    # probe 已通过 monkey-patch 自动加入 sampling.logits_processors
+    print(f"[probe] sampling.logits_processors length: "
+          f"{len(sampling.logits_processors) if sampling.logits_processors else 0}")
 
     print(f"--- Running generation ---")
     outputs = llm.generate([PROMPT], sampling)
