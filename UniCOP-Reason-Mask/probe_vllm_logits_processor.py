@@ -47,6 +47,17 @@ class ProbeProcessor:
         self.instance_id = id(self)
 
     def __call__(self, prompt_ids, output_ids, logits):
+        # 强制 stderr 输出, 第一次调用时确认 __call__ 被触发
+        if not self.records:
+            print(
+                f"!!! [probe] __call__ INVOKED FIRST TIME: "
+                f"output_ids type={type(output_ids).__name__}, "
+                f"len={len(output_ids)}, "
+                f"prompt_ids type={type(prompt_ids).__name__}, "
+                f"plen={len(prompt_ids)}, "
+                f"logits shape={tuple(logits.shape) if hasattr(logits, 'shape') else 'N/A'}",
+                file=sys.stderr, flush=True,
+            )
         t0 = time.perf_counter()
         rec = {
             "oid": id(output_ids),
@@ -106,6 +117,21 @@ def main():
         max_tokens=MAX_TOKENS,
     )
     # probe 已通过 monkey-patch 自动加入 sampling.logits_processors
+    # 用 stderr 强制刷新, 防止跟 vLLM stdout 混淆
+    print(f"!!! [probe] sampling.__class__={sampling.__class__.__module__}.{sampling.__class__.__name__}",
+          file=sys.stderr, flush=True)
+    print(f"!!! [probe] sampling.logits_processors = {sampling.logits_processors}",
+          file=sys.stderr, flush=True)
+    print(f"!!! [probe] expected probe instance id = {id(probe)}",
+          file=sys.stderr, flush=True)
+    if sampling.logits_processors:
+        for i, p in enumerate(sampling.logits_processors):
+            print(f"!!! [probe]   processor[{i}] = {p!r} (id={id(p)})",
+                  file=sys.stderr, flush=True)
+    else:
+        print(f"!!! [probe] WARN: sampling.logits_processors is None or empty after init!",
+              file=sys.stderr, flush=True)
+
     print(f"[probe] sampling.logits_processors length: "
           f"{len(sampling.logits_processors) if sampling.logits_processors else 0}")
 
