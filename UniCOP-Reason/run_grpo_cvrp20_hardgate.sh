@@ -67,7 +67,8 @@ NUM_TRAIN=4000
 # 输出隔离: hardgate run 独立目录, 不污染 6gpu run
 OUTPUT_DIR_BASE="$WORK_DIR/output_hardgate"
 
-VLLM_PORT=8000
+# 端口 8001 错开 6gpu run 的 8000, 防同节点调度时撞端口
+VLLM_PORT=8001
 VLLM_GPU_MEM_UTIL=0.85
 VLLM_MAX_MODEL_LEN=5120
 VLLM_DTYPE=bfloat16

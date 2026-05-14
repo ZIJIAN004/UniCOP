@@ -606,12 +606,23 @@ class GRPOPRMTrainer(GRPOTrainer):
         # 用 abs().mean() 看 token 级平均信号大小, std() 看分散度.
         n_feasible = sum(is_feasible)
         feas_rate = n_feasible / B if B > 0 else 0.0
+        # R_coverage_rate 含义随 reward v3 变化:
+        #   v2 (hinge cov)  → 全覆盖比例 (mean of {0,1})
+        #   v3 (连续 cov)   → 平均覆盖率 (mean of [0,1])
+        # 为了直接跟 v2 对比 + 监控硬墙开门频率, 加两个独立 metric:
+        #   fullcov_rate  = mean(cov == 1.0)         ← 对应 v2 含义
+        #   gate_open_rate = mean(cov >= cov_gate)   ← 硬墙开门率, cons 信号生效比例
+        coverage_arr = np.array([c["coverage"] for c in components])
+        fullcov_rate    = float((coverage_arr >= 1.0 - 1e-9).mean())
+        gate_open_rate  = float((coverage_arr >= config.cov_gate).mean())
         log_dict = {
             "reward/feasibility_rate":    self._gather_mean(feas_rate),
             "reward/R_parse_rate":        self._gather_mean(
                 np.mean([c["parse"] for c in components])),
             "reward/R_coverage_rate":     self._gather_mean(
                 np.mean([c["coverage"] for c in components])),
+            "reward/R_fullcov_rate":      self._gather_mean(fullcov_rate),
+            "reward/gate_open_rate":      self._gather_mean(gate_open_rate),
             "reward/R_constraint_mean":   self._gather_mean(
                 np.mean([c["constraint"] for c in components])),
             "reward/R_format_mean":       self._gather_mean(
