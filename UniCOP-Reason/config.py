@@ -79,12 +79,24 @@ class Config:
     proc_alpha: float              = 0.5   # process 信号权重；段内广播已覆盖较多 token，0.5 起步
     infeasible_margin: float       = 1.0   # (legacy) 惩罚低于历史最小可行 advantage 的幅度
     infeasible_default_penalty: float = -5.0  # (legacy) 训练初始还没见过可行解时的 fallback
-    # A_feasibility 权重（可行解拿满 = w_p + w_cc + w_f = 3.5）
-    # cov 与 con 用乘积合并：cov=0 时 con 多少都无效，防 reward hack
-    # （之前各占 1.0 独立加权时，模型可能优化 con 牺牲 cov，coverage 反向漂移）
+    # A_feasibility 权重（可行解拿满 = w_p + w_cov + w_cons + w_f = 4.0）
+    # 改造历史:
+    #   v1 各 1.0 独立加权 → 模型优化 cons 牺牲 cov, coverage 反向漂移
+    #   v2 w_cc=2.0 cov×cons 乘积 → cov 是离散 hinge (0/1) + cov=0.5/cons=1.0 vs
+    #       cov=1.0/cons=0.5 等高, 模型卡 "保守少走" 策略, cov 停在 0.5
+    #   v3 (当前) cov 连续化 (n_unique/max(n, n_total)) + cov_gate 硬墙:
+    #       - cov 连续 → cov<1 有 gradient, 摆脱 hinge 卡死
+    #       - cov_gate 硬墙 → cov < gate 时 cons 信号 = 0,
+    #                         强迫模型先把 cov 拉到 gate 才能拿 cons 分
     w_p: float                     = 1.0   # R_parse 权重
-    w_cc: float                    = 2.0   # R_coverage × R_constraint 联合权重
+    w_cov: float                   = 1.5   # R_coverage 权重 (略高于 cons, 主导)
+    w_cons: float                  = 1.0   # R_constraint 权重 (硬墙后才生效)
     w_f: float                     = 0.5   # R_format 权重
+    # 硬墙阈值: cov >= cov_gate 时 cons 信号才开门
+    #   1.0  → 严格全覆盖+无重复才给 cons (用户默认, 最强 cov 压力)
+    #   0.95 → 允许 ≤1 客户误差, 边界更平滑, cold start 友好
+    #   0.0  → 等价独立加权 (无硬墙)
+    cov_gate: float                = 1.0
     # 异常步固定在 "min - k*std" 位置 (原始 reward 空间), 归一化后等价于
     # z(min) - k, 与 std 绝对大小脱钩, 避免早期 rollout 同质化时
     # margin/std → 10^4 的爆炸. k=3 = 3σ 落在正常分布之外, 惩罚显著且稳定.

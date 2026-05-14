@@ -275,7 +275,8 @@ class GRPOPRMTrainer(GRPOTrainer):
                 feas_per_group.append(sum(
                     1 for i in range(s, s + num_gen)
                     if is_fully_feasible(
-                        completions_text[i], instances[i], problem_type_list[i]
+                        completions_text[i], instances[i], problem_type_list[i],
+                        cov_gate=config.cov_gate,
                     )
                 ))
             # 用 prompt_ids 前 32 token 求和当 hash, 跨 rank 比对
@@ -324,7 +325,8 @@ class GRPOPRMTrainer(GRPOTrainer):
                 infeasible = [
                     i for i in range(s, s + num_gen)
                     if not is_fully_feasible(
-                        completions_text[i], instances[i], problem_type_list[i]
+                        completions_text[i], instances[i], problem_type_list[i],
+                        cov_gate=config.cov_gate,
                     )
                 ]
                 if num_gen - len(infeasible) >= 2 or not infeasible:
@@ -402,7 +404,8 @@ class GRPOPRMTrainer(GRPOTrainer):
             n_feas = sum(
                 1 for i in range(s, s + num_gen)
                 if is_fully_feasible(
-                    completions_text[i], instances[i], problem_type_list[i]
+                    completions_text[i], instances[i], problem_type_list[i],
+                    cov_gate=config.cov_gate,
                 )
             )
             if n_feas < 2:
@@ -660,13 +663,15 @@ class GRPOPRMTrainer(GRPOTrainer):
             )
             components.append(c)
 
-            feas = (c["parse"] == 1.0 and c["coverage"] == 1.0
+            feas = (c["parse"] == 1.0 and c["coverage"] >= config.cov_gate
                     and c["constraint"] == 1.0 and c["format"] == 1.0)
             is_feasible_local.append(feas)
 
-            # cov × con 乘积合并: cov=0 时 con 无效, 防"丢覆盖换约束"hack
+            # cov_gate 硬墙: cov < gate 时 cons 信号置 0, 强迫模型先冲 cov
+            cons_signal = c["constraint"] if c["coverage"] >= config.cov_gate else 0.0
             a_feas_raw[i] = (config.w_p * c["parse"]
-                             + config.w_cc * (c["coverage"] * c["constraint"])
+                             + config.w_cov * c["coverage"]
+                             + config.w_cons * cons_signal
                              + config.w_f * c["format"])
 
             if feas:
