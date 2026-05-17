@@ -269,9 +269,17 @@ class GRPOPRMTrainer(GRPOTrainer):
                 batch, completions_text, instances, problem_type_list, num_gen
             )
 
-            # v3 (默认, 原 hardgate+cascade) 或 v4 (simplified+absolute PRM)
+            # v3 (默认, 原 hardgate+cascade) | v4 (simplified+absolute PRM) |
+            # v5 (v4 + hardgate distance + cov/cons 加权)
             _scheme = getattr(config, "reward_scheme", "v3")
-            if _scheme == "v4":
+            if _scheme == "v5":
+                advantages = self._build_unified_advantages_v5(
+                    completions_text, instances, problem_type_list,
+                    B, num_gen, T, device=completion_ids.device,
+                    prompt_ids=batch["prompt_ids"],
+                    prompt_mask=batch["prompt_mask"],
+                )
+            elif _scheme == "v4":
                 advantages = self._build_unified_advantages_v4(
                     completions_text, instances, problem_type_list,
                     B, num_gen, T, device=completion_ids.device,
@@ -1055,6 +1063,299 @@ class GRPOPRMTrainer(GRPOTrainer):
             "distance_local":         distances_local,
             "dist_std_per_group":     dist_std_per_group,
             "dist_cv_per_group":      dist_cv_per_group,
+        }
+
+    # ══════════════════════════════════════════════════════════════════
+    #  v5: v4 + hardgate distance + cov/cons 加权 A_feas
+    #  完全独立分支, 跟 v3/v4 解耦. config.reward_scheme="v5" 触发.
+    #  设计意图 (用户决定): v4 7414 run 信号弱, A_feas=parse+format 同质化
+    #  z-score=0; 改回 A_feas=parse+cov+cons(hardgate)+format 提供持续 contrastive,
+    #  outcome 改用 raw distance + strict fully_feasible 子集 (子集 <2 时全 0,
+    #  完全靠 A_feas + PRM 推可行性).
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_unified_advantages_v5(self, completions_text, instances,
+                                      problem_type_list,
+                                      B, num_gen, T, device,
+                                      prompt_ids, prompt_mask):
+        """v5 advantage 构造: A_feas (hardgate) + A_outcome (strict subset) + PRM (v4 absolute)."""
+        a_out_pkg = self._compute_a_out_v5(
+            completions_text, instances, problem_type_list, B, num_gen, device,
+            prompt_ids, prompt_mask,
+        )
+        a_out = a_out_pkg["a_out"]
+        components = a_out_pkg["components"]
+        a_feas_norm = a_out_pkg["a_feas_norm"]
+        a_outcome_norm = a_out_pkg["a_outcome_norm"]
+        distances_local = a_out_pkg["distance_local"]
+        dist_std_per_group = a_out_pkg["dist_std_per_group"]
+        dist_cv_per_group = a_out_pkg["dist_cv_per_group"]
+        feas_subset_size_per_group = a_out_pkg["feas_subset_size_per_group"]
+
+        # 初始化 advantage tensor: 所有 token 先赋 A_out
+        advantages = a_out.unsqueeze(-1).expand(-1, T).contiguous()
+
+        # PRM 段广播 (跟 v4 完全相同, absolute, rank-local)
+        prm_base = getattr(config, "prm_base_v4", 1.5)
+        proc_alpha = getattr(config, "proc_alpha_v4", 50.0)
+
+        n_segments_total = 0
+        a_proc_sum = 0.0
+        a_proc_min = float("inf")
+        R_step_raw_abs_sum = 0.0
+        R_step_raw_abs_max = 0.0
+        R_step_saturated = 0
+        R_step_total = 0
+        seg_token_count = 0
+
+        if not config.disable_prm and self.pomo_prm is not None:
+            offset_maps = self._build_offset_maps(completions_text, B)
+            for i in range(B):
+                pt = problem_type_list[i]
+                if pt not in self.pomo_prm.SUPPORTED:
+                    continue
+                prm_res = self.pomo_prm.compute_think_step_rewards_v4(
+                    completions_text[i], instances[i], pt,
+                )
+                if prm_res is None or offset_maps[i] is None:
+                    continue
+                om = offset_maps[i]
+                n_segments_total += len(prm_res.step_rewards)
+                for step_idx, R_raw in prm_res.raw_step_rewards.items():
+                    R_step_raw_abs_sum += abs(R_raw)
+                    if abs(R_raw) > R_step_raw_abs_max:
+                        R_step_raw_abs_max = abs(R_raw)
+                    if abs(R_raw) > 2.0:
+                        R_step_saturated += 1
+                    R_step_total += 1
+                for step_idx, R_step_tanh in prm_res.step_rewards.items():
+                    a_proc = prm_base + R_step_tanh
+                    a_proc_sum += a_proc
+                    if a_proc < a_proc_min:
+                        a_proc_min = a_proc
+                    seg = prm_res.step_ranges.get(step_idx)
+                    if seg is None:
+                        continue
+                    tok_s, tok_e = self._char_to_token_range(seg[0], seg[1], om)
+                    if tok_s is None or tok_e is None:
+                        continue
+                    tok_e = min(tok_e, T)
+                    seg_len = max(tok_e - tok_s, 1)
+                    seg_token_count += seg_len
+                    advantages[i, tok_s:tok_e] += proc_alpha * a_proc / seg_len
+
+        # 错误类型统计
+        from terminal_reward import route_stats
+        from utils.parse import parse_multi_route
+        miss_list, violate_list, dup_list = [], [], []
+        for i in range(B):
+            pt = problem_type_list[i]
+            inst = instances[i]
+            n_inst = inst["n"]
+            if pt == "cvrp":
+                routes = parse_multi_route(completions_text[i], n_inst)
+                if routes is None:
+                    continue
+                demands = inst.get("demands", [0.0] * (n_inst + 1))
+                cap = inst.get("capacity", 1.0)
+                stats = route_stats(routes, n_inst, demands, cap)
+                miss_list.append(stats["n_missing"])
+                violate_list.append(stats["n_violate_routes"])
+                dup_list.append(stats["n_duplicates"])
+
+        # Log (v5 metric, 跟 v3/v4 解耦)
+        fully_feas_per_traj = [
+            float(c["parse"] == 1.0
+                  and c["coverage"] >= 1.0 - 1e-9
+                  and c["constraint"] == 1.0
+                  and c["format"] == 1.0)
+            for c in components
+        ]
+        coverage_arr = np.array([c["coverage"] for c in components])
+        a_proc_mean = a_proc_sum / max(n_segments_total, 1) if n_segments_total > 0 else 0.0
+        R_step_raw_abs_mean = (R_step_raw_abs_sum / R_step_total) if R_step_total > 0 else 0.0
+        R_step_saturation_rate = (R_step_saturated / R_step_total) if R_step_total > 0 else 0.0
+        a_feas_abs = float(a_feas_norm.abs().mean().item())
+        a_outcome_abs = float(a_outcome_norm.abs().mean().item())
+        feas_dominance = a_feas_abs / max(a_feas_abs + a_outcome_abs, 1e-8)
+        valid_dist = [d for d in distances_local if not (d != d)]
+        distance_mean_local = float(np.mean(valid_dist)) if valid_dist else 0.0
+
+        log_dict = {
+            "reward_v5/parse_rate":         self._gather_mean(
+                np.mean([c["parse"] for c in components])),
+            "reward_v5/coverage_rate":      self._gather_mean(float(coverage_arr.mean())),
+            "reward_v5/fullcov_rate":       self._gather_mean(
+                float((coverage_arr >= 1.0 - 1e-9).mean())),
+            "reward_v5/fully_feas_rate":    self._gather_mean(np.mean(fully_feas_per_traj)),
+            "reward_v5/R_constraint_mean":  self._gather_mean(
+                np.mean([c["constraint"] for c in components])),
+            "reward_v5/R_format_mean":      self._gather_mean(
+                np.mean([c["format"] for c in components])),
+            "reward_v5/A_abs_mean":         self._gather_mean(advantages.abs().mean()),
+            "reward_v5/A_std":              self._gather_mean(advantages.std()),
+            "stats_v5/miss_per_traj":       self._gather_mean(
+                float(np.mean(miss_list)) if miss_list else 0.0),
+            "stats_v5/violate_per_traj":    self._gather_mean(
+                float(np.mean(violate_list)) if violate_list else 0.0),
+            "stats_v5/dup_per_traj":        self._gather_mean(
+                float(np.mean(dup_list)) if dup_list else 0.0),
+            # outcome 子集大小 (前期可能 0~1, 后期应该 >=2 启用 A_outcome)
+            "outcome_v5/distance_mean":     self._gather_mean(distance_mean_local),
+            "outcome_v5/distance_std_per_group": self._gather_mean(
+                float(np.mean(dist_std_per_group)) if dist_std_per_group else 0.0),
+            "outcome_v5/distance_cv":       self._gather_mean(
+                float(np.mean(dist_cv_per_group)) if dist_cv_per_group else 0.0),
+            "outcome_v5/feas_subset_size":  self._gather_mean(
+                float(np.mean(feas_subset_size_per_group)) if feas_subset_size_per_group else 0.0),
+            "outcome_v5/feas_subset_active_rate": self._gather_mean(
+                float(np.mean([1.0 if s >= 2 else 0.0 for s in feas_subset_size_per_group]))
+                if feas_subset_size_per_group else 0.0),
+            "a_out_v5/a_feas_abs_mean":     self._gather_mean(a_feas_abs),
+            "a_out_v5/a_outcome_abs_mean":  self._gather_mean(a_outcome_abs),
+            "a_out_v5/feas_dominance":      self._gather_mean(feas_dominance),
+            "prm_v5/n_segments_per_traj":   self._gather_mean(
+                float(n_segments_total) / max(B, 1)),
+            "prm_v5/seg_token_ratio":       self._gather_mean(
+                float(seg_token_count) / max(B * T, 1)),
+            "prm_v5/a_proc_mean":           self._gather_mean(float(a_proc_mean)),
+            "prm_v5/a_proc_min":            self._gather_mean(
+                float(a_proc_min) if a_proc_min < float("inf") else 0.0),
+            "prm_v5/R_step_raw_abs_mean":   self._gather_mean(R_step_raw_abs_mean),
+            "prm_v5/R_step_raw_abs_max":    self._gather_mean(R_step_raw_abs_max),
+            "prm_v5/R_step_saturation_rate": self._gather_mean(R_step_saturation_rate),
+            "train/use_mask":               1.0 if getattr(config, "use_mask", False) else 0.0,
+        }
+        self.log(log_dict)
+        return advantages
+
+    def _compute_a_out_v5(self, completions_text, instances,
+                           problem_type_list, B, num_gen, device,
+                           prompt_ids, prompt_mask):
+        """v5 A_out: A_feas (hardgate cov+cons+parse+format) + A_outcome (raw distance on strict subset).
+
+        差异 vs v4 _compute_a_out_v4:
+            - A_feas_raw 加回 cov/cons (hardgate: cov >= cov_gate_v5 才给 cons)
+            - feas 子集 strict fully_feasible (parse + cov>=gate + cons=1 + format=1)
+            - distance 用 raw prob.get_tour_distance (不 repair)
+            - 子集 <2 时 A_outcome 全 0 (前期信号靠 A_feas + PRM 机会成本)
+        """
+        from collections import defaultdict
+        eps = 1e-8
+        w_p = getattr(config, "w_p_v5", 0.5)
+        w_cov = getattr(config, "w_cov_v5", 2.5)
+        w_cons = getattr(config, "w_cons_v5", 2.0)
+        w_f = getattr(config, "w_f_v5", 0.5)
+        cov_gate = getattr(config, "cov_gate_v5", 1.0)
+
+        a_feas_raw = torch.zeros(B, device=device)
+        is_feasible_local: list[bool] = []
+        components: list[dict] = []
+        distances_local: list[float] = []
+
+        for i in range(B):
+            c = compute_terminal_components(
+                completions_text[i], instances[i], problem_type_list[i]
+            )
+            components.append(c)
+
+            # strict fully_feasible 子集判定
+            feas = (c["parse"] == 1.0
+                    and c["coverage"] >= cov_gate
+                    and c["constraint"] == 1.0
+                    and c["format"] == 1.0)
+            is_feasible_local.append(feas)
+
+            # A_feas hardgate: cov < cov_gate 时 cons_signal=0 (强迫先冲全覆盖)
+            cons_signal = c["constraint"] if c["coverage"] >= cov_gate else 0.0
+            a_feas_raw[i] = (w_p * c["parse"]
+                             + w_cov * c["coverage"]
+                             + w_cons * cons_signal
+                             + w_f * c["format"])
+
+            if feas:
+                prob = _PROBLEM_OBJS.get(problem_type_list[i])
+                d = (prob.get_tour_distance(completions_text[i], instances[i])
+                     if prob else None)
+                distances_local.append(d if d is not None else float("nan"))
+            else:
+                distances_local.append(float("nan"))
+
+        # prompt hash + 跨 rank gather (同 v4)
+        masked_ids = prompt_ids.long() * prompt_mask.long()
+        row_id_sum = masked_ids.sum(dim=-1)
+        row_len    = prompt_mask.long().sum(dim=-1)
+        row_hash   = row_id_sum * 1000003 + row_len
+
+        all_a_feas_raw = self.accelerator.gather(a_feas_raw.contiguous())
+        feas_t  = torch.tensor(is_feasible_local, device=device, dtype=torch.bool)
+        all_feas_t = self.accelerator.gather(feas_t.contiguous())
+        dist_t  = torch.tensor(distances_local, device=device, dtype=torch.float32)
+        all_dist_t = self.accelerator.gather(dist_t.contiguous())
+        all_row_hash = self.accelerator.gather(row_hash.contiguous())
+
+        # 分组 z-score
+        hash_cpu = all_row_hash.cpu().tolist()
+        groups = defaultdict(list)
+        for i, h in enumerate(hash_cpu):
+            groups[h].append(i)
+
+        all_a_feas_norm    = torch.zeros_like(all_a_feas_raw)
+        all_a_outcome_norm = torch.zeros_like(all_a_feas_raw)
+        feas_subset_size_per_group: list[int] = []
+
+        for h, idxs in groups.items():
+            if len(idxs) < 2:
+                continue
+            idx_t = torch.tensor(idxs, device=device, dtype=torch.long)
+
+            # A_feas: 整组 z-score (始终有效, 提供持续 contrastive 信号)
+            grp = all_a_feas_raw[idx_t]
+            all_a_feas_norm[idx_t] = (grp - grp.mean()) / (grp.std() + eps)
+
+            # A_outcome: strict feasible 子集 >=2 才算; <2 时全 0 (前期纯靠 A_feas+PRM)
+            feas_mask = all_feas_t[idx_t] & ~torch.isnan(all_dist_t[idx_t])
+            feas_local_pos = feas_mask.nonzero(as_tuple=True)[0]
+            feas_subset_size_per_group.append(int(feas_local_pos.numel()))
+            if feas_local_pos.numel() >= 2:
+                feas_idx_t = idx_t[feas_local_pos]
+                neg_d = -all_dist_t[feas_idx_t]
+                all_a_outcome_norm[feas_idx_t] = (
+                    (neg_d - neg_d.mean()) / (neg_d.std() + eps)
+                )
+
+        # 切回本 rank
+        rank = self.accelerator.process_index
+        my_start = rank * B
+        a_feas_norm_local = all_a_feas_norm[my_start:my_start + B]
+        a_outcome_norm_local = all_a_outcome_norm[my_start:my_start + B]
+        a_out = a_feas_norm_local + a_outcome_norm_local
+
+        # distance 统计 (跨组)
+        dist_std_per_group = []
+        dist_cv_per_group = []
+        for h, idxs in groups.items():
+            if len(idxs) < 2:
+                continue
+            idx_t = torch.tensor(idxs, device=device, dtype=torch.long)
+            valid_d = all_dist_t[idx_t][~torch.isnan(all_dist_t[idx_t])]
+            if valid_d.numel() >= 2:
+                std = float(valid_d.std().item())
+                mean = float(valid_d.mean().item())
+                dist_std_per_group.append(std)
+                if mean > 1e-6:
+                    dist_cv_per_group.append(std / mean)
+
+        return {
+            "a_out":                  a_out,
+            "is_feasible":            is_feasible_local,
+            "components":             components,
+            "a_feas_norm":            a_feas_norm_local,
+            "a_outcome_norm":         a_outcome_norm_local,
+            "distance_local":         distances_local,
+            "dist_std_per_group":     dist_std_per_group,
+            "dist_cv_per_group":      dist_cv_per_group,
+            "feas_subset_size_per_group": feas_subset_size_per_group,
         }
 
     # ── A_out = A_feasibility (跨 rank z-score) + A_outcome (可行子集 z-score) ──

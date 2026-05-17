@@ -28,13 +28,14 @@ class Config:
     num_generations: int               = 8
     max_prompt_length: int             = 768
     max_completion_length: int         = 4096
-    learning_rate: float               = 1e-5   # GRPO + LoRA rank 64 推荐 5e-6~2e-5 (原 1e-6 过低,SFT 已升到 1e-4)
-                                                # 6 卡 effective batch 192 (vs 4 卡 128, +50%) + grad_norm 长期 ~0.1 远低于 clip 阈值
-                                                # 说明信号空间还有, 从 5e-6 上调到 1e-5 (~2x, 比 linear scaling 1.5x 略激进)
+    learning_rate: float               = 2e-5   # v5 加大: v4 7414 run grad_norm=0.05 远低于 clip 阈值 1.0,
+                                                # 信号推力不足 (20 step 几乎没动). 2e-5 仍在 GRPO+LoRA 推荐区 (5e-6~2e-5),
+                                                # 配 DAPO clip-higher (0.20/0.28) 加大 grad 推力.
     per_device_train_batch_size: int   = 4
     gradient_accumulation_steps: int   = 8
     num_train_epochs: int              = 3
-    warmup_ratio: float                = 0.05
+    warmup_ratio: float                = 0.01   # v5 缩短: 0.05*500=25 step warmup 太慢, 用户要求 5 step.
+                                                # 0.01*500=5 step warmup; LR 5 step 后全开 2e-5.
     kl_coef: float                     = 0.01
 
     # ── DAPO Clip-Higher (非对称 ratio clipping，缓解熵坍缩) ─────
@@ -123,7 +124,14 @@ class Config:
     #     - 违例惩罚 = PRM 机会成本 + outcome distance 增量
     #     - 漏访惩罚 = PRM 机会成本 (少 K 个 base) + outcome distance 增量
     #     - 重复惩罚 = PRM 机会成本 (cascade 游离) + outcome dup_eps
-    reward_scheme: str             = "v4"   # "v3" | "v4"
+    # v5: v4 + hardgate distance (修 v4 7414 run 信号弱 + 冷启动).
+    #     - A_feas 加回 parse+cov+cons+format (cov_gate=1.0 hardgate, cov=1 才给 cons),
+    #       cov+cons 权重加大让 A_feas 主导冷启动信号 (parse/format 几乎恒 1.0 不贡献差异).
+    #     - A_outcome 用 raw prob.get_tour_distance (不 repair), 严格 fully_feasible 子集.
+    #       前期 fully_feasible<2 时全 0, 完全靠 A_feas + PRM 机会成本推可行性.
+    #     - PRM 同 v4: absolute base+tanh, 违例/重复 step 之后游离.
+    #     - 配 LR 2e-5 + warmup_ratio 0.01 (5 step) 加快收敛.
+    reward_scheme: str             = "v5"   # "v3" | "v4" | "v5"
 
     # ── v4 专用参数 (v3 时被忽略) ─────────────────────────────────────
     # prm_base: PRM normal step 基础奖励. 必须 > |tanh(R_step)|_max = 1, 给 margin 取 1.5.
@@ -140,6 +148,20 @@ class Config:
     # A_feas v4 权重 (只剩 parse + format), 跟 v3 的 w_p/w_f 隔离避免互相影响.
     w_p_v4: float                  = 1.0
     w_f_v4: float                  = 0.5
+
+    # ── v5 专用参数 (v3/v4 时被忽略) ──────────────────────────────────
+    # PRM 部分跟 v4 共用 prm_base_v4 / proc_alpha_v4 (PRM 设计相同, 共参数避免重复).
+    # A_feas 权重 cov+cons 主导 (parse/format 几乎恒 1, z-score 后差异化贡献小).
+    # 权重总和 5.5, cov+cons 占 82%. cov 主导 (w_cov=2.5 > w_cons=2.0) 因为 cov<1
+    # 时 cons_signal 被 hardgate 关掉, cov 是冷启动期唯一可推信号.
+    w_p_v5: float                  = 0.5
+    w_cov_v5: float                = 2.5
+    w_cons_v5: float               = 2.0
+    w_f_v5: float                  = 0.5
+    # hardgate: cov >= cov_gate_v5 时 cons_signal = cons else 0.
+    # 1.0 严格要求 unique=n AND total=n (n_unique/max(n,n_total)=1.0).
+    # cons 强迫先冲全覆盖+不重复, 再优化 cap 约束.
+    cov_gate_v5: float             = 1.0
 
     # ── CVRP constrained-decoding mask (跟 reward_scheme 正交) ────────
     # use_mask=True 时:
