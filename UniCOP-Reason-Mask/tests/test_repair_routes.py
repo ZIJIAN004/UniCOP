@@ -26,7 +26,9 @@ if "pomo_prm" not in sys.modules:
     _fake_pomo.parse_route_numbers = lambda *a, **k: []
     sys.modules["pomo_prm"] = _fake_pomo
 
-from terminal_reward import repair_routes, repaired_distance, _route_distance
+from terminal_reward import (
+    repair_routes, repaired_distance, _route_distance, route_stats,
+)
 
 
 def _make_instance(n=5):
@@ -173,6 +175,24 @@ def test_internal_depot_in_route():
           f"(切分对)")
 
 
+def test_route_stats():
+    """route_stats 统计三类错误次数, 用于 v4 metric 诊断."""
+    _, demands, cap = _make_instance(n=5)
+    # 全合规: 无任何错误
+    s = route_stats([[0, 1, 2, 3, 0], [0, 4, 5, 0]], n=5, demands=demands, capacity=cap)
+    assert s == {"n_missing": 0, "n_duplicates": 0, "n_violate_routes": 0}, s
+    # 漏 3, 4, 5
+    s = route_stats([[0, 1, 2, 0]], n=5, demands=demands, capacity=cap)
+    assert s == {"n_missing": 3, "n_duplicates": 0, "n_violate_routes": 0}, s
+    # 违例 1 路线 (5 客户 demand=1.5 > cap=1.0)
+    s = route_stats([[0, 1, 2, 3, 4, 5, 0]], n=5, demands=demands, capacity=cap)
+    assert s == {"n_missing": 0, "n_duplicates": 0, "n_violate_routes": 1}, s
+    # 重复 1, 2 (各 1 次), 漏 5
+    s = route_stats([[0, 1, 2, 1, 0], [0, 3, 4, 2, 0]], n=5, demands=demands, capacity=cap)
+    assert s == {"n_missing": 1, "n_duplicates": 2, "n_violate_routes": 0}, s
+    print(f"[PASS] route_stats: 全合规/漏访/违例/重复 4 种 case 全过")
+
+
 def test_empty_routes():
     """空 routes (parse 后无任何客户) 应能处理, 全部当漏访补."""
     coords, demands, cap = _make_instance(n=5)
@@ -193,5 +213,6 @@ if __name__ == "__main__":
     test_ordering_invariant()
     test_mixed_errors()
     test_internal_depot_in_route()
+    test_route_stats()
     test_empty_routes()
     print("\n全部 repair_routes 测试通过.")

@@ -20,7 +20,7 @@ import re
 import glob
 import torch
 import numpy as np
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 # ── POMO 模型超参数（与 POMO-Baseline/HYPER_PARAMS.py 一致） ─────────────────
@@ -98,6 +98,9 @@ class ThinkPRMResult:
     step_ranges: dict          # step_index → (char_start, char_end)
     anomaly_step_indices: set  # 异常的 step_index 集合
     n: int
+    # v4-only: tanh 之前的原始 R_step (诊断 tanh 饱和率).
+    # v3 不填充, 保持空 dict; v4 在 compute_think_step_rewards_v4 填充.
+    raw_step_rewards: dict = field(default_factory=dict)
 
 
 # ── PRM 标记正则 (匹配 SFT prompt 模板与实际输出格式) ──────────────────
@@ -566,6 +569,7 @@ class POMOPRM:
         normal_steps = customer_steps[:effective_anomaly]
         step_rewards: dict[int, float] = {}
         step_ranges: dict[int, tuple] = {}
+        raw_step_rewards: dict[int, float] = {}  # tanh 之前的 R_step (诊断用)
 
         if normal_steps:
             cust_indices = [s.full_step_idx for s in normal_steps]
@@ -580,6 +584,7 @@ class POMOPRM:
                     R_step = pomo_values[i] - pomo_prev
                     pomo_prev = pomo_values[i]
                     # tanh 压缩到 (-1, +1), 保证 trainer 端 base + R 永远 > 0 (base ≥ 1.5)
+                    raw_step_rewards[i] = R_step
                     step_rewards[i] = math.tanh(R_step)
                     step_ranges[i] = step.char_range
                 # else: 后续 normal step (POMO 评估缺) 也游离, 不进 step_rewards
@@ -590,6 +595,7 @@ class POMOPRM:
             step_ranges=step_ranges,
             anomaly_step_indices=set(),
             n=n,
+            raw_step_rewards=raw_step_rewards,
         )
 
     # ── 解析 ──────────────────────────────────────────────────────────

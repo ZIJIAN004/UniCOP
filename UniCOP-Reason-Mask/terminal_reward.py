@@ -295,6 +295,42 @@ def _route_distance(route, coords) -> float:
     return total
 
 
+def route_stats(routes, n: int, demands, capacity: float) -> dict:
+    """统计 routes 中三类错误的次数, 用于 v4 trainer 诊断 (跟 repair_routes 解耦).
+
+    Returns:
+        {
+            "n_missing":         漏访客户数 (1..n 中没出现的),
+            "n_duplicates":      重复访问次数 (1 客户访问 K 次算 K-1 重复),
+            "n_violate_routes":  原 routes 中 demand > capacity 的路线数,
+        }
+    """
+    seen = set()
+    n_duplicates = 0
+    for r in routes:
+        for v in r:
+            if v == 0 or v < 1 or v > n:
+                continue
+            if v in seen:
+                n_duplicates += 1
+            else:
+                seen.add(v)
+    n_missing = n - len(seen)
+    n_violate = 0
+    for r in routes:
+        load = sum(
+            (demands[v] if v < len(demands) else 0.0)
+            for v in r if v != 0 and 1 <= v <= n
+        )
+        if load > capacity + 1e-6:
+            n_violate += 1
+    return {
+        "n_missing": n_missing,
+        "n_duplicates": n_duplicates,
+        "n_violate_routes": n_violate,
+    }
+
+
 def repaired_distance(
     routes,
     coords,

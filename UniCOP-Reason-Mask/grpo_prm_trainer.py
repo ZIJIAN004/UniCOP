@@ -726,10 +726,18 @@ class GRPOPRMTrainer(GRPOTrainer):
             4. mean 模式段广播 (sum 改 mean 防 length runaway): 段贡献 = α × a_proc.
         """
         # ── 1. A_out (v4 简化版) ─────────────────────────────────────
-        a_out, is_feasible, components = self._compute_a_out_v4(
+        a_out_pkg = self._compute_a_out_v4(
             completions_text, instances, problem_type_list, B, num_gen, device,
             prompt_ids, prompt_mask,
         )
+        a_out = a_out_pkg["a_out"]
+        is_feasible = a_out_pkg["is_feasible"]
+        components = a_out_pkg["components"]
+        a_feas_norm = a_out_pkg["a_feas_norm"]
+        a_outcome_norm = a_out_pkg["a_outcome_norm"]
+        distances_local = a_out_pkg["distance_local"]
+        dist_std_per_group = a_out_pkg["dist_std_per_group"]
+        dist_cv_per_group = a_out_pkg["dist_cv_per_group"]
 
         # ── 2. 初始化 advantage tensor: 所有 token 先赋 A_out ────────
         advantages = a_out.unsqueeze(-1).expand(-1, T).contiguous()
@@ -741,6 +749,13 @@ class GRPOPRMTrainer(GRPOTrainer):
         n_segments_total = 0
         a_proc_sum = 0.0
         a_proc_min = float("inf")
+        # R_step 原始 (tanh 之前) 统计, 看 tanh 饱和率
+        R_step_raw_abs_sum = 0.0
+        R_step_raw_abs_max = 0.0
+        R_step_saturated = 0   # |R_step_raw| > 2 算饱和 (tanh(2)≈0.96)
+        R_step_total = 0
+        # 段内 vs 段外 token advantage 对比, 看 PRM 段广播实际影响
+        seg_token_count = 0      # 受 PRM 段广播影响的 token 数 (跨 batch)
 
         if not config.disable_prm and self.pomo_prm is not None:
             offset_maps = self._build_offset_maps(completions_text, B)
@@ -757,6 +772,14 @@ class GRPOPRMTrainer(GRPOTrainer):
 
                 # 跟踪 trajectory 是否完整 (违例/重复触发的 trajectory step_rewards 截断)
                 n_segments_total += len(prm_res.step_rewards)
+                # R_step raw 统计 (诊断 tanh 饱和)
+                for step_idx, R_raw in prm_res.raw_step_rewards.items():
+                    R_step_raw_abs_sum += abs(R_raw)
+                    if abs(R_raw) > R_step_raw_abs_max:
+                        R_step_raw_abs_max = abs(R_raw)
+                    if abs(R_raw) > 2.0:
+                        R_step_saturated += 1
+                    R_step_total += 1
                 for step_idx, R_step_tanh in prm_res.step_rewards.items():
                     a_proc = prm_base + R_step_tanh   # ∈ (prm_base - 1, prm_base + 1)
                     a_proc_sum += a_proc
@@ -770,10 +793,32 @@ class GRPOPRMTrainer(GRPOTrainer):
                         continue
                     tok_e = min(tok_e, T)
                     seg_len = max(tok_e - tok_s, 1)
+                    seg_token_count += seg_len
                     # mean 模式: 段贡献 = α × a_proc (不依赖 seg_len, 防 length runaway)
                     advantages[i, tok_s:tok_e] += proc_alpha * a_proc / seg_len
 
-        # ── 4. Log (v4 metric, 跟 v3 解耦, prm 统计跨 rank gather) ────
+        # ── 4. 错误类型统计 (核心避险诊断) ──────────────────────────
+        # 解析 routes 算 miss/violate/dup 频次, 直接看模型策略选择.
+        # 期望 v4 跑出来 miss/violate 比值反转 (v3 是 miss >> violate, v4 应近似或 miss < violate).
+        from terminal_reward import route_stats
+        from utils.parse import parse_multi_route, parse_single_route
+        miss_list, violate_list, dup_list = [], [], []
+        for i in range(B):
+            pt = problem_type_list[i]
+            inst = instances[i]
+            n_inst = inst["n"]
+            if pt == "cvrp":
+                routes = parse_multi_route(completions_text[i], n_inst)
+                if routes is None:
+                    continue
+                demands = inst.get("demands", [0.0] * (n_inst + 1))
+                cap = inst.get("capacity", 1.0)
+                stats = route_stats(routes, n_inst, demands, cap)
+                miss_list.append(stats["n_missing"])
+                violate_list.append(stats["n_violate_routes"])
+                dup_list.append(stats["n_duplicates"])
+
+        # ── 5. Log (v4 metric, 跟 v3 解耦, prm 统计跨 rank gather) ────
         # fully_feas_rate: 严格 fully feasible (parse+全访+全合规+format=1.0),
         # 跟 v3 的 feasibility_rate 定义一致, 方便跟 7362 run 对照看 fullcov 是否反弹.
         fully_feas_per_traj = [
@@ -785,6 +830,17 @@ class GRPOPRMTrainer(GRPOTrainer):
         ]
         coverage_arr = np.array([c["coverage"] for c in components])
         a_proc_mean = a_proc_sum / max(n_segments_total, 1) if n_segments_total > 0 else 0.0
+        # R_step raw 统计 (诊断 tanh 是否过度压缩极端信号)
+        R_step_raw_abs_mean = (R_step_raw_abs_sum / R_step_total) if R_step_total > 0 else 0.0
+        R_step_saturation_rate = (R_step_saturated / R_step_total) if R_step_total > 0 else 0.0
+        # a_out 分解: 看 a_feas vs a_outcome 谁主导 (绝对值 mean)
+        a_feas_abs = float(a_feas_norm.abs().mean().item())
+        a_outcome_abs = float(a_outcome_norm.abs().mean().item())
+        feas_dominance = a_feas_abs / max(a_feas_abs + a_outcome_abs, 1e-8)
+        # 有效 distance (非 nan) 跨 trajectory 平均
+        valid_dist = [d for d in distances_local if not (d != d)]  # filter nan
+        distance_mean_local = float(np.mean(valid_dist)) if valid_dist else 0.0
+
         log_dict = {
             "reward_v4/parse_rate":         self._gather_mean(
                 np.mean([c["parse"] for c in components])),
@@ -798,13 +854,38 @@ class GRPOPRMTrainer(GRPOTrainer):
                 np.mean([c["format"] for c in components])),
             "reward_v4/A_abs_mean":         self._gather_mean(advantages.abs().mean()),
             "reward_v4/A_std":              self._gather_mean(advantages.std()),
+            # 错误类型分布 (避险诊断的核心: v3 miss>>violate, v4 期望反转)
+            "stats_v4/miss_per_traj":       self._gather_mean(
+                float(np.mean(miss_list)) if miss_list else 0.0),
+            "stats_v4/violate_per_traj":    self._gather_mean(
+                float(np.mean(violate_list)) if violate_list else 0.0),
+            "stats_v4/dup_per_traj":        self._gather_mean(
+                float(np.mean(dup_list)) if dup_list else 0.0),
+            # outcome distance 方差 (cv > 0.3 提示 distance 不稳定, 考虑归一化)
+            "outcome_v4/distance_mean":     self._gather_mean(distance_mean_local),
+            "outcome_v4/distance_std_per_group": self._gather_mean(
+                float(np.mean(dist_std_per_group)) if dist_std_per_group else 0.0),
+            "outcome_v4/distance_cv":       self._gather_mean(
+                float(np.mean(dist_cv_per_group)) if dist_cv_per_group else 0.0),
+            # A_out 分解 (feas_dominance > 0.7 说明 A_feas 主导, < 0.3 说明 A_outcome 主导)
+            "a_out_v4/a_feas_abs_mean":     self._gather_mean(a_feas_abs),
+            "a_out_v4/a_outcome_abs_mean":  self._gather_mean(a_outcome_abs),
+            "a_out_v4/feas_dominance":      self._gather_mean(feas_dominance),
+            # PRM 段广播统计
             "prm_v4/n_segments_per_traj":   self._gather_mean(
                 float(n_segments_total) / max(B, 1)),
+            "prm_v4/seg_token_ratio":       self._gather_mean(
+                float(seg_token_count) / max(B * T, 1)),  # 段内 token 占 completion 比例
             "prm_v4/a_proc_mean":           self._gather_mean(float(a_proc_mean)),
             # a_proc_min 用 sentinel +inf 表示本 rank 无 PRM 数据 (跨 rank mean 会被拉高,
             # 但全部 rank 都 inf 时取 0 退化). 实际监控只要看是否 > 0 即可.
             "prm_v4/a_proc_min":            self._gather_mean(
                 float(a_proc_min) if a_proc_min < float("inf") else 0.0),
+            # R_step raw 统计 (tanh 之前): saturation_rate > 0.1 说明 tanh 频繁饱和,
+            # 极端信号被压扁; raw_max >> 2 说明 R_step 偶尔有极端值, 关注是否影响训练
+            "prm_v4/R_step_raw_abs_mean":   self._gather_mean(R_step_raw_abs_mean),
+            "prm_v4/R_step_raw_abs_max":    self._gather_mean(R_step_raw_abs_max),
+            "prm_v4/R_step_saturation_rate": self._gather_mean(R_step_saturation_rate),
         }
         self.log(log_dict)
         return advantages
@@ -922,10 +1003,37 @@ class GRPOPRMTrainer(GRPOTrainer):
         # ── 5. 切回本 rank ──────────────────────────────────────────
         rank = self.accelerator.process_index
         my_start = rank * B
-        a_out = (all_a_feas_norm[my_start:my_start + B]
-                 + all_a_outcome_norm[my_start:my_start + B])
+        a_feas_norm_local = all_a_feas_norm[my_start:my_start + B]
+        a_outcome_norm_local = all_a_outcome_norm[my_start:my_start + B]
+        a_out = a_feas_norm_local + a_outcome_norm_local
 
-        return a_out, is_feasible_local, components
+        # ── 6. 跨组 distance 统计 (用于监控 outcome 方差) ────────────
+        # 每组 distance std + cv (= std/mean), 反映"per-trajectory distance"
+        # 的离散程度. cv > 0.3 说明 repaired distance 方差大, 可能需要归一化.
+        dist_std_per_group = []
+        dist_cv_per_group = []
+        for h, idxs in groups.items():
+            if len(idxs) < 2:
+                continue
+            idx_t = torch.tensor(idxs, device=device, dtype=torch.long)
+            valid_d = all_dist_t[idx_t][~torch.isnan(all_dist_t[idx_t])]
+            if valid_d.numel() >= 2:
+                std = float(valid_d.std().item())
+                mean = float(valid_d.mean().item())
+                dist_std_per_group.append(std)
+                if mean > 1e-6:
+                    dist_cv_per_group.append(std / mean)
+
+        return {
+            "a_out":                  a_out,
+            "is_feasible":            is_feasible_local,
+            "components":             components,
+            "a_feas_norm":            a_feas_norm_local,
+            "a_outcome_norm":         a_outcome_norm_local,
+            "distance_local":         distances_local,
+            "dist_std_per_group":     dist_std_per_group,
+            "dist_cv_per_group":      dist_cv_per_group,
+        }
 
     # ── A_out = A_feasibility (跨 rank z-score) + A_outcome (可行子集 z-score) ──
 
