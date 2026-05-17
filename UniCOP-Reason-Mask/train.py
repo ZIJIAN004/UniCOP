@@ -254,6 +254,12 @@ def main():
     parser.add_argument("--reward_mode",  type=str, default=config.reward_mode,
                         choices=["prm", "foarl"],
                         help="奖励模式：prm=三信号解耦+POMO PRM | foarl=FOARL 无 PRM")
+    parser.add_argument("--reward_scheme", type=str,
+                        default=getattr(config, "reward_scheme", "v5"),
+                        choices=["v3", "v4", "v5"],
+                        help="reward_mode=prm 时具体方案: "
+                             "v3=hardgate+cascade | v4=simplified absolute PRM | "
+                             "v5=v4+hardgate distance+cov/cons加权 (默认 config 值)")
     parser.add_argument("--no_lora",      action="store_true")
     parser.add_argument("--num_gpus",     type=int, default=config.num_gpus,
                         help="使用的 GPU 数量，需与 accelerate launch --num_processes 一致")
@@ -310,6 +316,7 @@ def main():
     config.clip_epsilon_low       = args.clip_epsilon_low
     config.clip_epsilon_high      = args.clip_epsilon_high
     config.reward_mode            = args.reward_mode
+    config.reward_scheme          = args.reward_scheme
     config.pomo_ckpt_dir          = args.pomo_ckpt_dir
     config.pomo_baseline_dir      = args.pomo_baseline_dir
     config.pipd_ckpt_dir          = args.pipd_ckpt_dir

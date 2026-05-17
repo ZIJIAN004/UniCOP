@@ -211,6 +211,7 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPUS_CSV" \
     --pipd_dir "$PIPD_DIR" \
     --vllm_server_host "localhost" \
     --vllm_server_port "$VLLM_PORT" \
+    --reward_scheme v3 \
     2>&1 | tee "$TRAIN_LOG"
 
 TRAIN_EC=${PIPESTATUS[0]}
