@@ -143,6 +143,26 @@ class GRPOPRMTrainer(GRPOTrainer):
                             )
                 batch["vllm_per_token_logps"] = vllm_lp_tensor
                 batch["mask_hits"] = mask_hits_tensor
+
+                # ── Mask sanity check (use_mask=True 但 server 端没启 mask) ──
+                # vLLM server 没传 --mask_enabled 时 mh_all_global=None → mask_hits 全 0.
+                # Trainer config.use_mask=True 意味着用户预期 mask 生效, 不一致就警告.
+                # 只在主进程 print 避免多 rank 重复输出.
+                if (getattr(config, "use_mask", False)
+                        and self.accelerator.is_main_process
+                        and not getattr(self, "_mask_sanity_done", False)):
+                    self._mask_sanity_done = True
+                    server_mask_active = (mh_all_global is not None)
+                    if not server_mask_active:
+                        print("⚠️ config.use_mask=True 但 vLLM server 未返回 mask_hits "
+                              "(server 启动可能缺 --mask_enabled --mask_n N); "
+                              "训练仍会继续, 但实际没有 mask 强制. "
+                              "请检查 run script 的 vLLM 启动参数.",
+                              flush=True)
+                    else:
+                        print(f"✓ vLLM mask processor 已就绪 (use_mask={config.use_mask}, "
+                              f"mask_n={getattr(config, 'mask_n', 0)})",
+                              flush=True)
         except Exception as _e:
             if not getattr(self, "_vllm_logprob_warn", False):
                 print(f"⚠️ vLLM logprobs/mask_hits 处理失败 (IS 校正退化为不校正): "
@@ -886,6 +906,8 @@ class GRPOPRMTrainer(GRPOTrainer):
             "prm_v4/R_step_raw_abs_mean":   self._gather_mean(R_step_raw_abs_mean),
             "prm_v4/R_step_raw_abs_max":    self._gather_mean(R_step_raw_abs_max),
             "prm_v4/R_step_saturation_rate": self._gather_mean(R_step_saturation_rate),
+            # 实验区分: use_mask 是否启用 (常量, 方便 WandB 跨 run 对照)
+            "train/use_mask":               1.0 if getattr(config, "use_mask", False) else 0.0,
         }
         self.log(log_dict)
         return advantages

@@ -281,6 +281,16 @@ def main():
                         help="vLLM server 主机，server 模式 rollout 加速用")
     parser.add_argument("--vllm_server_port", type=int, default=8000,
                         help="vLLM server 端口，需与 trl vllm-serve 启动端口一致")
+    # ── Mask 超参 (跟 vLLM server 端 --mask_enabled / --mask_n 配对) ────
+    parser.add_argument("--use_mask", action="store_true",
+                        default=config.use_mask,
+                        help="trainer 端 mask 开关；vLLM server 也必须用 "
+                             "--mask_enabled --mask_n N 启动才会真生效")
+    parser.add_argument("--mask_n", type=int, default=config.mask_n,
+                        help="mask 的 customer 数 (0=跟 problem_size 同步)")
+    parser.add_argument("--mask_debug", action="store_true",
+                        default=config.mask_debug,
+                        help="vLLM stderr 详细 mask 触发日志")
     args = parser.parse_args()
 
     problem_types = args.problem           # 始终为 list[str]
@@ -304,6 +314,9 @@ def main():
     config.pomo_baseline_dir      = args.pomo_baseline_dir
     config.pipd_ckpt_dir          = args.pipd_ckpt_dir
     config.pipd_dir               = args.pipd_dir
+    config.use_mask               = args.use_mask
+    config.mask_n                 = args.mask_n if args.mask_n > 0 else args.problem_size
+    config.mask_debug             = args.mask_debug
 
     # ── 早期检查：PRM 模式下所有问题类型必须在 POMO PRM 支持列表内 ──
     if config.reward_mode == "prm":
@@ -328,6 +341,12 @@ def main():
                   else "symmetric")
     print(f"Ratio clip:  ε_low={config.clip_epsilon_low}, "
           f"ε_high={config.clip_epsilon_high}  [{_clip_mode}]")
+    print(f"Reward scheme: {getattr(config, 'reward_scheme', 'v3')}"
+          f"  |  use_mask: {config.use_mask}"
+          f"{f' (n={config.mask_n}, debug={config.mask_debug})' if config.use_mask else ''}")
+    if config.use_mask and config.problem_type != "cvrp":
+        print(f"⚠️ use_mask=True 但 problem_type={config.problem_type} 不是 cvrp; "
+              f"mask 仅对 cvrp 实现, 其他问题类型不会被 vLLM mask 拦截.")
 
     # ── 加载模型 ────────────────────────────────────────────────────────
     print("\n加载模型...")

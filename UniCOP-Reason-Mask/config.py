@@ -141,6 +141,21 @@ class Config:
     w_p_v4: float                  = 1.0
     w_f_v4: float                  = 0.5
 
+    # ── CVRP constrained-decoding mask (跟 reward_scheme 正交) ────────
+    # use_mask=True 时:
+    #   1. vLLM server 端: utils/vllm_serve_logprobs.py 必须用 --mask_enabled
+    #      --mask_n {N} 启动 (run script 要传); 否则 server 不会真的 mask, 这里
+    #      只是个 trainer 端开关.
+    #   2. Trainer 端: 日志加 train/use_mask=1 字段区分实验, 第一次没收到
+    #      mask_hits 时打 warning 提醒 server 配置不一致.
+    #   3. mask 跟 reward_scheme=v3/v4 都兼容. 推荐组合:
+    #      - v4 + mask: simplified reward + mask 强制 cov=1, 探索面收窄但更稳
+    #      - v3 + mask: hardgate reward + mask 让 cov_gate 自动满足 (cons 总开)
+    # mask 强制规则: CVRP-LLM-Mask-完整规则.md
+    use_mask: bool                 = False
+    mask_n: int                    = 0          # 0 → 跟 problem_size 同步
+    mask_debug: bool               = False      # vLLM stderr 详细 mask 触发日志
+
     # ── FOARL 奖励（reward_mode=foarl） ──────────────────────────────
     # R = R_f + R_o
     # R_f = omega 加权的约束满足度，R_o = alpha / (1 + optimality_gap)
