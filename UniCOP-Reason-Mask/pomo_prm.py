@@ -513,6 +513,85 @@ class POMOPRM:
             n=n,
         )
 
+    @torch.no_grad()
+    def compute_think_step_rewards_v4(
+        self,
+        completion: str,
+        instance: dict,
+        problem_type: str,
+    ) -> ThinkPRMResult:
+        """v4: simplified absolute PRM.
+
+        差异 vs compute_think_step_rewards (v3):
+            - 违例 / 重复 (effective_anomaly 之后) 全部游离, anomaly_step_indices = set()
+              不再产出任何负 PRM 信号; 违例/重复的惩罚靠
+                (1) PRM 机会成本 (这些 step 没有 a_proc) +
+                (2) outcome 的 repaired_distance
+              在 trainer 侧体现.
+            - step_rewards[i] 存 tanh 压缩后的 R_step (∈ (-1, +1)),
+              让 trainer 端直接 a_proc = base + step_rewards[i] 即可,
+              base > 1 保证 a_proc > 0.
+
+        注意: 此函数仍只在 valid prefix 内做 POMO 评估 (沿用 _validate_prefix break 行为),
+        不改 _validate_prefix. 违例之后的 customer step 在 trainer 侧通过
+        "step_ranges 不包含这些 step_idx" 隐式游离.
+        """
+        import math
+
+        n = instance["n"]
+        full_steps, customer_steps, chain_anomaly_idx = parse_think_segments(
+            completion
+        )
+
+        if not customer_steps:
+            return ThinkPRMResult(
+                step_rewards={}, step_ranges={},
+                anomaly_step_indices=set(), n=n,
+            )
+
+        valid_full_length = self._validate_prefix(
+            full_steps, instance, problem_type
+        )
+
+        constraint_anomaly = len(customer_steps)
+        for ci, step in enumerate(customer_steps):
+            if step.full_step_idx >= valid_full_length:
+                constraint_anomaly = ci
+                break
+        chain_limit = (chain_anomaly_idx
+                       if chain_anomaly_idx is not None
+                       else len(customer_steps))
+        effective_anomaly = min(chain_limit, constraint_anomaly)
+
+        normal_steps = customer_steps[:effective_anomaly]
+        step_rewards: dict[int, float] = {}
+        step_ranges: dict[int, tuple] = {}
+
+        if normal_steps:
+            cust_indices = [s.full_step_idx for s in normal_steps]
+            pomo_values = self._batch_evaluate_prefixes(
+                full_steps[:valid_full_length],
+                cust_indices,
+                instance, problem_type,
+            )
+            pomo_prev = 0.0
+            for i, step in enumerate(normal_steps):
+                if i < len(pomo_values):
+                    R_step = pomo_values[i] - pomo_prev
+                    pomo_prev = pomo_values[i]
+                    # tanh 压缩到 (-1, +1), 保证 trainer 端 base + R 永远 > 0 (base ≥ 1.5)
+                    step_rewards[i] = math.tanh(R_step)
+                    step_ranges[i] = step.char_range
+                # else: 后续 normal step (POMO 评估缺) 也游离, 不进 step_rewards
+
+        # v4: anomaly_step_indices 永远为空 - 违例/重复及之后全部游离
+        return ThinkPRMResult(
+            step_rewards=step_rewards,
+            step_ranges=step_ranges,
+            anomaly_step_indices=set(),
+            n=n,
+        )
+
     # ── 解析 ──────────────────────────────────────────────────────────
 
     def _parse_single_route(self, text: str, n: int):

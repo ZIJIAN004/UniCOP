@@ -179,31 +179,62 @@ class GRPOPRMTrainer(GRPOTrainer):
         )
         instances = [self._deserialize_instance(pd) for pd in problem_data_list]
 
-        # ── 一次性诊断: dump 第一条 completion 看 think 段实际格式 ────
-        # PRM_DIAG 显示 customer_groups_with_signal=0/0 但 hybrid SFT 训练
-        # 数据 [R*,*] 标记完整, 怀疑 RL 阶段实际生成的 completion 格式跟
-        # 训练数据有差异 (如 <think> 标签缺失/[R*,*] 形态变化). 抓一条看.
-        if not getattr(self, "_completion_dump_logged", False):
-            if self.accelerator.is_main_process and len(completions_text) > 0:
-                import re as _re
-                txt = completions_text[0]
+        # ── 周期诊断: 每 N step dump 2 条 completion 看 think 段形态演变 ────
+        # 用途: 跟踪 reward hacking pattern. 7362 run 中 step 80-95 期间 p95
+        # completion 长度从 3300 跳到 4071 触上限, parse rate 才随后崩溃 - 怀疑
+        # 模型先学会写超长 think 段 (feasible list 冗长 / [R*,*] 段内文本膨胀)
+        # 挤掉答案区. 需要看崩溃中期模型实际写什么定锚机制.
+        #
+        # dump 2 条 (idx=0 + idx=num_gen-1): 同 prompt 不同 sample, 方便对比
+        # reward hacking 是否在所有 generation 上都出现 (全组同质化 vs 单条 outlier).
+        _dump_interval = 10
+        _cur_step = (
+            self.state.global_step
+            if hasattr(self, "state") and self.state is not None
+            else 0
+        )
+        # gradient_accumulation_steps>1 时同 global_step 内此函数被调用多次,
+        # 用 _last_dump_step 守卫避免重复 dump (否则每 10 step 实际 dump grad_accum 次).
+        _last_dump_step = getattr(self, "_last_dump_step", -1)
+        if (self.accelerator.is_main_process
+                and len(completions_text) > 0
+                and _cur_step % _dump_interval == 0
+                and _cur_step != _last_dump_step):
+            self._last_dump_step = _cur_step
+            import re as _re
+            _dump_indices = [0]
+            if B > 1:
+                # 取本 rank 内的第 num_gen-1 条 (若 B < num_gen 则取最后一条)
+                _dump_indices.append(min(num_gen - 1, B - 1))
+            for _di in _dump_indices:
+                txt = completions_text[_di]
                 has_think_open  = "<think>" in txt
                 has_think_close = "</think>" in txt
                 te = txt.find("</think>")
-                # 抓 [R*,*] 类标记 (宽松正则)
                 br_matches = _re.findall(r'\[R?\d+\s*,\s*\d+\]', txt)
+                # parse 检查 (terminal_reward 视角): 答案区能否解出多路线
+                from utils.parse import parse_multi_route, parse_single_route
+                _pt = problem_type_list[_di]
+                _n = instances[_di]["n"]
+                if _pt in ("cvrp", "vrptw"):
+                    _parse_ok = parse_multi_route(txt, _n) is not None
+                else:
+                    _parse_ok = parse_single_route(txt, _n) is not None
+                # 答案区长度 (</think> 之后)
+                _answer_len = len(txt) - (te + len("</think>")) if te >= 0 else 0
                 print(
-                    f"\n[COMPLETION_DUMP idx=0] len={len(txt)} "
+                    f"\n[COMPLETION_DUMP step={_cur_step} idx={_di}] "
+                    f"len={len(txt)} answer_len={_answer_len} "
                     f"has<think>={has_think_open} has</think>={has_think_close} "
-                    f"bracket_count={len(br_matches)}\n"
-                    f"--- 前 800 char ---\n{txt[:800]}\n"
-                    f"--- think 末尾前 600 char (</think> 之前) ---\n"
-                    f"{txt[max(0, te-600):te] if te > 0 else '(no </think>)'}\n"
-                    f"--- 末尾 300 char ---\n{txt[-300:]}\n"
+                    f"bracket_count={len(br_matches)} parse_ok={_parse_ok}\n"
+                    f"--- think 末尾前 800 char (</think> 之前) ---\n"
+                    f"{txt[max(0, te-800):te] if te > 0 else '(no </think>)'}\n"
+                    f"--- 答案区前 400 char (</think> 之后) ---\n"
+                    f"{txt[te+len('</think>'):te+len('</think>')+400] if te >= 0 else '(no answer)'}\n"
+                    f"--- 末尾 200 char (看是否触 max_len 截断) ---\n{txt[-200:]}\n"
                     f"--- 前 10 个 [R*,*] 标记 ---\n{br_matches[:10]}",
                     flush=True,
                 )
-            self._completion_dump_logged = True
 
         if config.reward_mode == "foarl":
             advantages = self._build_foarl_advantages(
@@ -213,18 +244,28 @@ class GRPOPRMTrainer(GRPOTrainer):
             # FOARL 返回 (B,) → 扩展到 (B, T) 保持接口一致
             advantages = advantages.unsqueeze(-1).expand(-1, T).contiguous()
         else:
-            # 可行性重采样：每组至少 2 条可行解
+            # 可行性重采样：每组至少 2 条可行解 (v3/v4 共用)
             self._resample_infeasible(
                 batch, completions_text, instances, problem_type_list, num_gen
             )
 
-            # Per-Customer PRM + A_feasibility + A_outcome → per-token (B, T)
-            advantages = self._build_unified_advantages(
-                completions_text, instances, problem_type_list,
-                B, num_gen, T, device=completion_ids.device,
-                prompt_ids=batch["prompt_ids"],
-                prompt_mask=batch["prompt_mask"],
-            )
+            # v3 (默认, 原 hardgate+cascade) 或 v4 (simplified+absolute PRM)
+            _scheme = getattr(config, "reward_scheme", "v3")
+            if _scheme == "v4":
+                advantages = self._build_unified_advantages_v4(
+                    completions_text, instances, problem_type_list,
+                    B, num_gen, T, device=completion_ids.device,
+                    prompt_ids=batch["prompt_ids"],
+                    prompt_mask=batch["prompt_mask"],
+                )
+            else:
+                # v3: 原逻辑一字不改
+                advantages = self._build_unified_advantages(
+                    completions_text, instances, problem_type_list,
+                    B, num_gen, T, device=completion_ids.device,
+                    prompt_ids=batch["prompt_ids"],
+                    prompt_mask=batch["prompt_mask"],
+                )
 
         batch["advantages"] = advantages
         # 清理旧字段，避免父类或后续代码误用
@@ -599,7 +640,17 @@ class GRPOPRMTrainer(GRPOTrainer):
                     tok_s, tok_e = self._char_to_token_range(seg_cs, seg_ce, om)
                     if tok_s is not None and tok_e is not None:
                         tok_e = min(tok_e, T)
-                        advantages[j, tok_s:tok_e] += config.proc_alpha * a_proc
+                        # 段广播 mean (而非 sum): a_proc 平均分摊到段内 token,
+                        # 段对 loss 总贡献 = α × a_proc (与段长解耦), 防 length-runaway:
+                        # 原 sum 模式下 段贡献 = α × a_proc × seg_len, 模型有边际激励
+                        # 写更冗长的 feasible list 以放大每段的 advantage 总量,
+                        # 导致 think 段顶死 max_completion_length 截断答案区.
+                        # 注意: 量级整体压到原来的 1/seg_len (~1/100), 若需保持 PRM
+                        # 在 loss 中权重, 同步上调 config.proc_alpha (建议 50 起步).
+                        seg_len = max(tok_e - tok_s, 1)
+                        advantages[j, tok_s:tok_e] += (
+                            config.proc_alpha * a_proc / seg_len
+                        )
 
             # ── 诊断: 一次性 print PRM 跨 rank 统计 ─────────────────────
             if not getattr(self, "_prm_diag_logged", False):
@@ -654,6 +705,227 @@ class GRPOPRMTrainer(GRPOTrainer):
         self.log(log_dict)
 
         return advantages
+
+    # ══════════════════════════════════════════════════════════════════
+    #  v4: simplified advantage (absolute PRM + repaired distance)
+    #  完全独立分支, 不调 v3 函数, 不污染 v3 行为. config.reward_scheme="v4" 触发.
+    # ══════════════════════════════════════════════════════════════════
+
+    def _build_unified_advantages_v4(self, completions_text, instances,
+                                      problem_type_list,
+                                      B, num_gen, T, device,
+                                      prompt_ids, prompt_mask):
+        """v4 advantage 构造.
+
+        差异 vs v3 (_build_unified_advantages):
+            1. A_out 用 _compute_a_out_v4: A_feas 只剩 parse+format, A_outcome 用
+               repaired_distance, feas 子集 = parse=1 (大子集, z-score 噪声小).
+            2. PRM 段广播用 absolute: a_proc = prm_base + tanh(R_step) (始终 > 0),
+               违例/重复及之后 step 不在 step_rewards 里, 自动游离 (机会成本).
+            3. 不做跨 trajectory z-score, 不需要 fallback / anomaly_value 等.
+            4. mean 模式段广播 (sum 改 mean 防 length runaway): 段贡献 = α × a_proc.
+        """
+        # ── 1. A_out (v4 简化版) ─────────────────────────────────────
+        a_out, is_feasible, components = self._compute_a_out_v4(
+            completions_text, instances, problem_type_list, B, num_gen, device,
+            prompt_ids, prompt_mask,
+        )
+
+        # ── 2. 初始化 advantage tensor: 所有 token 先赋 A_out ────────
+        advantages = a_out.unsqueeze(-1).expand(-1, T).contiguous()
+
+        # ── 3. PRM 段广播 (absolute, rank-local) ─────────────────────
+        prm_base = getattr(config, "prm_base_v4", 1.5)
+        proc_alpha = getattr(config, "proc_alpha_v4", 10.0)
+
+        n_segments_total = 0
+        a_proc_sum = 0.0
+        a_proc_min = float("inf")
+
+        if not config.disable_prm and self.pomo_prm is not None:
+            offset_maps = self._build_offset_maps(completions_text, B)
+            for i in range(B):
+                pt = problem_type_list[i]
+                if pt not in self.pomo_prm.SUPPORTED:
+                    continue
+                prm_res = self.pomo_prm.compute_think_step_rewards_v4(
+                    completions_text[i], instances[i], pt,
+                )
+                if prm_res is None or offset_maps[i] is None:
+                    continue
+                om = offset_maps[i]
+
+                # 跟踪 trajectory 是否完整 (违例/重复触发的 trajectory step_rewards 截断)
+                n_segments_total += len(prm_res.step_rewards)
+                for step_idx, R_step_tanh in prm_res.step_rewards.items():
+                    a_proc = prm_base + R_step_tanh   # ∈ (prm_base - 1, prm_base + 1)
+                    a_proc_sum += a_proc
+                    if a_proc < a_proc_min:
+                        a_proc_min = a_proc
+                    seg = prm_res.step_ranges.get(step_idx)
+                    if seg is None:
+                        continue
+                    tok_s, tok_e = self._char_to_token_range(seg[0], seg[1], om)
+                    if tok_s is None or tok_e is None:
+                        continue
+                    tok_e = min(tok_e, T)
+                    seg_len = max(tok_e - tok_s, 1)
+                    # mean 模式: 段贡献 = α × a_proc (不依赖 seg_len, 防 length runaway)
+                    advantages[i, tok_s:tok_e] += proc_alpha * a_proc / seg_len
+
+        # ── 4. Log (v4 metric, 跟 v3 解耦, prm 统计跨 rank gather) ────
+        # fully_feas_rate: 严格 fully feasible (parse+全访+全合规+format=1.0),
+        # 跟 v3 的 feasibility_rate 定义一致, 方便跟 7362 run 对照看 fullcov 是否反弹.
+        fully_feas_per_traj = [
+            float(c["parse"] == 1.0
+                  and c["coverage"] >= 1.0 - 1e-9
+                  and c["constraint"] == 1.0
+                  and c["format"] == 1.0)
+            for c in components
+        ]
+        coverage_arr = np.array([c["coverage"] for c in components])
+        a_proc_mean = a_proc_sum / max(n_segments_total, 1) if n_segments_total > 0 else 0.0
+        log_dict = {
+            "reward_v4/parse_rate":         self._gather_mean(
+                np.mean([c["parse"] for c in components])),
+            "reward_v4/coverage_rate":      self._gather_mean(float(coverage_arr.mean())),
+            "reward_v4/fullcov_rate":       self._gather_mean(
+                float((coverage_arr >= 1.0 - 1e-9).mean())),
+            "reward_v4/fully_feas_rate":    self._gather_mean(np.mean(fully_feas_per_traj)),
+            "reward_v4/R_constraint_mean":  self._gather_mean(
+                np.mean([c["constraint"] for c in components])),
+            "reward_v4/R_format_mean":      self._gather_mean(
+                np.mean([c["format"] for c in components])),
+            "reward_v4/A_abs_mean":         self._gather_mean(advantages.abs().mean()),
+            "reward_v4/A_std":              self._gather_mean(advantages.std()),
+            "prm_v4/n_segments_per_traj":   self._gather_mean(
+                float(n_segments_total) / max(B, 1)),
+            "prm_v4/a_proc_mean":           self._gather_mean(float(a_proc_mean)),
+            # a_proc_min 用 sentinel +inf 表示本 rank 无 PRM 数据 (跨 rank mean 会被拉高,
+            # 但全部 rank 都 inf 时取 0 退化). 实际监控只要看是否 > 0 即可.
+            "prm_v4/a_proc_min":            self._gather_mean(
+                float(a_proc_min) if a_proc_min < float("inf") else 0.0),
+        }
+        self.log(log_dict)
+        return advantages
+
+    def _compute_a_out_v4(self, completions_text, instances,
+                           problem_type_list, B, num_gen, device,
+                           prompt_ids, prompt_mask):
+        """v4 A_out: A_feas (parse+format only) + A_outcome (repaired distance).
+
+        差异 vs v3 _compute_a_out:
+            - A_feas_raw 只剩 parse + format 加权 (cov/cons 没了, 因为 outcome 已覆盖)
+            - feas 子集判定: parse=1 即可进 (子集变大, z-score 信号更稳)
+            - distance 用 repaired_distance (漏访补全 + 违例拆分 + 重复 ε)
+        """
+        from collections import defaultdict
+        from terminal_reward import (
+            compute_terminal_components, repaired_distance,
+        )
+        from utils.parse import parse_multi_route, parse_single_route
+
+        eps = 1e-8
+        w_p = getattr(config, "w_p_v4", 1.0)
+        w_f = getattr(config, "w_f_v4", 0.5)
+        dup_eps = getattr(config, "dup_distance_eps", 0.2)
+
+        # ── 1. 本 rank 算 raw 信号 ──────────────────────────────────
+        a_feas_raw = torch.zeros(B, device=device)
+        is_feasible_local: list[bool] = []
+        components: list[dict] = []
+        distances_local: list[float] = []
+
+        for i in range(B):
+            c = compute_terminal_components(
+                completions_text[i], instances[i], problem_type_list[i]
+            )
+            components.append(c)
+
+            # v4 feas 判定: 只要 parse 成功就进 outcome 子集
+            feas = c["parse"] == 1.0
+            is_feasible_local.append(feas)
+
+            # A_feas 只剩 parse + format (cov/cons 完全去除)
+            a_feas_raw[i] = w_p * c["parse"] + w_f * c["format"]
+
+            if feas:
+                inst = instances[i]
+                pt = problem_type_list[i]
+                n = inst["n"]
+                # v4 repaired_distance 只对 CVRP 设计 (拆分/补全/重复都跟容量+多路线相关).
+                # 其他问题类型 (TSP/TSPTW/TSPDL/VRPTW) 退化到 v3 的 prob.get_tour_distance.
+                if pt == "cvrp":
+                    routes = parse_multi_route(completions_text[i], n)
+                    if routes is None:
+                        distances_local.append(float("nan"))
+                        continue
+                    demands = inst.get("demands", [0.0] * (n + 1))
+                    cap = inst.get("capacity", 1.0)
+                    coords = inst["coords"]
+                    try:
+                        d = repaired_distance(routes, coords, n, demands, cap, dup_eps)
+                        distances_local.append(d)
+                    except Exception:
+                        distances_local.append(float("nan"))
+                else:
+                    prob = _PROBLEM_OBJS.get(pt)
+                    d = (prob.get_tour_distance(completions_text[i], inst)
+                         if prob else None)
+                    distances_local.append(d if d is not None else float("nan"))
+            else:
+                distances_local.append(float("nan"))
+
+        # ── 2. prompt hash (同 v3) ───────────────────────────────────
+        masked_ids = prompt_ids.long() * prompt_mask.long()
+        row_id_sum = masked_ids.sum(dim=-1)
+        row_len    = prompt_mask.long().sum(dim=-1)
+        row_hash   = row_id_sum * 1000003 + row_len
+
+        # ── 3. 跨 rank gather (同 v3) ────────────────────────────────
+        all_a_feas_raw = self.accelerator.gather(a_feas_raw.contiguous())
+        feas_t  = torch.tensor(is_feasible_local, device=device, dtype=torch.bool)
+        all_feas_t = self.accelerator.gather(feas_t.contiguous())
+        dist_t  = torch.tensor(distances_local, device=device, dtype=torch.float32)
+        all_dist_t = self.accelerator.gather(dist_t.contiguous())
+        all_row_hash = self.accelerator.gather(row_hash.contiguous())
+        G = all_a_feas_raw.shape[0]
+
+        # ── 4. 分组 z-score ──────────────────────────────────────────
+        hash_cpu = all_row_hash.cpu().tolist()
+        groups = defaultdict(list)
+        for i, h in enumerate(hash_cpu):
+            groups[h].append(i)
+
+        all_a_feas_norm    = torch.zeros_like(all_a_feas_raw)
+        all_a_outcome_norm = torch.zeros_like(all_a_feas_raw)
+
+        for h, idxs in groups.items():
+            if len(idxs) < 2:
+                continue
+            idx_t = torch.tensor(idxs, device=device, dtype=torch.long)
+
+            # A_feas: 整组 z-score
+            grp = all_a_feas_raw[idx_t]
+            all_a_feas_norm[idx_t] = (grp - grp.mean()) / (grp.std() + eps)
+
+            # A_outcome: parse=1 子集 z-score(-distance), distance 短 → 正信号
+            feas_mask = all_feas_t[idx_t] & ~torch.isnan(all_dist_t[idx_t])
+            feas_local_pos = feas_mask.nonzero(as_tuple=True)[0]
+            if feas_local_pos.numel() >= 2:
+                feas_idx_t = idx_t[feas_local_pos]
+                neg_d = -all_dist_t[feas_idx_t]
+                all_a_outcome_norm[feas_idx_t] = (
+                    (neg_d - neg_d.mean()) / (neg_d.std() + eps)
+                )
+
+        # ── 5. 切回本 rank ──────────────────────────────────────────
+        rank = self.accelerator.process_index
+        my_start = rank * B
+        a_out = (all_a_feas_norm[my_start:my_start + B]
+                 + all_a_outcome_norm[my_start:my_start + B])
+
+        return a_out, is_feasible_local, components
 
     # ── A_out = A_feasibility (跨 rank z-score) + A_outcome (可行子集 z-score) ──
 

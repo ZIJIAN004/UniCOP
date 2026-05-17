@@ -109,6 +109,38 @@ class Config:
     # step >= N 之后模型应已学到基本可行模式, resample 救剩余 outlier 才有意义.
     resample_start_step: int       = 100
 
+    # ── 奖励方案开关 (v3 = 当前 hardgate+PRM cascade, v4 = simplified+absolute PRM) ──
+    # v3: 默认, 一字不改原逻辑. hardgate (cov_gate=1.0) + PRM 跨 trajectory z-score
+    #     + fallback + anomaly cascade. 已知问题: 7362 run 中 PRM cascade 让模型
+    #     选漏访避险, fullcov 65 步后崩.
+    # v4: 简化设计.
+    #     - A_feas 只剩 parse + format (w_p_v4 + w_f_v4), 没 cov/cons/hardgate
+    #     - A_outcome 用 repaired distance: 漏访补单条路线 / 违例贪心拆分 /
+    #       重复去重 + dup_distance_eps 固定罚. 所有 parse=1 trajectory 进 outcome 子集.
+    #     - PRM 用 absolute: normal step a_proc = prm_base + tanh(R_step) (永远>0),
+    #       违例/重复及之后 step 全部游离 a_proc=0 (机会成本通过 base 缺失体现).
+    #       不再 z-score / fallback / anomaly cascade.
+    #     - 违例惩罚 = PRM 机会成本 + outcome distance 增量
+    #     - 漏访惩罚 = PRM 机会成本 (少 K 个 base) + outcome distance 增量
+    #     - 重复惩罚 = PRM 机会成本 (cascade 游离) + outcome dup_eps
+    reward_scheme: str             = "v4"   # "v3" | "v4"
+
+    # ── v4 专用参数 (v3 时被忽略) ─────────────────────────────────────
+    # prm_base: PRM normal step 基础奖励. 必须 > |tanh(R_step)|_max = 1, 给 margin 取 1.5.
+    # normal a_proc = prm_base + tanh(R_step) ∈ (0.5, 2.5), 永远 > 违例/重复 (=0).
+    prm_base_v4: float             = 1.5
+    # proc_alpha_v4: v4 段广播权重. v3 用 proc_alpha=0.5 是因为 sum 模式段贡献 ∝ seg_len;
+    # v4 用 mean 模式段贡献 = α × a_proc 与段长解耦, 需要 α 调大才能让 PRM 信号在
+    # trajectory loss 中可见. 50 量级让 PRM trajectory 贡献 (≈20段 × 50 × 1.5 = 1500)
+    # 跟 A_out trajectory 贡献 (≈z-score × T = 1.5 × 3000 = 4500) 同量级, PRM 占比 25-30%.
+    proc_alpha_v4: float           = 50.0
+    # dup_distance_eps: outcome 上重复客户的固定 distance 增量 (per duplicate).
+    # 设计上 < 漏访 distance 增量 (~0.7) 防止重复罚过重, > 0 让模型感知重复不好.
+    dup_distance_eps: float        = 0.2
+    # A_feas v4 权重 (只剩 parse + format), 跟 v3 的 w_p/w_f 隔离避免互相影响.
+    w_p_v4: float                  = 1.0
+    w_f_v4: float                  = 0.5
+
     # ── FOARL 奖励（reward_mode=foarl） ──────────────────────────────
     # R = R_f + R_o
     # R_f = omega 加权的约束满足度，R_o = alpha / (1 + optimality_gap)

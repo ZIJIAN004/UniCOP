@@ -190,6 +190,133 @@ def is_fully_feasible(
             and c["constraint"] == 1.0 and c["format"] == 1.0)
 
 
+## ══════════════════════════════════════════════════════════════════════
+##  v4: Repaired Distance (simplified reward scheme)
+##  把任意 trajectory (含漏访/违例/重复) 修复成完全可行解再算 distance,
+##  让 outcome z-score 自然惩罚三类错误, 不依赖 hardgate / PRM cascade.
+##  仅在 config.reward_scheme == "v4" 时被 trainer 调用.
+## ══════════════════════════════════════════════════════════════════════
+
+
+def repair_routes(routes, n: int, demands, capacity: float, dup_eps: float = 0.2):
+    """把 routes 修复成完全可行: 违例贪心拆分 + 漏访补单条路线 + 重复去重.
+
+    Args:
+        routes: list[list[int]], 原始路线 (可能含违例/漏访/重复)
+        n: 客户数 (不含 depot)
+        demands: list[float] 长度 n+1, demands[0]=0
+        capacity: float, 单路线容量上限
+        dup_eps: 每次重复访问给的固定 distance 增量 (in repaired_distance 里加)
+
+    Returns:
+        (repaired_routes: list[list[int]], n_duplicates: int)
+        - repaired_routes 完全可行: 每条 demand ≤ capacity, 全部客户 1..n 出现一次
+        - n_duplicates: 重复次数 (1 个客户访问 K 次算 K-1 个 duplicate)
+    """
+    # 1. 统计重复 + 去重 (保留每个客户第一次出现)
+    seen = set()
+    n_duplicates = 0
+    deduped = []
+    for r in routes:
+        new_r = []
+        for v in r:
+            if v == 0:
+                new_r.append(v)
+                continue
+            if v in seen:
+                n_duplicates += 1  # 重复, 不放进 deduped
+                continue
+            if v < 1 or v > n:
+                # 越界, 视作 noise 跳过 (parse 已过滤但保险起见)
+                continue
+            seen.add(v)
+            new_r.append(v)
+        # 清理可能的连续 depot (0,0)
+        cleaned = []
+        for v in new_r:
+            if v == 0 and cleaned and cleaned[-1] == 0:
+                continue
+            cleaned.append(v)
+        if len(cleaned) > 0 and any(v != 0 for v in cleaned):
+            deduped.append(cleaned)
+
+    # 2. 违例贪心拆分: 累加 demand, 超 cap 就开新路线.
+    #    内部 depot (中途 return depot) 也显式切路线 + reset load,
+    #    防止"一条 list 内多个 0"被错误合并.
+    repaired = []
+    for r in deduped:
+        current = [0]
+        load = 0.0
+        for v in r:
+            if v == 0:
+                # 内部 depot: 关闭当前路线, 起新路线 (reset load)
+                if len(current) > 1:
+                    current.append(0)
+                    if len(current) > 2:
+                        repaired.append(current)
+                current = [0]
+                load = 0.0
+                continue
+            d = demands[v] if v < len(demands) else 0.0
+            if load + d > capacity + 1e-6:
+                # 容量超: 强制关闭, 开新路线
+                current.append(0)
+                if len(current) > 2:
+                    repaired.append(current)
+                current = [0, v]
+                load = d
+            else:
+                current.append(v)
+                load += d
+        # 关闭最后一条
+        if len(current) > 1:
+            current.append(0)
+            if len(current) > 2:
+                repaired.append(current)
+
+    # 3. 漏访客户补单条路线 (保证 capacity 永远合规, 因为单 customer demand < cap)
+    visited = {v for r in repaired for v in r if v != 0}
+    missing = sorted(set(range(1, n + 1)) - visited)
+    for c in missing:
+        repaired.append([0, c, 0])
+
+    return repaired, n_duplicates
+
+
+def _route_distance(route, coords) -> float:
+    """单条路线的几何 distance (欧氏距离). route 是 [0, c1, c2, ..., 0]."""
+    if len(route) < 2:
+        return 0.0
+    coords = np.asarray(coords)
+    total = 0.0
+    for i in range(len(route) - 1):
+        a, b = route[i], route[i + 1]
+        total += float(np.linalg.norm(coords[a] - coords[b]))
+    return total
+
+
+def repaired_distance(
+    routes,
+    coords,
+    n: int,
+    demands,
+    capacity: float,
+    dup_eps: float = 0.2,
+) -> float:
+    """v4 outcome distance: 修复后几何 distance + n_duplicates × dup_eps.
+
+    返回值越小越好 (跟原 get_tour_distance 方向一致).
+    Trainer 端用 -repaired_distance 做 z-score, distance 短 → 正信号.
+
+    设计 invariant:
+        全访合规 distance < 全访违例 distance < 漏访 distance
+        (因为拆分代价 < 漏访补全代价, 经验上 0.3-0.5 vs 0.5-1.0)
+    """
+    repaired, n_dup = repair_routes(routes, n, demands, capacity, dup_eps)
+    geom_dist = sum(_route_distance(r, coords) for r in repaired)
+    return geom_dist + n_dup * dup_eps
+
+
 def _format_score(completion: str, problem_type: str) -> float:
     """
     Route N 编号正确率：
