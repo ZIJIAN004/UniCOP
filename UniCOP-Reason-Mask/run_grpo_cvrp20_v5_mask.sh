@@ -44,7 +44,12 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo "日志文件: $LOG_FILE"
 
 export PYTHONUNBUFFERED=1
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# expandable_segments A5000 不支持 (启动 log 报 warning), 换 GC threshold 缓解碎片
+export PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8
+# A5000 是 SM 8.6, 显式指定避免编译所有 arch (减启动时间)
+export TORCH_CUDA_ARCH_LIST=8.6
+# Triton cache 从 NFS 移到本地 tmp (NFS 上 DeepSpeed 退出可能 hang)
+export TRITON_CACHE_DIR=/tmp/zhuoyi_triton_${SLURM_JOB_ID:-local}
 export NCCL_DEBUG=WARN
 export PYTHONFAULTHANDLER=1
 export NCCL_P2P_DISABLE=1
@@ -184,6 +189,8 @@ echo "  IS skip:   mask 位置 ratio=1"
 echo "  LR:        1e-5 (v5 第 1 step grad explode 修复, 从 2e-5 降回)"
 echo "  Warmup:    0.02 × 500 = 10 step (从 5 step 延长, 避免第 1 step Δθ 过大)"
 echo "  Mask 生效: 第 1 batch [MASK_HEALTH] 详细 print + 持续 mask_health/* metric"
+echo "  显存优化: offload_param=none (saved 90% fwd+bwd time), offload_optimizer=cpu (kept)"
+echo "             预计单 step 22min → 11min; 启动 5min 后看 nvidia-smi 确认不 OOM"
 echo "  输出目录:  $OUTPUT_DIR_BASE"
 echo "  整除检查:  per_device_batch (4) × num_gpus ($TRAIN_PROC) = $((4 * TRAIN_PROC)),  整除 num_generations (8) ? $(( (4 * TRAIN_PROC) % 8 == 0 ))"
 echo "  时间:      $(date)"
