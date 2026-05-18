@@ -205,6 +205,27 @@ class CVRPMaskProcessor:
         state = build_state(past_text, n=self.n)
         decision = compute_mask(state, self.cfg)
 
+        # 第 1 次进入 SECTION_2 时强制 print (验证模型有没有写 anchor)
+        if (state.section == "SECTION_2"
+                and not getattr(self, "_section2_logged", False)):
+            self._section2_logged = True
+            print(
+                f"!!! [CVRPMask] FIRST SECTION_2 INVOKED: "
+                f"olen={len(output_token_ids)}, visited={len(state.visited)}, "
+                f"select_trigger={state.select_trigger_now}, "
+                f"past_text_tail={past_text[-80:]!r}",
+                file=sys.stderr, flush=True,
+            )
+        # 第 1 次 select_strict 触发时 print (验证 mask 真在 SECTION_2 限制 select)
+        if decision.select_strict and not getattr(self, "_select_strict_logged", False):
+            self._select_strict_logged = True
+            print(
+                f"!!! [CVRPMask] FIRST select_strict INVOKED: "
+                f"olen={len(output_token_ids)}, visited={sorted(state.visited)}, "
+                f"allowed_customers={decision.select_allowed}",
+                file=sys.stderr, flush=True,
+            )
+
         # ── Prefix tree: 检查是否在 multi-token customer select 中间 ──
         # 优先于 select_strict (select_strict 是第 1 token, partial_select 是第 2-N token,
         # 两者在不同 call 触发, 但 partial_select 时 select_strict 不会 fire 因为末尾不是 "→ select ")
