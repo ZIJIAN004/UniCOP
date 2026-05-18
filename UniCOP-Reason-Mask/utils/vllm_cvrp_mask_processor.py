@@ -336,16 +336,14 @@ class CVRPMaskProcessor:
             allowed_token_ids.update(self.select_end_tokens)
 
         if not allowed_token_ids:
-            # 所有候选都 visited → 无延续可走且当前 prefix 不是完整 customer
-            # 例如 visited={1, 10-19}, partial=" 1" → 既不能结束 (1 visited)
-            # 也不能延续 (10-19 都 visited). 此时 fallback 不 mask, 由 reward 罚.
-            # 理论上 select_strict 不该 allow 这个 first_tok, 这里是冗余保护.
-            return logits
+            return logits  # 同 select_strict, fallback 不 mask
 
-        new_logits = torch.full_like(logits, float("-inf"))
-        for tok in allowed_token_ids:
-            new_logits[tok] = logits[tok]
-        return new_logits
+        # in-place (跟 select_strict 同样的 fix)
+        allowed_values = {tok: logits[tok].item() for tok in allowed_token_ids}
+        logits[:] = float("-inf")
+        for tok, val in allowed_values.items():
+            logits[tok] = val
+        return logits
 
     def _summarize_decision(self, dec: MaskDecision) -> str:
         flags = []
@@ -370,6 +368,9 @@ class CVRPMaskProcessor:
     ) -> torch.Tensor:
         """把语义级 MaskDecision 应用到 token-level logits."""
         # 规则 1 (select_strict) 是 destructive 全 mask, 优先处理
+        # 关键 bug 修复 (2026-05-18): vLLM 0.7.3 V0 engine 似乎只接受 in-place modification,
+        # return new tensor 被 ignore. 实测现象: forbid_eos (in-place) 生效 (sequence 全触
+        # max_completion_length), 但 select_strict (return new) 无效 (dup 严重). 改成 in-place.
         if dec.select_strict:
             allowed_token_ids = []
             for c in dec.select_allowed:
@@ -378,17 +379,14 @@ class CVRPMaskProcessor:
                     allowed_token_ids.append(tok)
 
             if not allowed_token_ids:
-                # Fallback: 没有任何 customer first token 可用 (异常或所有 multi-token)
-                # 保守不 mask, 让 reward 兜底
-                return logits
+                return logits  # fallback 不 mask, 让 reward 兜底
 
-            # 全 -inf 除 allowed
-            new_logits = torch.full_like(logits, float("-inf"))
-            for tok in allowed_token_ids:
-                new_logits[tok] = logits[tok]
-            # 在 select 位置 depot " 0" 不允许 (避免 select depot hack)
-            # (上面 new_logits 默认 -inf 已经 cover)
-            return new_logits
+            # in-place: 保存 allowed 位置原值, 全部 -inf, 再恢复 allowed
+            allowed_values = {tok: logits[tok].item() for tok in allowed_token_ids}
+            logits[:] = float("-inf")
+            for tok, val in allowed_values.items():
+                logits[tok] = val
+            return logits
 
         # 规则 2-5: 局部 -inf
         if dec.forbid_think_close and self.think_close_token is not None:
