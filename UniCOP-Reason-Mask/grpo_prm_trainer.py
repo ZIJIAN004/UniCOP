@@ -278,6 +278,8 @@ class GRPOPRMTrainer(GRPOTrainer):
                     B, num_gen, T, device=completion_ids.device,
                     prompt_ids=batch["prompt_ids"],
                     prompt_mask=batch["prompt_mask"],
+                    mask_hits=batch.get("mask_hits"),
+                    completion_mask=completion_mask,
                 )
             elif _scheme == "v4":
                 advantages = self._build_unified_advantages_v4(
@@ -1077,8 +1079,13 @@ class GRPOPRMTrainer(GRPOTrainer):
     def _build_unified_advantages_v5(self, completions_text, instances,
                                       problem_type_list,
                                       B, num_gen, T, device,
-                                      prompt_ids, prompt_mask):
-        """v5 advantage 构造: A_feas (hardgate) + A_outcome (strict subset) + PRM (v4 absolute)."""
+                                      prompt_ids, prompt_mask,
+                                      mask_hits=None, completion_mask=None):
+        """v5 advantage 构造: A_feas (hardgate) + A_outcome (strict subset) + PRM (v4 absolute).
+
+        mask_hits / completion_mask: 用于 mask_health 计算 vLLM 端真实触发率,
+        作为 cov_eq_1 的独立维度判断 mask 是否在 server 端跑起来.
+        """
         a_out_pkg = self._compute_a_out_v5(
             completions_text, instances, problem_type_list, B, num_gen, device,
             prompt_ids, prompt_mask,
@@ -1227,46 +1234,139 @@ class GRPOPRMTrainer(GRPOTrainer):
             "train/use_mask":               1.0 if getattr(config, "use_mask", False) else 0.0,
         }
 
-        # ── mask 生效指标 (mask 启用时报送) ──────────────────────────
-        # 期望 mask 完美工作时全部 → 1.0; < 0.95 说明 mask 没真生效
-        # (vLLM server 没启动 mask / mask 实现 bug / 模型触 max_completion_length 截断)
-        if getattr(config, "use_mask", False) and miss_list:
-            miss_arr = np.array(miss_list)
-            dup_arr = np.array(dup_list)
-            zero_miss_rate = float((miss_arr == 0).mean())
-            zero_dup_rate = float((dup_arr == 0).mean())
-            no_miss_no_dup = float(((miss_arr == 0) & (dup_arr == 0)).mean())
+        # ── mask 生效指标 (mask 启用时报送, 跟 stats_v5 解耦) ─────────
+        # 跟 stats_v5/miss_per_traj 区别: stats_v5 是 parse 成功 cvrp 子集平均;
+        # mask_health 用全 B 条对齐 (parse 失败 trajectory 算 miss=n, dup=0).
+        # 这样 cov_eq_1 跟 zero_miss/zero_dup 分母一致, 可对比.
+        # 期望 mask 完美工作时全部 → 1.0; < 0.95 说明 mask 没真生效.
+        if getattr(config, "use_mask", False):
+            # 全 B 条对齐的 miss/dup (parse 失败算全漏)
+            mask_miss_full: list[float] = []
+            mask_dup_full: list[float] = []
+            for i in range(B):
+                pt = problem_type_list[i]
+                inst = instances[i]
+                n_inst = inst["n"]
+                if pt != "cvrp":
+                    # 非 cvrp: mask 不实现, 跳过 (不影响 cvrp 单 problem run)
+                    mask_miss_full.append(0.0)
+                    mask_dup_full.append(0.0)
+                    continue
+                routes = parse_multi_route(completions_text[i], n_inst)
+                if routes is None:
+                    # parse 失败: 视作 mask 完全没生效该 trajectory → 全漏
+                    mask_miss_full.append(float(n_inst))
+                    mask_dup_full.append(0.0)
+                    continue
+                demands = inst.get("demands", [0.0] * (n_inst + 1))
+                cap = inst.get("capacity", 1.0)
+                stats = route_stats(routes, n_inst, demands, cap)
+                mask_miss_full.append(float(stats["n_missing"]))
+                mask_dup_full.append(float(stats["n_duplicates"]))
+
+            miss_arr = np.array(mask_miss_full)
+            dup_arr = np.array(mask_dup_full)
+            parse_arr = np.array([c["parse"] for c in components])
+
+            # 本 rank 算
+            cov1_local      = float((coverage_arr >= 1.0 - 1e-9).mean())
+            zero_miss_local = float((miss_arr == 0).mean())
+            zero_dup_local  = float((dup_arr == 0).mean())
+            parse_local     = float(parse_arr.mean())
+            # perfect: cov=1 AND parse=1 (cov=1 数学上隐含 no_miss AND no_dup)
+            perfect_local   = float(
+                ((coverage_arr >= 1.0 - 1e-9) & (parse_arr == 1.0)).mean()
+            )
+            avg_miss_local  = float(miss_arr.mean())
+            avg_dup_local   = float(dup_arr.mean())
+
+            # ── 独立维度: vLLM 端 mask 真实触发率 ────────────────────
+            # 关键: 这是跟 cov_eq_1 完全独立的诊断维度.
+            # - cov_eq_1 看的是"模型最终输出是否完美"（受 max_length/multi-token/etc 影响）
+            # - mask_hit_rate 看的是"vLLM server 端 mask processor 是否真的在 step 拦截"
+            # 两者组合诊断:
+            #   hit > 0 + cov=1 → ✓ Mask 完美生效
+            #   hit > 0 + cov<1 → ⚠️ Mask 在跑但有 fallthrough
+            #   hit = 0          → ❌ vLLM server 端 mask 完全没启动 (不管 cov)
+            if mask_hits is not None and completion_mask is not None:
+                cm_bool = completion_mask.bool()
+                # 1. token-level: mask 触发的 token 占有效 completion token 的比例
+                if cm_bool.any():
+                    mh_valid = mask_hits[cm_bool]
+                    mask_hit_rate_local = float(mh_valid.float().mean().item())
+                else:
+                    mask_hit_rate_local = 0.0
+                # 2. trajectory-level: 至少触发过一次 mask 的 trajectory 比例
+                #    mask 启用且正常时几乎每条 trajectory 都该触发 (每个 "→ select" 都被规则 1 拦)
+                per_traj_hit = (mask_hits * completion_mask.float()).sum(dim=-1)  # (B,)
+                traj_with_hit = (per_traj_hit > 0).float()
+                traj_hit_rate_local = float(traj_with_hit.mean().item())
+            else:
+                mask_hit_rate_local = 0.0
+                traj_hit_rate_local = 0.0
+
+            # 跨 rank gather (所有 rank 同步调用 NCCL, log+print 共用 gathered 值)
+            cov1_g           = self._gather_mean(cov1_local)
+            zero_miss_g      = self._gather_mean(zero_miss_local)
+            zero_dup_g       = self._gather_mean(zero_dup_local)
+            parse_g          = self._gather_mean(parse_local)
+            perfect_g        = self._gather_mean(perfect_local)
+            avg_miss_g       = self._gather_mean(avg_miss_local)
+            avg_dup_g        = self._gather_mean(avg_dup_local)
+            mask_hit_rate_g  = self._gather_mean(mask_hit_rate_local)
+            traj_hit_rate_g  = self._gather_mean(traj_hit_rate_local)
+
             log_dict.update({
-                "mask_health/cov_eq_1_rate":     self._gather_mean(
-                    float((coverage_arr >= 1.0 - 1e-9).mean())),  # 期望 ≈ 1.0
-                "mask_health/zero_miss_rate":    self._gather_mean(zero_miss_rate),  # 期望 ≈ 1.0
-                "mask_health/zero_dup_rate":     self._gather_mean(zero_dup_rate),   # 期望 ≈ 1.0
-                "mask_health/no_miss_no_dup":    self._gather_mean(no_miss_no_dup),  # 期望 ≈ 1.0
-                "mask_health/parse_rate":        self._gather_mean(
-                    np.mean([c["parse"] for c in components])),  # 期望 ≈ 1.0
+                # 独立维度 A: vLLM 端 mask 是否真在跑 (跟 cov 输出无关)
+                "mask_health/mask_hit_rate_token": mask_hit_rate_g,  # token 级触发率 > 0 即 mask 在 server 端工作
+                "mask_health/mask_hit_rate_traj":  traj_hit_rate_g,  # trajectory 级触发率, 期望 ≈ 1.0
+                # 独立维度 B: 模型输出是否被 mask 完全约束 (cov_eq_1_rate 跟 fullcov_rate 等价, 不重复 log)
+                # 下面 4 个是 cov=1 的细分 (数学上 cov=1 ⟺ no_miss AND no_dup AND parse=1),
+                # 保留是为了 fallthrough 时区分哪种失败模式: miss 多 = 规则 4/5 漏, dup 多 = 规则 1 漏
+                "mask_health/zero_miss_rate":    zero_miss_g,
+                "mask_health/zero_dup_rate":     zero_dup_g,
+                "mask_health/parse_rate":        parse_g,
+                "mask_health/perfect_rate":      perfect_g,
+                "mask_health/avg_miss_per_traj": avg_miss_g,
+                "mask_health/avg_dup_per_traj":  avg_dup_g,
             })
 
             # 第 1 batch 主进程 print 详细 sanity (一次性, 启动验证用)
+            # 用 gathered 值, 跨 rank 一致 (避免主 rank 局部 B=6 误判)
+            # 判断按"两个独立维度"分类: A) vLLM 端 mask 是否真在跑, B) 输出 cov 是否被完全约束
             if (not getattr(self, "_mask_health_printed", False)
                     and self.accelerator.is_main_process):
                 self._mask_health_printed = True
-                cov1_rate = float((coverage_arr >= 1.0 - 1e-9).mean())
-                print(f"\n[MASK_HEALTH] ===== Mask 生效检查 (第 1 batch) =====")
-                print(f"  cov_eq_1_rate    = {cov1_rate:.3f}   (期望 ≈ 1.0)")
-                print(f"  zero_miss_rate   = {zero_miss_rate:.3f}   (期望 ≈ 1.0)")
-                print(f"  zero_dup_rate    = {zero_dup_rate:.3f}   (期望 ≈ 1.0)")
-                print(f"  no_miss_no_dup   = {no_miss_no_dup:.3f}   (期望 ≈ 1.0)")
-                print(f"  avg miss/traj    = {float(miss_arr.mean()):.3f}   (期望 ≈ 0)")
-                print(f"  avg dup/traj     = {float(dup_arr.mean()):.3f}   (期望 ≈ 0)")
-                if cov1_rate >= 0.95 and zero_miss_rate >= 0.95 and zero_dup_rate >= 0.95:
-                    print(f"  ✓ Mask 生效正常 (三项指标 >= 95%)")
-                elif cov1_rate >= 0.7:
-                    print(f"  ⚠️ Mask 部分生效 (cov_eq_1_rate {cov1_rate:.2f} < 0.95)")
+                print(f"\n[MASK_HEALTH] ===== Mask 生效检查 (第 1 batch, cross-rank) =====")
+                print(f"  [维度 A: vLLM 端 mask 是否真触发]  (跟 cov 输出无关)")
+                print(f"    mask_hit_rate_token        = {mask_hit_rate_g:.4f}   (期望 > 0)")
+                print(f"    mask_hit_rate_traj         = {traj_hit_rate_g:.3f}   (期望 ≈ 1.0)")
+                print(f"  [维度 B: 模型输出是否被完全约束]")
+                print(f"    fullcov_rate (cov=1)         = {cov1_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    zero_miss_rate (全 B 对齐)   = {zero_miss_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    zero_dup_rate                = {zero_dup_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    parse_rate                   = {parse_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    perfect_rate (cov=1 ∧ parse) = {perfect_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    avg miss/traj                = {avg_miss_g:.3f}   (期望 ≈ 0; parse 失败算 n)")
+                print(f"    avg dup/traj                 = {avg_dup_g:.3f}   (期望 ≈ 0)")
+                # 两个独立维度组合诊断
+                dim_a_ok = mask_hit_rate_g > 0.001  # vLLM 端真触发
+                dim_b_ok = cov1_g >= 0.95            # 输出完全约束
+                if dim_a_ok and dim_b_ok:
+                    print(f"  ✓ Mask 完美生效 (维度 A: server 端在跑; 维度 B: 输出完全约束)")
+                elif dim_a_ok and not dim_b_ok:
+                    print(f"  ⚠️ Mask 在 server 跑但有 fallthrough (cov_eq_1={cov1_g:.2f} < 0.95)")
                     print(f"     可能原因: max_completion_length 截断 / multi-token customer prefix 共享")
-                else:
-                    print(f"  ❌ Mask 未生效 (cov_eq_1_rate {cov1_rate:.2f} 远低于 1.0)")
-                    print(f"     检查: vLLM server 启动是否带 --mask_enabled --mask_n N")
-                    print(f"     检查: utils/vllm_serve_logprobs.py 是否成功加载 CVRPMaskProcessor")
+                    print(f"              resample 后 mask_hits 未更新 (已知 issue, 影响 marginal)")
+                    if zero_dup_g < 0.95 and zero_miss_g >= 0.95:
+                        print(f"     主因疑似: 规则 1 (select 强 mask) 没完全防 dup")
+                    elif zero_miss_g < 0.95 and zero_dup_g >= 0.95:
+                        print(f"     主因疑似: 规则 4/5 (visited<n 禁 all/Verification) 没完全防 miss")
+                elif not dim_a_ok:
+                    print(f"  ❌ Mask 未生效: vLLM server 端 mask 完全没触发 (mask_hit_rate=0)")
+                    print(f"     检查 1: vLLM server 启动命令是否带 --mask_enabled --mask_n N")
+                    print(f"     检查 2: utils/vllm_serve_logprobs.py 启动 log 应有 '[mask] CVRPMaskProcessor 启用'")
+                    print(f"     检查 3: train.py 是否打了 '✓ vLLM mask processor 已就绪' 的 sanity 行")
                 print(f"  =======================================================\n",
                       flush=True)
 
