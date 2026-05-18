@@ -28,14 +28,15 @@ class Config:
     num_generations: int               = 8
     max_prompt_length: int             = 768
     max_completion_length: int         = 4096
-    learning_rate: float               = 2e-5   # v5 加大: v4 7414 run grad_norm=0.05 远低于 clip 阈值 1.0,
-                                                # 信号推力不足 (20 step 几乎没动). 2e-5 仍在 GRPO+LoRA 推荐区 (5e-6~2e-5),
-                                                # 配 DAPO clip-higher (0.20/0.28) 加大 grad 推力.
+    learning_rate: float               = 1e-5   # v5 用 2e-5 第 1 step grad_norm explode (3.87 clip→1.0,
+                                                # Δθ=2e-5, 比 v4 第 1 step Δθ=2e-8 大 100,000x), 模型 push 过头进 plateau.
+                                                # 降回 1e-5: Δθ 减半, 配合 warmup 0.02 (10 step) 避免第 1 step explode.
     per_device_train_batch_size: int   = 4
     gradient_accumulation_steps: int   = 8
     num_train_epochs: int              = 3
-    warmup_ratio: float                = 0.01   # v5 缩短: 0.05*500=25 step warmup 太慢, 用户要求 5 step.
-                                                # 0.01*500=5 step warmup; LR 5 step 后全开 2e-5.
+    warmup_ratio: float                = 0.02   # v5 grad spike 修复: warmup 从 5 step (0.01) 延长到 10 step (0.02),
+                                                # 让 LR 在 reward outlier 触发 grad spike 时仍小, 避免第 1 step 过冲.
+                                                # 仍比 v4 默认 0.05 (25 step) 短一半, 保留 v5 设计 "早看效果" 意图.
     kl_coef: float                     = 0.01
 
     # ── DAPO Clip-Higher (非对称 ratio clipping，缓解熵坍缩) ─────

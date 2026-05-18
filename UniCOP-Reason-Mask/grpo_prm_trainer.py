@@ -1226,6 +1226,50 @@ class GRPOPRMTrainer(GRPOTrainer):
             "prm_v5/R_step_saturation_rate": self._gather_mean(R_step_saturation_rate),
             "train/use_mask":               1.0 if getattr(config, "use_mask", False) else 0.0,
         }
+
+        # ── mask 生效指标 (mask 启用时报送) ──────────────────────────
+        # 期望 mask 完美工作时全部 → 1.0; < 0.95 说明 mask 没真生效
+        # (vLLM server 没启动 mask / mask 实现 bug / 模型触 max_completion_length 截断)
+        if getattr(config, "use_mask", False) and miss_list:
+            miss_arr = np.array(miss_list)
+            dup_arr = np.array(dup_list)
+            zero_miss_rate = float((miss_arr == 0).mean())
+            zero_dup_rate = float((dup_arr == 0).mean())
+            no_miss_no_dup = float(((miss_arr == 0) & (dup_arr == 0)).mean())
+            log_dict.update({
+                "mask_health/cov_eq_1_rate":     self._gather_mean(
+                    float((coverage_arr >= 1.0 - 1e-9).mean())),  # 期望 ≈ 1.0
+                "mask_health/zero_miss_rate":    self._gather_mean(zero_miss_rate),  # 期望 ≈ 1.0
+                "mask_health/zero_dup_rate":     self._gather_mean(zero_dup_rate),   # 期望 ≈ 1.0
+                "mask_health/no_miss_no_dup":    self._gather_mean(no_miss_no_dup),  # 期望 ≈ 1.0
+                "mask_health/parse_rate":        self._gather_mean(
+                    np.mean([c["parse"] for c in components])),  # 期望 ≈ 1.0
+            })
+
+            # 第 1 batch 主进程 print 详细 sanity (一次性, 启动验证用)
+            if (not getattr(self, "_mask_health_printed", False)
+                    and self.accelerator.is_main_process):
+                self._mask_health_printed = True
+                cov1_rate = float((coverage_arr >= 1.0 - 1e-9).mean())
+                print(f"\n[MASK_HEALTH] ===== Mask 生效检查 (第 1 batch) =====")
+                print(f"  cov_eq_1_rate    = {cov1_rate:.3f}   (期望 ≈ 1.0)")
+                print(f"  zero_miss_rate   = {zero_miss_rate:.3f}   (期望 ≈ 1.0)")
+                print(f"  zero_dup_rate    = {zero_dup_rate:.3f}   (期望 ≈ 1.0)")
+                print(f"  no_miss_no_dup   = {no_miss_no_dup:.3f}   (期望 ≈ 1.0)")
+                print(f"  avg miss/traj    = {float(miss_arr.mean()):.3f}   (期望 ≈ 0)")
+                print(f"  avg dup/traj     = {float(dup_arr.mean()):.3f}   (期望 ≈ 0)")
+                if cov1_rate >= 0.95 and zero_miss_rate >= 0.95 and zero_dup_rate >= 0.95:
+                    print(f"  ✓ Mask 生效正常 (三项指标 >= 95%)")
+                elif cov1_rate >= 0.7:
+                    print(f"  ⚠️ Mask 部分生效 (cov_eq_1_rate {cov1_rate:.2f} < 0.95)")
+                    print(f"     可能原因: max_completion_length 截断 / multi-token customer prefix 共享")
+                else:
+                    print(f"  ❌ Mask 未生效 (cov_eq_1_rate {cov1_rate:.2f} 远低于 1.0)")
+                    print(f"     检查: vLLM server 启动是否带 --mask_enabled --mask_n N")
+                    print(f"     检查: utils/vllm_serve_logprobs.py 是否成功加载 CVRPMaskProcessor")
+                print(f"  =======================================================\n",
+                      flush=True)
+
         self.log(log_dict)
         return advantages
 
