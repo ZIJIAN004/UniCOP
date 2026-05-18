@@ -190,6 +190,25 @@ class CVRPMaskProcessor:
                 f"multi_token_cust={self.multi_token_customers}",
                 file=sys.stderr, flush=True,
             )
+        # 关键诊断: 第一次 decode call (olen>=1) 时 print, 验证 vLLM 是否在 decode 时也 call
+        # 如果 vLLM 只在 prefill (olen=0) 时 call, 这行永远不出现 → mask 只影响第 1 token,
+        # 后续 token vanilla → 解释 dup=66
+        if len(output_token_ids) >= 1 and not getattr(self, "_decode_call_logged", False):
+            self._decode_call_logged = True
+            print(
+                f"!!! [CVRPMask] FIRST DECODE __call__ (olen>=1) INVOKED: "
+                f"olen={len(output_token_ids)}, last_tok={output_token_ids[-1] if output_token_ids else None}, "
+                f"instance_id={id(self)}",
+                file=sys.stderr, flush=True,
+            )
+        # 周期性 call counter (每 1000 call print 一次, 验证 instance 是否真持续被 call)
+        self._call_count = getattr(self, "_call_count", 0) + 1
+        if self._call_count in (10, 100, 1000, 5000):
+            print(
+                f"!!! [CVRPMask] call_count={self._call_count}, "
+                f"current olen={len(output_token_ids)}, instance_id={id(self)}",
+                file=sys.stderr, flush=True,
+            )
 
         # Decode 整个 output 文本 (stateless 设计, 每次重建 state)
         # 注意: prompt_ids 不需要 decode (state machine 只看 output_text)
