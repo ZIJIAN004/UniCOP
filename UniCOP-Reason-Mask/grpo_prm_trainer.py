@@ -1115,11 +1115,20 @@ class GRPOPRMTrainer(GRPOTrainer):
         R_step_total = 0
         seg_token_count = 0
 
+        # PRM 只对 fully_feasible trajectory 算 (v5 用户决定 2026-05-18):
+        # 减少 PRM 偏置 (0.37 → 0.115) + 增强 fully_feas 推力 (差距 ×3.5)
+        prm_only_fully_feas = getattr(config, "prm_only_fully_feas_v5", True)
+        prm_skipped_non_feas = 0  # 诊断: 多少 trajectory 因为不是 fully_feas 被跳过
+
         if not config.disable_prm and self.pomo_prm is not None:
             offset_maps = self._build_offset_maps(completions_text, B)
             for i in range(B):
                 pt = problem_type_list[i]
                 if pt not in self.pomo_prm.SUPPORTED:
+                    continue
+                # ── 新: 只对 fully_feas trajectory 算 PRM ──
+                if prm_only_fully_feas and not a_out_pkg["is_feasible"][i]:
+                    prm_skipped_non_feas += 1
                     continue
                 prm_res = self.pomo_prm.compute_think_step_rewards_v4(
                     completions_text[i], instances[i], pt,
@@ -1231,6 +1240,9 @@ class GRPOPRMTrainer(GRPOTrainer):
             "prm_v5/R_step_raw_abs_mean":   self._gather_mean(R_step_raw_abs_mean),
             "prm_v5/R_step_raw_abs_max":    self._gather_mean(R_step_raw_abs_max),
             "prm_v5/R_step_saturation_rate": self._gather_mean(R_step_saturation_rate),
+            # 新: PRM 跳过 (非 fully_feas) trajectory 比例 (验证 prm_only_fully_feas 行为)
+            "prm_v5/skipped_non_feas_rate": self._gather_mean(
+                float(prm_skipped_non_feas) / max(B, 1)),
             "train/use_mask":               1.0 if getattr(config, "use_mask", False) else 0.0,
         }
 

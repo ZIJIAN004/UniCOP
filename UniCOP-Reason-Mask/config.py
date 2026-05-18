@@ -166,6 +166,15 @@ class Config:
     # 0.0 (当前) = 纯加法, cov 任何值都给 cons (cov 任何 trajectory 都拿 cons 信号);
     # 1.0 (废) = hardgate, 只有 cov=1 才给 cons (跷跷板模式, 已验证失败).
     cov_gate_v5: float             = 0.0
+    # PRM 只对 fully_feasible trajectory 算 (用户决定 2026-05-18):
+    # 原 v5 PRM 给所有 trajectory 算 (含 partially feasible), 但 PRM a_proc ∈ (0.5, 2.5)
+    # 永远正 → 所有 trajectory advantage 偏正 +0.37 → 破坏 GRPO 零均值假设, 削弱 contrastive.
+    # True (当前): PRM 只对 fully_feas (parse+cov=1+cons=1+format=1) 算
+    #   - 整体 PRM 偏置 +0.37 → +0.115 (减 70%, GRPO baseline 更稳)
+    #   - fully_feas vs partially PRM 差距 +0.13 → +0.46 (强 3.5x, push fully_feas)
+    #   - 跟 outcome (只在 fully_feas subset z-score) 设计对称
+    # False: 退回原 v5 行为 (所有 trajectory 都算 PRM)
+    prm_only_fully_feas_v5: bool   = True
 
     # ── CVRP constrained-decoding mask (跟 reward_scheme 正交) ────────
     # use_mask=True 时:
