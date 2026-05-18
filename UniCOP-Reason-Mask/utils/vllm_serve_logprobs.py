@@ -242,10 +242,10 @@ def _replace_generate_route(app):
 
 
 def _post_process_mask_hits(prompts, all_outputs, mask_processor):
-    """事后重建每个 token 位置是否触发 mask.
+    """事后重建每个 token 位置是否触发 mask (含 prefix tree partial_select).
 
     对每个完成的 sequence, 模拟从 0 开始 token-by-token decode,
-    在每个位置跑 state machine + compute_mask, 标记 mask_hit.
+    在每个位置跑 state machine + compute_mask + partial_select, 标记 mask_hit.
 
     O(L) per sequence (增量推进).
     """
@@ -268,7 +268,15 @@ def _post_process_mask_hits(prompts, all_outputs, mask_processor):
                 )
                 state = build_state(past_text, n=cfg.n)
                 decision = compute_mask(state, cfg)
-                mask_hits.append(bool(decision.mask_hit))
+                # prefix tree partial_select 触发也算 mask_hit
+                hit = bool(decision.mask_hit)
+                if not hit and state.section == "SECTION_2" and cfg.apply_select:
+                    partial = mask_processor._compute_partial_select(
+                        past_text, past_ids, state.visited,
+                    )
+                    if partial is not None:
+                        hit = True
+                mask_hits.append(hit)
             mask_hits_all.append(mask_hits)
 
     return mask_hits_all

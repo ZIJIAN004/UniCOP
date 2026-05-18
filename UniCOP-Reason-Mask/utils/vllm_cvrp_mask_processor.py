@@ -9,8 +9,13 @@ logits 操作 (logits[token_id] = -inf).
      (vLLM 0.7.3 worker process + output_ids 是新 tuple, 不能 cache state)
   2. Per-call 局部缓存优化: 用 (id(output_ids), len(output_ids)) 作 key
      避免完全冗余重建. tuple 每次新建虽然 id 不稳, 但单次 __call__ 内 id 稳定.
-  3. tokenizer 单 token 假设 + multi-token 检测告警
-     (Qwen2.5 一般 0..99 数字单 token, 但用 sanity_check 严格验证)
+  3. Prefix tree mask 处理 multi-token customer (Qwen tokenizer 把 10-20
+     拆成 [" 1", "0"-"9"], 跟 customer 1 的 first token 共享):
+     - 规则 1 第 1 token mask: 按 unvisited 的 first tokens 允许
+     - Prefix tree 第 2-N token mask: 检查 output_ids 末尾是否是某 customer
+       的不完整 prefix; 是的话只允许"延续到 unvisited customer"的 token
+     - 这样可以严格 ban 模型在 visited customer 上 "逃逸" (例如 visited={11},
+       模型写 " 1" 后第 2 token "1" 被 ban → 强制选 0 或 2-9 或结束符)
   4. enabled 总开关: 默认 False, 跟现有 hardgate run 共存不冲突
 
 集成方式 (Phase 3 做):
@@ -24,6 +29,7 @@ logits 操作 (logits[token_id] = -inf).
 """
 from __future__ import annotations
 
+import re
 import sys
 from typing import Optional
 
@@ -35,6 +41,11 @@ from utils.cvrp_mask_state import (
     build_state,
     compute_mask,
 )
+
+
+# 末尾匹配 "→ select 数字+" (没有空格结尾) → 正在 multi-token select 中
+# 跟 SELECT_TRIGGER_RE (末尾 "→ select " 空格结尾, 触发规则 1) 互补
+_PARTIAL_SELECT_TAIL_RE = re.compile(r"→\s*[Ss]elect\s+\d+$")
 
 
 class CVRPMaskProcessor:
@@ -77,25 +88,41 @@ class CVRPMaskProcessor:
         return ids[0]
 
     def _build_token_maps(self):
-        """预计算 5 条规则需要的 token id."""
-        # Customer 1..n 的 first token (带空格前缀, 跟 CVRP chain 里的 "→ select N" 一致)
-        # 如果 N 是 multi-token (如 " 13" = " 1" + "3"), 只 mask " 1"
-        # 这会有 prefix tree 共享问题 (mask 1 也 ban 10-19), 但只在 multi-token 时
-        self.cust_first_token: dict[int, Optional[int]] = {}
+        """预计算 5 条规则 + prefix tree 需要的 token id."""
+        # Customer 1..n 的完整 token 序列 (带空格前缀, 跟 CVRP chain 里 " select N" 一致)
+        # multi-token (如 " 13" = [" 1", "3"]) 由 prefix tree 处理 (_compute_partial_select)
+        self.cust_tokens: dict[int, list[int]] = {}
+        self.cust_first_token: dict[int, Optional[int]] = {}  # 保留兼容性 (规则 1 用)
         self.multi_token_customers: list[int] = []
+        # first_token → customer 列表 (反向索引, 调试用)
+        self.first_to_customers: dict[int, list[int]] = {}
+        # 最长 customer token 数 (prefix tree lookback 上限)
+        self.max_cust_tok_len: int = 1
         for c in range(1, self.n + 1):
             ids = self.tokenizer(f" {c}", add_special_tokens=False).input_ids
-            if len(ids) == 1:
-                self.cust_first_token[c] = ids[0]
-            else:
-                # multi-token: first token 跟其他客户可能共享 (如 " 13" 和 " 1" 都以 " 1" 开头)
-                self.cust_first_token[c] = ids[0]
+            if not ids:
+                self.cust_first_token[c] = None
+                continue
+            self.cust_tokens[c] = list(ids)
+            self.cust_first_token[c] = ids[0]
+            self.first_to_customers.setdefault(ids[0], []).append(c)
+            if len(ids) > 1:
                 self.multi_token_customers.append(c)
+            self.max_cust_tok_len = max(self.max_cust_tok_len, len(ids))
+
+        # select 后的合法结束符 token (空格/换行/管道符等), 用于 partial_select
+        # "→ select 1" 写完 1 后, 下个 token 可能是 "\n", "[", " ", " |", " |\n" 等
+        _end_strs = [" ", "\n", "[", " |", "|", "\t", " \n", ".", ",", ";"]
+        self.select_end_tokens: list[int] = []
+        for s in _end_strs:
+            ids = self.tokenizer(s, add_special_tokens=False).input_ids
+            self.select_end_tokens.extend(ids)
+        self.select_end_tokens = list(set(self.select_end_tokens))
+
         if self.multi_token_customers:
             print(
-                f"⚠️ [CVRPMask] customers {self.multi_token_customers} are multi-token; "
-                f"mask 可能在这些 customer 上不精确 (prefix 共享). "
-                f"考虑实施 prefix tree 或重新 SFT.",
+                f"[CVRPMask] customers {self.multi_token_customers} are multi-token; "
+                f"prefix tree mask 启用 (第 2-N token 按 unvisited 限制延续)",
                 file=sys.stderr, flush=True,
             )
 
@@ -166,14 +193,107 @@ class CVRPMaskProcessor:
         state = build_state(past_text, n=self.n)
         decision = compute_mask(state, self.cfg)
 
-        if self.debug_log and decision.mask_hit:
+        # ── Prefix tree: 检查是否在 multi-token customer select 中间 ──
+        # 优先于 select_strict (select_strict 是第 1 token, partial_select 是第 2-N token,
+        # 两者在不同 call 触发, 但 partial_select 时 select_strict 不会 fire 因为末尾不是 "→ select ")
+        partial_info = None
+        if state.section == "SECTION_2" and self.cfg.apply_select:
+            partial_info = self._compute_partial_select(
+                past_text, output_token_ids, state.visited,
+            )
+
+        if self.debug_log and (decision.mask_hit or partial_info is not None):
+            extra = f" partial_select={partial_info[0]}" if partial_info else ""
             print(
                 f"[CVRPMask] olen={len(output_token_ids)}, section={state.section}, "
-                f"visited={len(state.visited)}, decision={self._summarize_decision(decision)}",
+                f"visited={len(state.visited)}, decision={self._summarize_decision(decision)}{extra}",
                 file=sys.stderr, flush=True,
             )
 
+        if partial_info is not None:
+            return self._apply_partial_select(partial_info, logits)
         return self._apply_decision(decision, logits)
+
+    # ── Prefix tree: 多 token customer select 中间状态处理 ─────────
+
+    def _compute_partial_select(
+        self, past_text: str, output_token_ids, visited: set,
+    ):
+        """检查 output_ids 末尾是否是某 multi-token customer 的不完整 prefix.
+
+        Returns:
+            None — 不在 partial_select 状态 (规则 1 / 其他 mask 走原逻辑)
+            (n_written, candidates, unvisited) — 在 partial_select 中:
+                n_written: 已写 select 进去的 token 数
+                candidates: 末尾 token 序列匹配 prefix 的 customer 列表
+                unvisited: 当前 unvisited 集合
+        """
+        # 文本快速过滤: 末尾必须匹配 "→ select 数字+"
+        if not _PARTIAL_SELECT_TAIL_RE.search(past_text):
+            return None
+
+        output_list = list(output_token_ids)
+        if not output_list:
+            return None
+
+        # 从最长 customer token 长度反向, 找最长 n 使 output_list[-n:] 是某 customer 的前 n 个 token
+        # 注: 末尾匹配 "→ select 数字+" 已经保证 output_list 末尾是数字 token,
+        #     一般 n_written = 1 (cust 10-19 的 " 1") 或 2 (后续 multi-token customer)
+        max_n = min(self.max_cust_tok_len, len(output_list))
+        for n_written in range(max_n, 0, -1):
+            suffix = tuple(output_list[-n_written:])
+            matching_customers = []
+            for c, toks in self.cust_tokens.items():
+                if len(toks) >= n_written and tuple(toks[:n_written]) == suffix:
+                    matching_customers.append(c)
+            if matching_customers:
+                # 找到匹配 prefix; 但只有当存在"未完成 multi-token"候选时才需 mask
+                # (即至少 1 个 candidate len(toks) > n_written, 待延续)
+                has_incomplete = any(
+                    len(self.cust_tokens[c]) > n_written for c in matching_customers
+                )
+                if has_incomplete:
+                    unvisited = set(range(1, self.n + 1)) - visited
+                    return (n_written, matching_customers, unvisited)
+                # 全是 len == n_written (完整 customer), 不需 partial mask
+                return None
+        return None
+
+    def _apply_partial_select(
+        self, partial_info, logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """根据 partial_select 状态, mask 第 2-N token 只允许延续到 unvisited."""
+        n_written, candidates, unvisited = partial_info
+        allowed_token_ids: set[int] = set()
+        has_complete_unvisited_customer = False
+
+        for c in candidates:
+            toks = self.cust_tokens[c]
+            if c in unvisited:
+                if len(toks) == n_written:
+                    # 已写完整 unvisited customer → 允许 select 结束符
+                    has_complete_unvisited_customer = True
+                elif len(toks) > n_written:
+                    # 允许延续到这个 unvisited customer
+                    allowed_token_ids.add(toks[n_written])
+            # c in visited 时: 不允许它的延续 token
+            # 这就是 prefix tree 修复 multi-token 失控的核心
+
+        if has_complete_unvisited_customer:
+            # 允许 select 结束符 (空格/换行/管道符等)
+            allowed_token_ids.update(self.select_end_tokens)
+
+        if not allowed_token_ids:
+            # 所有候选都 visited → 无延续可走且当前 prefix 不是完整 customer
+            # 例如 visited={1, 10-19}, partial=" 1" → 既不能结束 (1 visited)
+            # 也不能延续 (10-19 都 visited). 此时 fallback 不 mask, 由 reward 罚.
+            # 理论上 select_strict 不该 allow 这个 first_tok, 这里是冗余保护.
+            return logits
+
+        new_logits = torch.full_like(logits, float("-inf"))
+        for tok in allowed_token_ids:
+            new_logits[tok] = logits[tok]
+        return new_logits
 
     def _summarize_decision(self, dec: MaskDecision) -> str:
         flags = []

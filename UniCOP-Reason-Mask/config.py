@@ -152,17 +152,20 @@ class Config:
 
     # ── v5 专用参数 (v3/v4 时被忽略) ──────────────────────────────────
     # PRM 部分跟 v4 共用 prm_base_v4 / proc_alpha_v4 (PRM 设计相同, 共参数避免重复).
-    # A_feas 权重 cov+cons 主导 (parse/format 几乎恒 1, z-score 后差异化贡献小).
-    # 权重总和 5.5, cov+cons 占 82%. cov 主导 (w_cov=2.5 > w_cons=2.0) 因为 cov<1
-    # 时 cons_signal 被 hardgate 关掉, cov 是冷启动期唯一可推信号.
+    # A_feas 权重 cov 强主导, cons 减权 (用户决定 2026-05-18):
+    #   - v5 初版 hardgate (cov_gate=1.0) + 2.5/2.0 失败: 模型在 cov=1 outlier
+    #     主导下没学到细粒度 cov, fullcov 反向漂移.
+    #   - 改加法 (cov_gate=0) + cov 强主导: cov 信号始终有效, 权重 3.5:1 让
+    #     cov 改善对 A_feas 贡献是 cons 的 3.5x, 避免模型"一昧提升 cons 不改 cov".
+    # 权重总和 5.5 (不变), cov:cons = 78%:22% (vs 之前 56%:44%).
     w_p_v5: float                  = 0.5
-    w_cov_v5: float                = 2.5
-    w_cons_v5: float               = 2.0
+    w_cov_v5: float                = 3.5
+    w_cons_v5: float               = 1.0
     w_f_v5: float                  = 0.5
-    # hardgate: cov >= cov_gate_v5 时 cons_signal = cons else 0.
-    # 1.0 严格要求 unique=n AND total=n (n_unique/max(n,n_total)=1.0).
-    # cons 强迫先冲全覆盖+不重复, 再优化 cap 约束.
-    cov_gate_v5: float             = 1.0
+    # cov_gate_v5: cov >= cov_gate_v5 时 cons_signal = cons else 0.
+    # 0.0 (当前) = 纯加法, cov 任何值都给 cons (cov 任何 trajectory 都拿 cons 信号);
+    # 1.0 (废) = hardgate, 只有 cov=1 才给 cons (跷跷板模式, 已验证失败).
+    cov_gate_v5: float             = 0.0
 
     # ── CVRP constrained-decoding mask (跟 reward_scheme 正交) ────────
     # use_mask=True 时:
