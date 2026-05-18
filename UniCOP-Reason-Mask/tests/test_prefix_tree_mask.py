@@ -27,9 +27,18 @@ except ImportError:
         def __init__(self, vals):
             self._vals = [float(v) for v in vals]
         def __getitem__(self, idx):
+            if isinstance(idx, slice):
+                return _T(self._vals[idx])
             return _Scalar(self._vals[idx])
         def __setitem__(self, idx, val):
-            self._vals[idx] = float(val.v if isinstance(val, _Scalar) else val)
+            if isinstance(idx, slice):
+                # slice 赋值 (logits[:] = float)
+                n = len(self._vals)
+                v = float(val.v if isinstance(val, _Scalar) else val)
+                for i in range(*idx.indices(n)):
+                    self._vals[i] = v
+            else:
+                self._vals[idx] = float(val.v if isinstance(val, _Scalar) else val)
         def __len__(self):
             return len(self._vals)
 
