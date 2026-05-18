@@ -172,7 +172,11 @@ def _replace_generate_route(app):
                 backend="outlines", regex=request.guided_decoding_regex
             )
 
-        sampling_params = SamplingParams(
+        # SamplingParams init: 优先 init kwargs 传 logits_processors (probe 验证
+        # fallback path 可用), 再 fallback 实例赋值.
+        # v5+mask 7414 实测 mask_hit_rate=0 暗示之前的"实例赋值"方式不生效,
+        # 改成 init kwargs 双保险.
+        init_kwargs = dict(
             n=request.n,
             repetition_penalty=request.repetition_penalty,
             temperature=request.temperature,
@@ -183,11 +187,32 @@ def _replace_generate_route(app):
             guided_decoding=guided_decoding,
             logprobs=1 if request.return_logprobs else None,
         )
-
-        # 实例字段赋值注入 mask processor (msgspec.Struct __init__ 不能 patch,
-        # 调研结论 + probe 验证)
         if _MASK_PROCESSOR_GLOBAL is not None:
-            sampling_params.logits_processors = [_MASK_PROCESSOR_GLOBAL]
+            init_kwargs["logits_processors"] = [_MASK_PROCESSOR_GLOBAL]
+        try:
+            sampling_params = SamplingParams(**init_kwargs)
+        except TypeError:
+            # 旧 vLLM 可能不接受 logits_processors 作 init kwarg
+            init_kwargs.pop("logits_processors", None)
+            sampling_params = SamplingParams(**init_kwargs)
+            if _MASK_PROCESSOR_GLOBAL is not None:
+                sampling_params.logits_processors = [_MASK_PROCESSOR_GLOBAL]
+
+        # 第一次 generate 时强制 verify mask 是否 attach 成功 (诊断)
+        if (_MASK_PROCESSOR_GLOBAL is not None
+                and not getattr(generate, "_mask_attach_verified", False)):
+            generate._mask_attach_verified = True
+            lp_attached = getattr(sampling_params, "logits_processors", None)
+            n_processors = len(lp_attached) if lp_attached else 0
+            same_instance = (lp_attached and lp_attached[0] is _MASK_PROCESSOR_GLOBAL)
+            print(
+                f"!!! [mask attach verify] sampling_params.logits_processors "
+                f"length={n_processors}, "
+                f"same_instance={bool(same_instance)}, "
+                f"expected_id={id(_MASK_PROCESSOR_GLOBAL)}, "
+                f"actual_id={id(lp_attached[0]) if lp_attached else 'None'}",
+                flush=True,
+            )
 
         all_outputs = llm_instance.generate(
             request.prompts, sampling_params=sampling_params

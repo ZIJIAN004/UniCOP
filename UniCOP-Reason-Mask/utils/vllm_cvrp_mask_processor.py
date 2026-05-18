@@ -179,6 +179,18 @@ class CVRPMaskProcessor:
         if not self.cfg.enabled:
             return logits
 
+        # 第一次 __call__ 强制 print 确认 vLLM 真 invoke processor (诊断 attach 是否成功)
+        if not getattr(self, "_first_call_logged", False):
+            self._first_call_logged = True
+            print(
+                f"!!! [CVRPMask] FIRST __call__ INVOKED: "
+                f"olen={len(output_token_ids)}, otype={type(output_token_ids).__name__}, "
+                f"plen={len(prompt_token_ids)}, "
+                f"logits.shape={tuple(logits.shape) if hasattr(logits, 'shape') else 'N/A'}, "
+                f"multi_token_cust={self.multi_token_customers}",
+                file=sys.stderr, flush=True,
+            )
+
         # Decode 整个 output 文本 (stateless 设计, 每次重建 state)
         # 注意: prompt_ids 不需要 decode (state machine 只看 output_text)
         # 如果将来要 state 跨 prompt+output, 也要 decode prompt
