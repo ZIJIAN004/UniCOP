@@ -150,32 +150,64 @@ def main():
     analyze("WITH    mask", outputs_mask)
     analyze("WITHOUT mask", outputs_nomask)
 
-    # ── 6. dump prompt 0 完整 completion 看实际生成 ─────────────────
-    print("\n" + "=" * 80)
-    print("  Prompt 0 — completion 内容对比")
-    print("=" * 80)
-    text_mask = outputs_mask[0].outputs[0].text
-    text_nomask = outputs_nomask[0].outputs[0].text
+    # ── 6. 保存所有 completion 完整内容到文件 ──────────────────────
+    import json
+    out_path = "probe_mask_completions.json"
+    dump_data = {
+        "model": MODEL,
+        "n_prompts": N_PROMPTS,
+        "max_tokens": MAX_TOKENS,
+        "with_mask": [
+            {
+                "prompt_idx": i,
+                "len_tokens": len(o.outputs[0].token_ids),
+                "finish_reason": o.outputs[0].finish_reason,
+                "completion_text": o.outputs[0].text,
+            }
+            for i, o in enumerate(outputs_mask)
+        ],
+        "without_mask": [
+            {
+                "prompt_idx": i,
+                "len_tokens": len(o.outputs[0].token_ids),
+                "finish_reason": o.outputs[0].finish_reason,
+                "completion_text": o.outputs[0].text,
+            }
+            for i, o in enumerate(outputs_nomask)
+        ],
+    }
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(dump_data, f, ensure_ascii=False, indent=2)
 
-    print(f"\n[WITH mask, len={len(outputs_mask[0].outputs[0].token_ids)}, "
-          f"finish_reason={outputs_mask[0].outputs[0].finish_reason}]")
-    print(f"--- 前 600 char ---")
-    print(text_mask[:600])
-    print(f"--- 中段 600 char (1000-1600) ---")
-    print(text_mask[1000:1600])
-    print(f"--- 末 600 char ---")
-    print(text_mask[-600:])
+    # 也保存成纯文本方便 grep / 直接看
+    txt_path = "probe_mask_completions.txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(f"Model: {MODEL}\n")
+        f.write(f"N prompts: {N_PROMPTS}, max_tokens: {MAX_TOKENS}\n")
+        f.write("\n" + "=" * 80 + "\n")
+        f.write("WITH MASK — 全部 5 个 completion\n")
+        f.write("=" * 80 + "\n")
+        for i, o in enumerate(outputs_mask):
+            f.write(f"\n----- Prompt {i} | len={len(o.outputs[0].token_ids)} "
+                    f"| finish={o.outputs[0].finish_reason} -----\n")
+            f.write(o.outputs[0].text)
+            f.write("\n----- END Prompt {} -----\n".format(i))
+        f.write("\n\n" + "=" * 80 + "\n")
+        f.write("WITHOUT MASK (baseline) — 全部 5 个 completion\n")
+        f.write("=" * 80 + "\n")
+        for i, o in enumerate(outputs_nomask):
+            f.write(f"\n----- Prompt {i} | len={len(o.outputs[0].token_ids)} "
+                    f"| finish={o.outputs[0].finish_reason} -----\n")
+            f.write(o.outputs[0].text)
+            f.write("\n----- END Prompt {} -----\n".format(i))
 
-    print(f"\n[WITHOUT mask, len={len(outputs_nomask[0].outputs[0].token_ids)}, "
-          f"finish_reason={outputs_nomask[0].outputs[0].finish_reason}]")
-    print(f"--- 前 600 char ---")
-    print(text_nomask[:600])
-    print(f"--- 末 600 char ---")
-    print(text_nomask[-600:])
+    print(f"\n[6/7] 完整 completion 已保存:")
+    print(f"  - JSON 格式 (含 metadata): {out_path}")
+    print(f"  - 纯文本格式 (方便 grep): {txt_path}")
 
     # ── 7. 自动诊断 ──────────────────────────────────────────────────
     print("\n" + "=" * 80)
-    print("  AUTO-DIAGNOSIS")
+    print("  [7/7] AUTO-DIAGNOSIS")
     print("=" * 80)
 
     mask_eos = sum(1 for o in outputs_mask if o.outputs[0].finish_reason == "stop")
