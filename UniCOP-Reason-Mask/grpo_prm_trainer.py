@@ -1824,6 +1824,7 @@ class GRPOPRMTrainer(GRPOTrainer):
 
         # KL 正则
         beta_kl = getattr(self, 'beta', 0.0)
+        kl_term_for_diag = None     # (B,T) raw kl, 供下面 diag 用 (即使 beta=0 也算便于观察 drift)
         if beta_kl != 0.0:
             ref_logps = inputs.get("ref_per_token_logps")
             if ref_logps is None:
@@ -1832,6 +1833,7 @@ class GRPOPRMTrainer(GRPOTrainer):
                 kl = torch.exp(ref_logps - per_token_logps) \
                      - (ref_logps - per_token_logps) - 1
                 per_token_loss = per_token_loss + beta_kl * kl
+                kl_term_for_diag = kl
             elif not getattr(self, '_kl_warning_emitted', False):
                 print(
                     f"⚠️ WARNING: kl_coef={beta_kl} > 0 但 inputs 里找不到 "
@@ -1851,6 +1853,42 @@ class GRPOPRMTrainer(GRPOTrainer):
         if is_correction_log is not None:
             for k, v in is_correction_log.items():
                 loss_log[k] = self._gather_mean(v)
+
+        # ── 诊断字段 (永久基础设施, 任何调参都能看到 KL / drift / clip / adv 量级) ──
+        with torch.no_grad():
+            valid_mask = completion_mask.bool()
+            n_valid = completion_mask.sum().clamp(min=1.0)
+
+            # 1. KL 诊断 (核心: KL 占 loss 比, > 30% 即 dominate)
+            if kl_term_for_diag is not None:
+                kl_mean = (kl_term_for_diag * completion_mask).sum() / n_valid
+                if valid_mask.any():
+                    kl_max = kl_term_for_diag[valid_mask].max()
+                else:
+                    kl_max = torch.tensor(0.0, device=loss.device)
+                kl_loss_contrib = (beta_kl * kl_term_for_diag * completion_mask).sum() / n_valid
+                kl_share = (kl_loss_contrib.abs() / (loss.abs() + 1e-8))
+                loss_log["diag/kl_mean"]       = self._gather_mean(kl_mean)
+                loss_log["diag/kl_max"]        = self._gather_mean(kl_max)
+                loss_log["diag/kl_loss_share"] = self._gather_mean(kl_share)
+
+            # 2. Policy drift (模型实际偏离 old policy 多远, 11 step 后 ≈ 0 = policy 没动)
+            if valid_mask.any():
+                ratio_valid = ratio[valid_mask]
+                loss_log["diag/ratio_drift_mean"] = self._gather_mean((ratio_valid - 1.0).abs().mean())
+
+            # 3. Advantage 量级 (信号强度 + 非零率)
+            adv_flat = adv.expand_as(per_token_loss) if adv.dim() == 2 else adv
+            adv_abs = adv_flat.abs() if torch.is_tensor(adv_flat) else torch.tensor(0.0, device=loss.device)
+            loss_log["diag/adv_abs_mean"]     = self._gather_mean(adv_abs.mean())
+            loss_log["diag/adv_nonzero_rate"] = self._gather_mean((adv_abs > 0.01).float().mean())
+
+            # 4. Clip 触发率 (Clip-Higher 是否真的让 ε_high 区间被用)
+            clip_low_hit  = ((ratio < (1 - eps_low))  & valid_mask).float().sum() / n_valid
+            clip_high_hit = ((ratio > (1 + eps_high)) & valid_mask).float().sum() / n_valid
+            loss_log["diag/clip_low_hit_rate"]  = self._gather_mean(clip_low_hit)
+            loss_log["diag/clip_high_hit_rate"] = self._gather_mean(clip_high_hit)
+
         self.log(loss_log)
 
         return loss

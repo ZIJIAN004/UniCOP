@@ -37,7 +37,10 @@ class Config:
     warmup_ratio: float                = 0.02   # v5 grad spike 修复: warmup 从 5 step (0.01) 延长到 10 step (0.02),
                                                 # 让 LR 在 reward outlier 触发 grad spike 时仍小, 避免第 1 step 过冲.
                                                 # 仍比 v4 默认 0.05 (25 step) 短一半, 保留 v5 设计 "早看效果" 意图.
-    kl_coef: float                     = 0.01
+    kl_coef: float                     = 0.0    # DAPO 标准 (2025): KL anchor 移除, 用 Clip-Higher 控 entropy.
+                                                # 之前 0.01 比 DeepSeek-R1 (0.001) 高 10x, 比 DAPO/trl 默认 (0.0) 大 ∞.
+                                                # long-CoT RL (3000+ token) + Clip-Higher 0.20/0.28 已生效, KL 反而 hamper exploration.
+                                                # 兜底: 若 step 30+ 看到 entropy collapse / policy degenerate, 升到 0.001 (DeepSeek-R1 安全值).
 
     # ── DAPO Clip-Higher (非对称 ratio clipping，缓解熵坍缩) ─────
     # ε_high > ε_low：加概率快、扣概率慢，让低概率"探索 token"指数累积逃出
@@ -202,7 +205,10 @@ class Config:
 
     # ── 输出 ─────────────────────────────────────────────────────────
     output_dir: str    = "./output"
-    logging_steps: int = 10
+    logging_steps: int = 1    # transformers Trainer 父类每 N step log 一次 {'loss','grad_norm','learning_rate'}.
+                              # 调试期间 = 1 让 grad_norm 每 step 可见 (核心调参指标).
+                              # 注意: self.log() 自定义字段 (reward_v5/*, diag/*) 不受此控制, 每 micro-batch 都触发.
+                              # grad_norm 解读: < 0.1 信号弱 (LR/KL 抑制), > 1.0 被 clip, 0.1-0.5 正常.
     # save_steps=50: 配合 train.py 的 resume_from_checkpoint + auto_train.sh
     # 的 vLLM 自动重启. 平衡 IO 开销 vs 崩溃丢失:
     # - ZeRO-3 + LoRA 单次保存 ~1.3 GB (LoRA adapter + AdamW state + sharded grads)
