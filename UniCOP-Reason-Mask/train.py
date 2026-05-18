@@ -207,19 +207,16 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "stage3_max_live_parameters":     1e8,
             "stage3_max_reuse_distance":      1e9,
             "gather_16bit_weights_on_model_save": True,
-            # LoRA optimizer state 极小 (LoRA only ~20M params Adam = 320MB total /
-            # 6 GPU = 53MB/GPU). offload 收益小, 保留兼容性.
             "offload_optimizer": {
                 "device":     "cpu",
                 "pin_memory": True,
             },
-            # offload_param 关闭 (A5000 24GB × 6 充足):
-            # 之前全 offload 时 PCIe param prefetch 占 fwd+bwd ~90% 时间,
-            # 7B bf16 fragmented = 14GB/6 = 2.3GB/GPU 常驻, 加 activation/buffer
-            # peak 仅 5-8GB/GPU, 余量 > 60%. 预计 fwd+bwd 减 50%, 单 step 22min → 11min.
-            # 若 OOM 加回: {"device": "cpu", "pin_memory": True}.
+            # offload_param 恢复 cpu (用户决定 2026-05-18 撤回 offload 关闭):
+            # 之前关 offload_param 收益是 fwd+bwd 减 50%, 但 mask attach 诊断未完成,
+            # 先恢复保守配置, 等 mask 验证 work 之后再决定是否再激进.
             "offload_param": {
-                "device": "none",
+                "device":     "cpu",
+                "pin_memory": True,
             },
         }
 
