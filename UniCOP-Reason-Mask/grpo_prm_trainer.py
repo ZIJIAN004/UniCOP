@@ -1853,9 +1853,16 @@ class GRPOPRMTrainer(GRPOTrainer):
         loss = (per_token_loss * completion_mask).sum() \
                / completion_mask.sum().clamp(min=1.0)
 
-        truncation_rate = (completion_mask.sum(-1) == 0).float().mean()
+        # 真正的 truncation rate: trajectory completion 长度 >= max_completion_length - 1
+        # (减 1 因为 vLLM 不一定写满最后 1 个 token, 接近上限就算截断)
+        # 旧 metric "stats/truncation_rate" 实际是 empty_traj_rate, 重命名修正.
+        comp_lens = completion_mask.sum(-1)
+        empty_traj_rate = (comp_lens == 0).float().mean()
+        max_len = self.args.max_completion_length
+        truncation_rate = (comp_lens >= max_len - 1).float().mean()
         loss_log = {
             "loss/total":                self._gather_mean(loss),
+            "stats/empty_traj_rate":     self._gather_mean(empty_traj_rate),
             "stats/truncation_rate":     self._gather_mean(truncation_rate),
         }
         if is_correction_log is not None:
