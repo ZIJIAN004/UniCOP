@@ -273,6 +273,17 @@ def replace_answer(output: str, correct_solution: str) -> str:
 def call_vllm(client: OpenAI, system: str, user: str,
               model: str, max_tokens: int,
               max_retries: int = 3, retry_delay: float = 5.0) -> dict | None:
+    # 采样参数从环境变量读，由 paths.sh 根据 BASE_MODEL_TYPE 派生:
+    #   r1_distill:     T=1.0, top_p=1.0, top_k=-1 (当前代码原值)
+    #   qwen3_thinking: T=0.6, top_p=0.95, top_k=20 (Qwen3 官方推荐)
+    temperature = float(os.environ.get("GEN_TEMPERATURE", "1.0"))
+    top_p       = float(os.environ.get("GEN_TOP_P", "1.0"))
+    top_k       = int(os.environ.get("GEN_TOP_K", "-1"))
+    # OpenAI Python client 不直接支持 top_k，走 extra_body 传给 vLLM
+    extra_body = {}
+    if top_k > 0:
+        extra_body["top_k"] = top_k
+
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
@@ -281,16 +292,28 @@ def call_vllm(client: OpenAI, system: str, user: str,
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
                 ],
-                temperature=1.0,
+                temperature=temperature,
+                top_p=top_p,
                 max_tokens=max_tokens,
+                extra_body=extra_body or None,
             )
             choice = response.choices[0]
             usage = response.usage
-            raw = choice.message.content or ""
-            # R1-Distill chat template 在 assistant 前缀加了 <think>\n，
-            # vLLM 只返回模型生成部分（不含 <think>），需要补回来
-            if not raw.lstrip().startswith("<think>"):
-                raw = "<think>\n" + raw
+            content = choice.message.content or ""
+            # 当 vLLM 启动带 --reasoning-parser qwen3 / deepseek_r1 时,
+            # thinking 内容会被剥到 reasoning_content 字段, content 只剩最终答案。
+            # 下游期望 output = "<think>...</think>{answer}"  整段, 这里手动拼回。
+            reasoning = getattr(choice.message, "reasoning_content", None) or ""
+
+            if reasoning:
+                raw = f"<think>\n{reasoning}\n</think>\n{content}"
+            else:
+                # 无 reasoning-parser: vLLM 返回的 content 已是模型生成的全部,
+                # 但 chat template 把 <think>\n 写进了 prompt, content 不含开头 <think>,
+                # 需要补回来才能与下游 <think>...</think> 格式对齐。
+                raw = content
+                if not raw.lstrip().startswith("<think>"):
+                    raw = "<think>\n" + raw
             return {
                 "output":        raw,
                 "output_tokens": usage.completion_tokens if usage else None,

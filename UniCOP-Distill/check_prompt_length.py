@@ -66,7 +66,7 @@ def fake_solution(n):
     return "\n".join(lines)
 
 
-def build_full_text(n):
+def build_full_text(n, tokenizer=None):
     user = fake_cvrp_instance(n)
     solution = fake_solution(n)
     system = SYSTEM_PROMPT + _POSTHOC_SUFFIX
@@ -77,16 +77,36 @@ def build_full_text(n):
         + "\n\nStart your response with <think> immediately. "
           "Solve this problem step by step, then output the target solution after </think>."
     )
-    template = "<|begin_of_sentence|><|User|><|Assistant|><think>\n"
-    return template + system + "\n" + user_full
+    # 若有真实 tokenizer 就走 apply_chat_template，否则只对纯文本估算
+    if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
+        try:
+            return tokenizer.apply_chat_template(
+                [{"role": "system", "content": system},
+                 {"role": "user",   "content": user_full}],
+                tokenize=False, add_generation_prompt=True,
+            )
+        except Exception:
+            pass
+    return system + "\n" + user_full
 
 
 def get_tokenizer():
+    """优先用 BASE_MODEL 环境变量指向的真实 tokenizer，否则回退到 Qwen3 / Qwen2.5。"""
+    import os
+    candidates = []
+    base_model = os.environ.get("BASE_MODEL", "").strip()
+    if base_model:
+        candidates.append(base_model)
+    candidates += ["Qwen/Qwen3-4B-Thinking-2507", "Qwen/Qwen2.5-7B-Instruct"]
     try:
         from transformers import AutoTokenizer
-        tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", trust_remote_code=True)
-        return tok, "Qwen2.5"
-    except Exception:
+        for cand in candidates:
+            try:
+                tok = AutoTokenizer.from_pretrained(cand, trust_remote_code=True)
+                return tok, cand
+            except Exception:
+                continue
+    except ImportError:
         pass
     try:
         import tiktoken
@@ -118,7 +138,7 @@ def main():
     print("-" * 65)
 
     for n in sizes:
-        text = build_full_text(n)
+        text = build_full_text(n, tokenizer)
         prompt_tokens = count(tokenizer, text)
         total = prompt_tokens + max_output
         if total <= 4096:

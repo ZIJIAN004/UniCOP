@@ -155,6 +155,7 @@ start_vllm_servers() {
             --enable-prefix-caching \
             --disable-log-requests \
             --disable-log-stats \
+            ${VLLM_REASONING_FLAGS:-} \
             > "$VLLM_LOG_DIR/gpu${gpu}.log" 2>&1 &
         VLLM_PIDS+=($!)
         echo "  GPU $gpu → :${next_port} (PID=${VLLM_PIDS[-1]})"

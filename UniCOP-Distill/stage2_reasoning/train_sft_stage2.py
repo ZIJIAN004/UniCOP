@@ -120,14 +120,18 @@ def strip_posthoc_user(user: str) -> str:
 
 
 def _detect_response_template(tokenizer) -> str:
-    """从 chat_template 探测 assistant 标记，适配 ChatML / DeepSeek / Llama 3 等格式。"""
+    """从 chat_template 探测 assistant 标记，适配 ChatML / DeepSeek / Llama 3 等格式。
+
+    Stage 2 训练数据中 prompt 末尾保留 chat_template 自动 prepend 的 <think>\n
+    （Qwen3-Thinking 强制如此；R1-Distill 同样），因此 response_template
+    必须包含完整 generation_prompt 末尾的 <think>\n。
+    若剥掉 <think>，DataCollatorForCompletionOnlyLM 会把模板自动生成的
+    <think>\n 误判为 completion，造成 loss mask 错位。
+    """
     msgs = [{"role": "user", "content": "Hi"}]
     without_gp = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
     with_gp    = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
     gen_prompt = with_gp[len(without_gp):]
-    think_idx = gen_prompt.find("<think>")
-    if think_idx > 0:
-        gen_prompt = gen_prompt[:think_idx]
     return gen_prompt
 
 

@@ -130,7 +130,12 @@ def _detect_think_suffix(tokenizer) -> str:
 
 
 def _detect_response_template(tokenizer) -> str:
-    """从 chat_template 探测 assistant 标记，适配 ChatML / DeepSeek / Llama 3 等格式。"""
+    """从 chat_template 探测 assistant 标记，适配 ChatML / DeepSeek / Llama 3 等格式。
+
+    Stage 1 主动剥离 <think> 后缀（不学推理链），所以 response_template
+    也必须剥掉对应 <think> 部分，否则在 tokenized 序列中找不到。
+    与 Stage 2 不同（Stage 2 不剥 <think>，response_template 含 <think>）。
+    """
     msgs = [{"role": "user", "content": "Hi"}]
     without_gp = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
     with_gp    = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
@@ -144,16 +149,19 @@ def _detect_response_template(tokenizer) -> str:
 def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
                         think_suffix: str,
                         exclude_ids: set[str] | None = None,
-                        filter_problems=None, filter_sizes=None) -> Dataset:
+                        filter_problems=None, filter_sizes=None,
+                        keep_think: bool = False) -> Dataset:
     """
     加载 solutions.jsonl，构建 Stage 1 训练集。
 
-    训练 text 结构（不含 <think>，不干扰推理模型的思维链机制）:
-        prompt:     ...<|User|>[问题描述]<|Assistant|>
-        completion: [solution]\\n<eos>
+    Stage 1 只教模型"什么是合法的解"，不学完整思维链。
 
-    Stage 1 只教模型"什么是合法的解"，完全不碰 <think> 相关 token。
-    Stage 2 再引入 <think>...\\n</think> 格式教推理链。
+    keep_think=False (默认, R1-Distill):
+        prompt:     ...<|Assistant|>           ← 剥掉 chat_template 自动加的 <think>
+        completion: {solution}\\n<eos>
+    keep_think=True (Qwen3-Thinking, 因其 chat_template 强制 prepend <think>\\n):
+        prompt:     ...assistant\\n<think>\\n   ← 不剥, 保留 chat_template 原貌
+        completion: </think>\\n\\n{solution}\\n<eos>   ← 立即闭合, 形成空 think 占位
     """
     records = []
     skipped = 0
@@ -194,16 +202,19 @@ def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
                 tokenize=False, add_generation_prompt=True,
             )
 
-            # 2. 剥离 <think> 后缀，使 prompt 止于 <|Assistant|>
-            if think_suffix and prompt_text.endswith(think_suffix):
-                prompt_text = prompt_text[:-len(think_suffix)]
-            elif think_suffix:
-                idx = prompt_text.rstrip().rfind("<think>")
-                if idx != -1:
-                    prompt_text = prompt_text[:idx]
-
-            # 3. completion = solution + eos（纯解，不含任何 think 标签）
-            completion_text = solution + "\n" + tokenizer.eos_token
+            if keep_think:
+                # Qwen3-Thinking 路径: 保留 prompt 末尾的 <think>\n,
+                # completion 以 </think> 开头形成空 think 占位
+                completion_text = "</think>\n\n" + solution + "\n" + tokenizer.eos_token
+            else:
+                # R1-Distill 路径: 剥离 <think> 后缀, completion 是纯 solution
+                if think_suffix and prompt_text.endswith(think_suffix):
+                    prompt_text = prompt_text[:-len(think_suffix)]
+                elif think_suffix:
+                    idx = prompt_text.rstrip().rfind("<think>")
+                    if idx != -1:
+                        prompt_text = prompt_text[:idx]
+                completion_text = solution + "\n" + tokenizer.eos_token
 
             # 超长过滤
             total_len = len(tokenizer.encode(prompt_text + completion_text))
@@ -222,11 +233,20 @@ def load_stage1_dataset(data_path: str, tokenizer, max_length: int,
         first = records[0]
         print(f"  [首条验证] prompt 末尾 80 字: {first['prompt'][-80:]!r}")
         print(f"              completion 前 120 字: {first['completion'][:120]!r}")
-        has_think = "<think>" in first["prompt"][-30:] or "<think>" in first["completion"]
-        if has_think:
-            print(f"  [WARN] 检测到残留 <think> 标签，Stage 1 不应包含!")
+        if keep_think:
+            prompt_has_think = first["prompt"].rstrip().endswith("<think>")
+            comp_starts_close = first["completion"].lstrip().startswith("</think>")
+            if prompt_has_think and comp_starts_close:
+                print(f"  [OK] keep_think=True, 空 <think></think> 占位结构正确")
+            else:
+                print(f"  [WARN] keep_think=True 但格式不匹配 (prompt 末尾 <think>={prompt_has_think}, "
+                      f"completion 开头 </think>={comp_starts_close})")
         else:
-            print(f"  [OK] 无 <think> 标签，不干扰推理能力")
+            has_think = "<think>" in first["prompt"][-30:] or "<think>" in first["completion"]
+            if has_think:
+                print(f"  [WARN] 检测到残留 <think> 标签，Stage 1 (keep_think=False) 不应包含!")
+            else:
+                print(f"  [OK] 无 <think> 标签，不干扰推理能力")
 
     if excluded:
         print(f"  排除 {excluded} 条 (Stage 2 数据去重)")
@@ -316,10 +336,16 @@ def main():
 
     # ── 数据 ─────────────────────────────────────────────────────────────
     print("加载训练数据...")
+    # STAGE1_KEEP_THINK 由 paths.sh 派生:
+    #   r1_distill     → "false" (原行为)
+    #   qwen3_thinking → "true"  (空 <think></think> 占位, 避免推理时 OOD)
+    keep_think = os.environ.get("STAGE1_KEEP_THINK", "false").lower() == "true"
+    print(f"  STAGE1_KEEP_THINK = {keep_think}")
     dataset = load_stage1_dataset(args.data, tokenizer, args.max_length, think_suffix,
                                   exclude_ids=exclude_ids,
                                   filter_problems=args.filter_problems,
-                                  filter_sizes=args.filter_sizes)
+                                  filter_sizes=args.filter_sizes,
+                                  keep_think=keep_think)
 
     if args.val_ratio > 0 and len(dataset) > 10:
         split = dataset.train_test_split(test_size=args.val_ratio, seed=42)
