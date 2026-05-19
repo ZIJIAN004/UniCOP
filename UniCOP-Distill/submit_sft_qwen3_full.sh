@@ -32,6 +32,9 @@ echo "  data       = chains_template_cvrp20.jsonl (filter cvrp / size 20)"
 echo "  epochs=3  batch=1 grad_accum=8  lr=1e-4  zero=2  LoRA r=16"
 echo "============================================================"
 
+OUTPUT_DIR=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/output_sft_qwen3_template_cvrp20
+
+echo ">>> Step 1: SFT 训练"
 accelerate launch --num_processes 4 --main_process_port 29600 \
     UniCOP-Distill/stage2_reasoning/train_sft_stage2.py \
     --model "$BASE_MODEL" \
@@ -44,5 +47,22 @@ accelerate launch --num_processes 4 --main_process_port 29600 \
     --max_length 8192 \
     --zero_stage 2 \
     --gradient_checkpointing \
-    --output_dir /homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/output_sft_qwen3_template_cvrp20 \
+    --output_dir "$OUTPUT_DIR" \
     --logging_steps 10 --save_steps 200
+
+if [ ! -f "$OUTPUT_DIR/final_model/adapter_config.json" ]; then
+    echo "ERROR: 训练未保存 LoRA adapter, 跳过 merge"
+    exit 1
+fi
+
+echo ""
+echo ">>> Step 2: 合并 LoRA adapter 到基座"
+python UniCOP-Distill/stage1_solution/merge_adapter.py \
+    --adapter_path "$OUTPUT_DIR/final_model"
+
+echo ""
+echo "============================================================"
+echo "  完成! 训练 + merge"
+echo "  合并模型: $OUTPUT_DIR/final_model"
+echo "  Eval 请单独提交 submit_eval_qwen3.sh"
+echo "============================================================"
