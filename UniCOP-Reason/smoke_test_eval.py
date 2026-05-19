@@ -185,9 +185,20 @@ def main():
     print(f"  末尾 300 字: {completion[-300:]!r}")
 
     has_close = "</think>" in completion
-    check("completion 含 </think>",
-          has_close,
-          "若 False, parse 必然失败 (评估代码靠 </think> 切 thinking/answer)")
+    # 关键: 若生成被截断(顶到 max_new_tokens) 且无 </think>, 是 base model 思考未收敛,
+    # 不是 evaluate.py 兼容性问题。SFT 后模型学到固定 schema 会在 ~3K token 内输出 </think>。
+    if is_truncated and not has_close:
+        check("completion 含 </think> [base model 截断, 非兼容性 bug]",
+              False,
+              "生成顶到 max_new_tokens 仍未输出 </think>; "
+              "base model (未 SFT) 对该任务无 schema, 自然无限思考。"
+              "SFT 后模型在 ~3K token 内收敛, 4096 够用。"
+              "若想 base sanity 用 --max_new_tokens 16384 再跑",
+              warn_only=True)
+    else:
+        check("completion 含 </think>",
+              has_close,
+              "若 False 且未截断, 是 evaluate.py 兼容性 bug(可能 decode 配置错)")
     if has_close:
         close_idx = completion.rfind("</think>")
         thinking_part = completion[:close_idx]
@@ -218,10 +229,15 @@ def main():
     feasible = prob.is_feasible(completion, instance)
     print(f"  get_tour_distance(): {distance}")
     print(f"  is_feasible():       {feasible}")
-    check("parse 成功 (distance 非 None)",
+    # base model 截断或未训 schema 时 parse 失败是正常的, SFT 后才该看这条
+    parse_label = ("parse 成功 [base 未 SFT, parse 失败正常]"
+                   if is_truncated else "parse 成功 (distance 非 None)")
+    check(parse_label,
           distance is not None,
-          "evaluate.py 跑 100 条会显示 'parsed=X/100', 这里单条必须成功才有意义",
-          warn_only=True)  # 模型实际质量决定, 不强制
+          "evaluate.py 跑 100 条会显示 'parsed=X/100'。"
+          "base model 截断/未训 schema 时 parse 失败是预期,"
+          "SFT 后这条必须 PASS",
+          warn_only=True)
     if distance is not None:
         check("解可行 (容量/覆盖约束满足)",
               feasible,
