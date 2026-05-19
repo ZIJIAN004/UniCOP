@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --qos normal
+#SBATCH --qos large
 #SBATCH --gpus=4
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/sft_qwen3_full_%j.log
 #SBATCH --time=24:00:00
