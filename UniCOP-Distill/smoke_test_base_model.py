@@ -757,18 +757,26 @@ def main():
                         check("loss finite",
                               bool(torch.isfinite(out.loss).item()),
                               "NaN/inf 通常是 dtype/pad/template 问题")
-                        check("loss 在合理范围 [0.5, 10]",
-                              0.5 <= loss_val <= 10,
-                              f"loss={loss_val:.4f} (thinking SFT 首 loss 通常 1.5-3)",
+                        check("loss 在合理范围 [0.1, 10]",
+                              0.1 <= loss_val <= 10,
+                              f"loss={loss_val:.4f} (thinking 模型对 CVRP CoT 这种擅长格式, "
+                              "首 loss 0.3-1 也正常; 真异常是 NaN/inf/0)",
                               warn_only=True)
 
                         # 严格分段 loss 对比: 用 model.forward(labels) 算
                         # 仅 thinking 段 / 仅 answer 段 的 loss, 验证两段都非零
+                        print(f"\n  [分段 loss 对照 - thinking vs answer 是否独立贡献 loss]")
                         try:
                             # 找 </think> 在 input_ids 中的位置 (token 级)
+                            # 注意: prompt 里 system prompt 字面含 "</think>" 字符串(讲解用),
+                            # 所以必须只在 completion 段(full_ids[p_len:]) 里搜, 否则会匹配到 prompt 段
                             close_str = "</think>"
                             close_ids = tokenizer.encode(close_str, add_special_tokens=False)
-                            close_pos = subseq_pos(full_ids, close_ids)
+                            comp_segment = full_ids[p_len:]
+                            close_pos_in_comp = subseq_pos(comp_segment, close_ids)
+                            close_pos = (p_len + close_pos_in_comp) if close_pos_in_comp >= 0 else -1
+                            print(f"  </think> token ids: {close_ids}, 在 completion 段位置: {close_pos_in_comp} "
+                                  f"(全序列位置: {close_pos}, p_len={p_len})")
                             if close_pos > p_len and close_pos + len(close_ids) < len(full_ids):
                                 # 构造两份 labels: 仅 thinking / 仅 answer
                                 labels_think_only = [-100] * len(full_ids)
@@ -791,7 +799,6 @@ def main():
                                                               dtype=torch.long, device="cuda:0"))
                                 loss_think = out_think.loss.item()
                                 loss_ans = out_ans.loss.item()
-                                print(f"\n  [分段 loss 对照]")
                                 print(f"  thinking-only loss = {loss_think:.4f} ({n_think} tokens)")
                                 print(f"  answer-only   loss = {loss_ans:.4f} ({n_ans} tokens)")
                                 print(f"  combined      loss = {loss_val:.4f} ({n_loss_tokens} tokens)")
@@ -809,6 +816,13 @@ def main():
                                       f"实际 {loss_val:.4f} vs 期望 {expected:.4f} (相对误差 {rel_err:.1%}; "
                                       "若 > 5% 说明 combined loss 主要由某一段贡献, 另一段被错误屏蔽)")
                                 del out_think, out_ans
+                            else:
+                                # if 不成立: 显式打印诊断, 不再静默跳过
+                                check("分段 loss 对照可执行(找到 </think> 且后有 answer)",
+                                      False,
+                                      f"close_pos={close_pos}, p_len={p_len}, "
+                                      f"full_len={len(full_ids)}; 跳过分段对照",
+                                      warn_only=True)
                         except Exception as _seg_e:
                             print(f"  {WARN_TAG} 分段 loss 对照异常: {type(_seg_e).__name__}: {_seg_e}")
 
