@@ -307,6 +307,8 @@ def main():
                              "在训练前被过滤掉，不参与 SFT。")
     parser.add_argument("--val_ratio",    type=float, default=0.0,
                         help="验证集比例（默认 0 不验证）")
+    parser.add_argument("--max_samples",  type=int,   default=0,
+                        help="只取前 N 条样本(sanity test 用), 0=全量")
 
     # 训练
     parser.add_argument("--seed",         type=int,   default=42,
@@ -391,6 +393,11 @@ def main():
     dataset = load_sft_dataset(args.data, tokenizer, args.max_length, args.max_output_length,
                               filter_problems=args.filter_problems,
                               filter_sizes=args.filter_sizes)
+
+    # sanity 模式: 只取前 N 条
+    if args.max_samples > 0 and len(dataset) > args.max_samples:
+        dataset = dataset.select(range(args.max_samples))
+        print(f"  [sanity] 截取前 {args.max_samples} 条样本")
 
     # 划分训练集和验证集
     if args.val_ratio > 0 and len(dataset) > 10:

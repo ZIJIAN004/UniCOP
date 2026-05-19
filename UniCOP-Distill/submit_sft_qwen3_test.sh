@@ -27,6 +27,7 @@ echo "============================================================"
 echo "  Stage 2 SFT [TEST] — Qwen3-4B-Thinking"
 echo "  BASE_MODEL = $BASE_MODEL"
 echo "  data       = chains_template_cvrp20.jsonl (filter cvrp / size 20)"
+echo "  sanity 量  = 前 200 条 / 1 epoch  (~30-45 min)"
 echo "  epochs=1  batch=1 grad_accum=8  lr=1e-4  zero=0  LoRA r=16"
 echo "============================================================"
 
@@ -35,6 +36,7 @@ python UniCOP-Distill/stage2_reasoning/train_sft_stage2.py \
     --data UniCOP-Distill/data/chains_template_cvrp20.jsonl \
     --filter_problems cvrp \
     --filter_sizes 20 \
+    --max_samples 200 \
     --epochs 1 \
     --batch_size 1 --grad_accum 8 \
     --lr 1e-4 \
