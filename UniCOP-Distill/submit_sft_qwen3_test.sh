@@ -24,11 +24,12 @@ export BASE_MODEL_TYPE=qwen3_thinking
 source paths.sh
 
 echo "============================================================"
-echo "  Stage 2 SFT [TEST] — Qwen3-4B-Thinking"
+echo "  Stage 2 SFT [TEST] — Qwen3-4B-Thinking (单卡 sanity)"
 echo "  BASE_MODEL = $BASE_MODEL"
 echo "  data       = chains_template_cvrp20.jsonl (filter cvrp / size 20)"
 echo "  sanity 量  = 前 200 条 / 1 epoch  (~30-45 min)"
-echo "  epochs=1  batch=1 grad_accum=8  lr=1e-4  zero=0  LoRA r=16"
+echo "  epochs=1  batch=2 grad_accum=4  lr=1e-4  zero=0  LoRA r=64/128"
+echo "  (单卡测试不走 ZeRO; full sbatch 4 卡走 ZeRO-3)"
 echo "============================================================"
 
 python UniCOP-Distill/stage2_reasoning/train_sft_stage2.py \
@@ -38,9 +39,10 @@ python UniCOP-Distill/stage2_reasoning/train_sft_stage2.py \
     --filter_sizes 20 \
     --max_samples 200 \
     --epochs 1 \
-    --batch_size 1 --grad_accum 8 \
+    --batch_size 2 --grad_accum 4 \
     --lr 1e-4 \
     --max_length 8192 \
+    --lora_rank 64 --lora_alpha 128 \
     --gradient_checkpointing \
     --output_dir /homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/output_sft_qwen3_test \
     --logging_steps 5 --save_steps 50

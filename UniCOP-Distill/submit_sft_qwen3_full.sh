@@ -49,8 +49,11 @@ echo "============================================================"
 # ══════════════════════════════════════════════════════════════════
 echo ""
 echo ">>> Step 1: SFT 训练 ($(date))"
-echo "    epochs=3  batch=1 grad_accum=8 (effective 32)  lr=1e-4  zero=2"
-echo "    LoRA r=16 alpha=32  scheduler=cosine warmup=0.05  wd=0.01"
+echo "    epochs=3  batch=2 grad_accum=4 × 4 GPU = effective 32"
+echo "    lr=1e-4  zero=3 (LoRA + GC use_reentrant=True 自动)"
+echo "    LoRA r=64 alpha=128  scheduler=cosine warmup=0.05  wd=0.01"
+echo "    max_length=8192 (prompt+completion 总长 上限)"
+echo "    max_output_length=4096 (completion 单段过滤; 数据集实测 ≤3100 安全)"
 echo ""
 
 accelerate launch --num_processes 4 --main_process_port 29600 \
@@ -60,10 +63,11 @@ accelerate launch --num_processes 4 --main_process_port 29600 \
     --filter_problems cvrp \
     --filter_sizes 20 \
     --epochs 3 \
-    --batch_size 1 --grad_accum 8 \
+    --batch_size 2 --grad_accum 4 \
     --lr 1e-4 \
     --max_length 8192 \
-    --zero_stage 2 \
+    --lora_rank 64 --lora_alpha 128 \
+    --zero_stage 3 \
     --gradient_checkpointing \
     --output_dir "$OUTPUT_DIR" \
     --logging_steps 10 --save_steps 200
