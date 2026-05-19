@@ -477,6 +477,11 @@ def main():
         learning_rate=config.learning_rate,
         num_train_epochs=config.num_train_epochs,
         warmup_ratio=config.warmup_ratio,
+        # GRPO/RL 标准用 constant_with_warmup, 不用 trl 默认的 linear (warmup → linear decay → 0).
+        # linear decay 是 SFT 习惯, RL 不需要后期 LR 减小 (long-term reward optimization).
+        # DeepSeek-R1 / DAPO / Verl 主流 GRPO 都用 constant. 实测 step 250 linear decay
+        # 已经减半 LR, 250 step 后 update 速度 -50%, 拖慢长 run.
+        lr_scheduler_type="constant_with_warmup",
         beta=config.kl_coef,
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
