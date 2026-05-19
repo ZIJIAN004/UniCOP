@@ -374,7 +374,16 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
                 # 标记是否被截断（token 数达到 max_completion_length）
                 num_tokens = len(completion_ids)
                 is_truncated = (num_tokens >= max_completion_length)
-                completion = tokenizer.decode(completion_ids, skip_special_tokens=True)
+                # skip_special_tokens=False: 关键! Qwen3-Thinking 把 <think>/</think>
+                # 注册为 special token (id 151667/151668), True 会把它们剥掉, 后续
+                # rfind("</think>") 失败导致 thinking 段被算进答案。R1-Distill 上
+                # <think>/</think> 是普通 BPE, 不受 skip_special_tokens 影响, 两者兼容。
+                # <|im_end|> / <|endoftext|> 等结构 token 通过下面的字符串 replace 去掉。
+                completion = tokenizer.decode(completion_ids, skip_special_tokens=False)
+                # 去掉结构性 special token (保留 <think>/</think> 用于后续解析)
+                for tok in ("<|im_end|>", "<|endoftext|>", "<｜end▁of▁sentence｜>",
+                            "<|begin_of_text|>", "<|eot_id|>"):
+                    completion = completion.replace(tok, "")
                 all_completions[batch_start + i].append((completion, is_truncated, num_tokens))
 
     return all_completions
