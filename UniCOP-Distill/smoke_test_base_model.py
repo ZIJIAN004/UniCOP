@@ -640,6 +640,16 @@ def main():
                         device_map={"": 0}, trust_remote_code=True,
                     )
                     model.train()
+                    # 开 gradient checkpointing 省激活内存(A5000 24GB + 4B + 4K seq 必须开)
+                    try:
+                        model.gradient_checkpointing_enable(
+                            gradient_checkpointing_kwargs={"use_reentrant": True}
+                        )
+                        if hasattr(model, "enable_input_require_grads"):
+                            model.enable_input_require_grads()
+                        print(f"  ✓ gradient checkpointing 已启用")
+                    except Exception as _gc_e:
+                        print(f"  {WARN_TAG} GC 启用失败: {_gc_e}")
                     n_params = sum(p.numel() for p in model.parameters())
                     print(f"  参数量: {n_params/1e9:.2f} B")
                     print(f"  model.dtype: {model.dtype}")
@@ -672,12 +682,31 @@ def main():
                     completion_text = out_stripped + (tokenizer.eos_token or "")
 
                     prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
-                    full_ids = tokenizer.encode(prompt_text + completion_text,
-                                                 add_special_tokens=False)
+                    completion_ids_only = tokenizer.encode(completion_text,
+                                                            add_special_tokens=False)
+                    full_ids = prompt_ids + completion_ids_only
                     orig_len = len(full_ids)
-                    if len(full_ids) > args.online_max_len:
-                        full_ids = full_ids[:args.online_max_len]
-                        print(f"  {INFO_TAG} 序列截断 {orig_len} → {args.online_max_len}")
+                    if orig_len > args.online_max_len:
+                        # Smart truncation: 保留 prompt + thinking 头部 + </think> + 完整 answer,
+                        # 而不是简单截尾(否则会切掉 </think> 和 final answer, 让分段 loss 验证失效)
+                        close_ids = tokenizer.encode("</think>", add_special_tokens=False)
+                        close_pos_full = subseq_pos(full_ids, close_ids)
+                        if close_pos_full > 0:
+                            answer_part = full_ids[close_pos_full:]  # 含 </think> + answer + eos
+                            budget = args.online_max_len - len(answer_part)
+                            if budget > len(prompt_ids) + 50:
+                                thinking_head = full_ids[len(prompt_ids):budget]
+                                full_ids = prompt_ids + thinking_head + answer_part
+                                print(f"  {INFO_TAG} smart 截断 {orig_len} → {len(full_ids)} "
+                                      f"(prompt {len(prompt_ids)} + thinking_head {len(thinking_head)}"
+                                      f" + answer_part {len(answer_part)})")
+                            else:
+                                # answer 部分已经吃满 budget, 退回简单截断
+                                full_ids = full_ids[:args.online_max_len]
+                                print(f"  {WARN_TAG} answer 段超 budget, 退回简单截断 → {len(full_ids)}")
+                        else:
+                            full_ids = full_ids[:args.online_max_len]
+                            print(f"  {INFO_TAG} 序列截断 {orig_len} → {len(full_ids)} (未找到 </think>)")
 
                     # 构造 labels: prompt 部分 -100, completion 部分保留
                     labels = list(full_ids)
