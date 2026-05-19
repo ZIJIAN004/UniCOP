@@ -57,8 +57,10 @@ def main():
     parser.add_argument("--online", action="store_true",
                         help="启用 in-GPU 验证: 加载真实模型跑 1 step forward+backward, "
                              "验证 loss finite + grad 非 NaN + grad_norm 合理")
-    parser.add_argument("--online_max_len", type=int, default=4096,
-                        help="online 验证序列截断长度 (避免单卡 OOM)")
+    parser.add_argument("--online_max_len", type=int, default=8192,
+                        help="online 验证序列长度上限, 默认 8192 与 "
+                             "train_sft_stage2.py --max_length 一致, 不主动截断真实样本。"
+                             "若显存吃紧再手动调小(会触发 smart truncation 保 </think>)")
     args = parser.parse_args()
 
     if not args.model:

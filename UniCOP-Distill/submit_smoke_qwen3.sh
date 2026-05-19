@@ -34,4 +34,4 @@ echo "============================================================"
 python UniCOP-Distill/smoke_test_base_model.py \
     --online \
     --data UniCOP-Distill/data/chains_template_cvrp20.jsonl \
-    --online_max_len 4096
+    --online_max_len 8192
