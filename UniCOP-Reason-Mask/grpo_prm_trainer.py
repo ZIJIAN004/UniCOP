@@ -1415,9 +1415,17 @@ class GRPOPRMTrainer(GRPOTrainer):
             )
             components.append(c)
 
-            # strict fully_feasible 子集判定
+            # strict fully_feasible 子集判定 (修 bug 2026-05-19):
+            # 必须强制 cov=1, 跟 cov_gate_v5 解耦. 否则 cov_gate=0 (加法模式) 下,
+            # cov 条件恒成立, 漏访客户但 cons=1+parse=1+format=1 的 trajectory 也被
+            # 错判为 feasible, 进入 outcome distance 子集. 漏访 trajectory distance
+            # 几何上一定更短, z-score(-distance) 后拿正 outcome advantage,
+            # 跟 A_feas push cov ↑ 的方向部分抵消 (约 60% 信号衰减).
+            # 同时影响 PRM cutoff (跟此 is_feasible 共用), 让 cov<1 也拿 PRM.
+            # cov_gate_v5 现在只控制 A_feas 内 cons_signal 是否依赖 cov.
+            FEAS_COV_THRESH = 1.0 - 1e-9
             feas = (c["parse"] == 1.0
-                    and c["coverage"] >= cov_gate
+                    and c["coverage"] >= FEAS_COV_THRESH
                     and c["constraint"] == 1.0
                     and c["format"] == 1.0)
             is_feasible_local.append(feas)
