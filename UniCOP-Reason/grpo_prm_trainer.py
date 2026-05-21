@@ -39,6 +39,24 @@ _PROBLEM_OBJS = {
 }
 
 
+# 用 skip_special_tokens=False decode 后, chat template 的控制 token (Qwen3 的
+# <|im_end|>, R1-Distill 的 <｜end▁of▁sentence｜> 等) 会以字面字符串残留, 影响
+# parse/regex. 这里手工抹掉, 但保留 <think>/</think> (Qwen3 special, R1 是普通 BPE
+# 都按字面保留, 下游 parse 依赖此边界).
+_CHAT_SPECIAL_TOKENS = (
+    "<|im_end|>", "<|im_start|>", "<|endoftext|>",
+    "<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>",
+    "<|begin_of_text|>", "<|eot_id|>",
+)
+
+
+def _strip_chat_specials(text: str) -> str:
+    for tok in _CHAT_SPECIAL_TOKENS:
+        if tok in text:
+            text = text.replace(tok, "")
+    return text
+
+
 class GRPOPRMTrainer(GRPOTrainer):
 
     def __init__(self, pomo_prm=None, problem_types: list[str] = None, **kwargs):
@@ -160,9 +178,14 @@ class GRPOPRMTrainer(GRPOTrainer):
                 f"也不是 B={B}，无法判断是否展开。"
             )
 
+        # skip_special_tokens=False: Qwen3-Thinking 的 </think> (id 151668) 是
+        # special token, skip=True 会抹掉, 后续 parse / [R*,*] 段匹配看不到答案区
+        # 边界, PRM signal 严重退化. R1-Distill 的 </think> 是普通 BPE, 不受影响,
+        # 两者都用 False 安全; 用 _strip_chat_specials 把 chat 控制 token 抹掉.
         completions_text = self.processing_class.batch_decode(
-            completion_ids, skip_special_tokens=True
+            completion_ids, skip_special_tokens=False
         )
+        completions_text = [_strip_chat_specials(t) for t in completions_text]
         instances = [self._deserialize_instance(pd) for pd in problem_data_list]
 
         # ── 一次性诊断: dump 第一条 completion 看 think 段实际格式 ────
@@ -393,8 +416,11 @@ class GRPOPRMTrainer(GRPOTrainer):
 
                 batch["completion_ids"][idx] = comp
                 batch["completion_mask"][idx] = mask
-                completions_text[idx] = self.processing_class.decode(
-                    token_ids, skip_special_tokens=True,
+                # skip_special_tokens=False: 同 batch_decode, 保 Qwen3 </think>
+                completions_text[idx] = _strip_chat_specials(
+                    self.processing_class.decode(
+                        token_ids, skip_special_tokens=False,
+                    )
                 )
 
             total_resampled += len(local_requests)

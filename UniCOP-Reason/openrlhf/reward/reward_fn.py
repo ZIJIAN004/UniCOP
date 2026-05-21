@@ -76,8 +76,16 @@ def _extract_completion(query: str, prompt: str) -> str:
         idx = query.rfind(marker)
         if idx >= 0:
             tail = query[idx + len(marker):]
-            if tail.startswith("<think>\n"):
-                tail = tail[len("<think>\n"):]
+            # chat template 自动 prepend <think>: R1-Distill 是 `<think>\n`,
+            # Qwen3-Thinking 是 `<think>\n` (单 token id 151667). 两者去掉这个
+            # 起始 think 标签后, completion 的 `<think>` 内容由模型自己生成.
+            # 用 lstrip 容忍前导空白/换行差异.
+            _lt = tail.lstrip()
+            if _lt.startswith("<think>"):
+                # 去掉 "<think>" + 可能的换行
+                tail = _lt[len("<think>"):]
+                if tail.startswith("\n"):
+                    tail = tail[1:]
             return tail
     return query
 

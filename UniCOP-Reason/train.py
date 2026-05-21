@@ -469,7 +469,18 @@ def main():
         use_vllm=True,
         vllm_server_host=args.vllm_server_host,
         vllm_server_port=args.vllm_server_port,
+        # ── 采样参数 (paths.sh 按 BASE_MODEL_TYPE 注入 env, config 透传) ─────
+        # 默认 GRPOConfig.temperature=1.0 是 R1-Distill 路径, Qwen3-Thinking 必须
+        # 改 0.6 (官方推荐), 否则 think 段乱跳熵高得离谱.
+        # 这三个值也被 trainer.{temperature,top_p,top_k} 读, resample_infeasible
+        # 调 vLLM 时复用.
+        temperature=config.gen_temperature,
+        top_p=config.gen_top_p,
+        top_k=config.gen_top_k if config.gen_top_k > 0 else None,
     )
+    print(f"采样参数:  T={config.gen_temperature}  top_p={config.gen_top_p}  "
+          f"top_k={config.gen_top_k} (BASE_MODEL_TYPE="
+          f"{os.environ.get('BASE_MODEL_TYPE', '(unset)')})")
 
     # ── 初始化奖励模块 + 训练 ──────────────────────────────────────────
     if config.reward_mode == "prm":
@@ -603,7 +614,14 @@ def _save_examples(model, tokenizer, problem_types, n, save_dir, num_examples=3)
 
             completion_ids    = outputs[0][prompt_tokens:]
             completion_tokens = len(completion_ids)
-            completion_text   = tokenizer.decode(completion_ids, skip_special_tokens=True)
+            # skip_special_tokens=False: Qwen3-Thinking 的 </think> (id 151668) 是
+            # special token, 默认 skip 会被抹掉, 后续 parse_multi_route 拿不到答案区.
+            # R1-Distill 的 </think> 是普通 BPE, 不受 skip_special_tokens 影响, 两者
+            # 都用 False 安全; 显式过滤掉 chat special token 避免污染.
+            completion_text   = tokenizer.decode(completion_ids, skip_special_tokens=False)
+            for _tok in ("<|im_end|>", "<|endoftext|>", "<｜end▁of▁sentence｜>",
+                         "<|begin_of_text|>", "<|eot_id|>"):
+                completion_text = completion_text.replace(_tok, "")
             truncated         = (completion_tokens >= config.max_completion_length)
 
             instance_for_eval = prob.from_json(prob.to_json(instance))

@@ -142,13 +142,20 @@ def _replace_generate_route(app):
         raise RuntimeError("无法从原 /generate/ handler closure 提取 llm 实例")
 
     # 3. 定义扩展 schema
+    # 兜底默认值从 env 读 (paths.sh 注入 GEN_TEMPERATURE/TOP_P/TOP_K), 训练端
+    # GRPOTrainer 实际每次调用都会显式传, 这只是裸 curl 调试时的 fallback.
+    import os as _os
+    _T_DEFAULT = float(_os.environ.get("GEN_TEMPERATURE", "1.0"))
+    _TP_DEFAULT = float(_os.environ.get("GEN_TOP_P", "1.0"))
+    _TK_DEFAULT = int(_os.environ.get("GEN_TOP_K", "-1"))
+
     class _PatchedGenerateRequest(BaseModel):
         prompts: list[str]
         n: int = 1
         repetition_penalty: float = 1.0
-        temperature: float = 1.0
-        top_p: float = 1.0
-        top_k: int = -1
+        temperature: float = _T_DEFAULT
+        top_p: float = _TP_DEFAULT
+        top_k: int = _TK_DEFAULT
         min_p: float = 0.0
         max_tokens: int = 16
         guided_decoding_regex: Optional[str] = None

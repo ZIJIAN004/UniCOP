@@ -17,6 +17,14 @@ class Config:
     lora_rank: int    = 64
     lora_alpha: int   = 128
 
+    # ── 生成采样参数 (paths.sh 按 BASE_MODEL_TYPE 注入, R1-Distill / Qwen3 不同) ─
+    # R1-Distill 推荐 T=1.0, top_p=1.0, top_k=-1
+    # Qwen3-Thinking 推荐 T=0.6, top_p=0.95, top_k=20
+    # 缺省值 fallback 到 R1-Distill (向后兼容旧脚本)
+    gen_temperature: float = float(os.environ.get("GEN_TEMPERATURE", "1.0"))
+    gen_top_p:       float = float(os.environ.get("GEN_TOP_P", "1.0"))
+    gen_top_k:       int   = int(os.environ.get("GEN_TOP_K", "-1"))
+
     # ── 数据集 ───────────────────────────────────────────────────────
     num_train: int    = 20000
     num_test: int     = 1000
