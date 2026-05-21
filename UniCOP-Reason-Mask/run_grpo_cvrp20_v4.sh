@@ -28,6 +28,9 @@
 set -euo pipefail
 
 _SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+# BASE_MODEL_TYPE: r1_distill (默认, 7B DeepSeek) 或 qwen3_thinking (4B Qwen3-Thinking)
+# paths.sh 据此设 BASE_MODEL + 采样参数 GEN_TEMPERATURE/TOP_P/TOP_K, trainer 自动读 env
+export BASE_MODEL_TYPE="${BASE_MODEL_TYPE:-r1_distill}"
 source "$(dirname "$_SELF_DIR")/paths.sh"
 
 WORK_DIR="$MASK_DIR"
@@ -50,7 +53,11 @@ export NCCL_SHM_DISABLE=1
 PROBLEM="cvrp"
 SIZE=20
 
-MODEL_BASE="$DISTILL_DIR/output_sft_hybrid_cvrp20/final_model"
+case "$BASE_MODEL_TYPE" in
+    r1_distill)     MODEL_BASE="$DISTILL_DIR/output_sft_hybrid_cvrp20/final_model" ;;
+    qwen3_thinking) MODEL_BASE="$DISTILL_DIR/output_sft_qwen3_template_cvrp20/final_model" ;;
+    *) echo "❌ 未知 BASE_MODEL_TYPE='$BASE_MODEL_TYPE'"; exit 1 ;;
+esac
 if [ ! -d "$MODEL_BASE" ]; then
     echo "❌ 基座模型不存在: $MODEL_BASE"
     exit 1
@@ -156,6 +163,7 @@ nvidia-smi topo -m 2>&1 || echo "(nvidia-smi topo unavailable)"
 echo ""
 echo "============================================================"
 echo "  GRPO + POMO PRM · CVRP n=$SIZE · 7 卡 · reward_scheme=v4"
+echo "  BASE_MODEL_TYPE: $BASE_MODEL_TYPE  (T=$GEN_TEMPERATURE top_p=$GEN_TOP_P top_k=$GEN_TOP_K)"
 echo "  基座模型:  $MODEL_BASE"
 echo "  GPU:       1 vLLM (GPU $VLLM_GPU) + $TRAIN_PROC 训练 (GPU $TRAIN_GPUS_CSV)"
 echo "  ZeRO:      stage $ZERO_STAGE | gradient_checkpointing on"

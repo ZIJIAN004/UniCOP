@@ -374,7 +374,13 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
                 # 标记是否被截断（token 数达到 max_completion_length）
                 num_tokens = len(completion_ids)
                 is_truncated = (num_tokens >= max_completion_length)
-                completion = tokenizer.decode(completion_ids, skip_special_tokens=True)
+                # skip_special_tokens=False: Qwen3-Thinking 的 </think> (id 151668) 是
+                # special token, skip=True 会被抹掉, parse_multi_route 找不到答案区边界.
+                # R1-Distill 的 </think> 是普通 BPE 不受影响, 两者用 False 安全.
+                completion = tokenizer.decode(completion_ids, skip_special_tokens=False)
+                for _tok in ("<|im_end|>", "<|endoftext|>", "<｜end▁of▁sentence｜>",
+                             "<|begin_of_text|>", "<|eot_id|>"):
+                    completion = completion.replace(_tok, "")
                 all_completions[batch_start + i].append((completion, is_truncated, num_tokens))
 
     return all_completions

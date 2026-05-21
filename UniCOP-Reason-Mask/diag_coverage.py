@@ -107,7 +107,10 @@ def main():
 
         for s in range(args.num_samples):
             comp_ids = outputs[s][prompt_len:]
-            comp_text = tokenizer.decode(comp_ids, skip_special_tokens=True)
+            # skip_special_tokens=False: 保 Qwen3-Thinking 的 </think> (special token)
+            comp_text = tokenizer.decode(comp_ids, skip_special_tokens=False)
+            for _tok in ("<|im_end|>", "<|endoftext|>", "<｜end▁of▁sentence｜>"):
+                comp_text = comp_text.replace(_tok, "")
             comp_tokens = len(comp_ids)
             truncated = comp_tokens >= args.max_new_tokens
 

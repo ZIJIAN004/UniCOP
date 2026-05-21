@@ -140,13 +140,20 @@ def _replace_generate_route(app):
         print("[mask] CVRPMaskProcessor disabled (--mask_enabled 未传)", flush=True)
 
     # 4. 定义扩展 schema (加 mask_hits 字段, 即使 mask 未启用也兼容)
+    # 兜底默认值从 env 读 (paths.sh 注入 GEN_TEMPERATURE/TOP_P/TOP_K).
+    # 训练端 GRPOTrainer 每次显式传, 这只是裸 curl 调试时的 fallback.
+    import os as _os
+    _T_DEFAULT = float(_os.environ.get("GEN_TEMPERATURE", "1.0"))
+    _TP_DEFAULT = float(_os.environ.get("GEN_TOP_P", "1.0"))
+    _TK_DEFAULT = int(_os.environ.get("GEN_TOP_K", "-1"))
+
     class _PatchedGenerateRequest(BaseModel):
         prompts: list[str]
         n: int = 1
         repetition_penalty: float = 1.0
-        temperature: float = 1.0
-        top_p: float = 1.0
-        top_k: int = -1
+        temperature: float = _T_DEFAULT
+        top_p: float = _TP_DEFAULT
+        top_k: int = _TK_DEFAULT
         min_p: float = 0.0
         max_tokens: int = 16
         guided_decoding_regex: Optional[str] = None
