@@ -8,14 +8,17 @@
 #   [4-6]    需要主模型 + profiled jsonl
 #
 # 默认配置 (可通过环境变量覆盖):
-#   HLR_MODEL  - 主模型路径 (默认 $BASE_MODEL_R1, 即 DeepSeek-R1-Distill-Qwen-7B)
-#   HLR_DATA   - profiled jsonl 路径 (默认 ./data/profiled_cvrp20.jsonl)
+#   BASE_MODEL_TYPE - 基座选 r1_distill | qwen3_thinking (默认 paths.sh 用 r1_distill)
+#                     LR 架构会从主模型 config 自动 1/4 缩放, 不需要手动调
+#   HLR_MODEL       - 主模型路径 (默认 $BASE_MODEL, 跟随 BASE_MODEL_TYPE)
+#   HLR_DATA        - profiled jsonl 路径 (默认 ./data/profiled_cvrp20.jsonl)
 #
 # 用法:
-#   sbatch Latent-SFT/submit_smoke_hlr.sh
+#   sbatch Latent-SFT/submit_smoke_hlr.sh                              # R1-Distill-7B 默认
+#   BASE_MODEL_TYPE=qwen3_thinking sbatch Latent-SFT/submit_smoke_hlr.sh # 换 Qwen3-4B-Thinking
 #   HLR_MODEL=/path/to/grpo_checkpoint sbatch Latent-SFT/submit_smoke_hlr.sh
 #
-# 1 GPU express, 5-10 分钟结束 (主要是加载 7B 模型 + forward/backward)
+# 1 GPU express, 5-10 分钟 (主要是加载基座模型 + forward/backward)
 
 export HOME=/homes/zhuoyi
 export PIP_CACHE_DIR=/homes/zhuoyi/.pip_cache
@@ -32,14 +35,17 @@ source paths.sh
 
 cd Latent-SFT
 
-MODEL_PATH="${HLR_MODEL:-$BASE_MODEL_R1}"
+# $BASE_MODEL 由 paths.sh 根据 BASE_MODEL_TYPE 派生
+MODEL_PATH="${HLR_MODEL:-$BASE_MODEL}"
 DATA_PATH="${HLR_DATA:-./data/profiled_cvrp20.jsonl}"
 
 echo "============================================================"
 echo "  HLR Smoke Test"
-echo "  HOST  = $HOST_ID"
-echo "  MODEL = $MODEL_PATH"
-echo "  DATA  = $DATA_PATH"
+echo "  HOST              = $HOST_ID"
+echo "  BASE_MODEL_TYPE   = $BASE_MODEL_TYPE"
+echo "  MODEL             = $MODEL_PATH"
+echo "  DATA              = $DATA_PATH"
+echo "  (LR 架构自动从主模型 config 推断, 无需手动调超参)"
 echo "============================================================"
 
 if [ -f "$DATA_PATH" ]; then

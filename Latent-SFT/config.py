@@ -94,14 +94,17 @@ class HLRConfig:
     latent_compression_ratio: int = 4
     min_latent_segment: int = 8
 
-    # ── Latent Reasoner (7 层 SwiGLU + GQA + RoPE, hidden=896) ──
-    lr_num_layers: int = 7              # 主模型 28 层的 1/4 (hidden sharing 1:4)
-    lr_hidden_size: int = 896           # 主模型 3584 的 1/4
-    lr_num_heads: int = 7               # Q heads
-    lr_num_kv_heads: int = 1            # KV heads (GQA 7:1, 与主模型同比例)
-    lr_head_dim: int = 128              # 与主模型 head_dim 一致
-    lr_intermediate_size: int = 4736    # 5.28× hidden, SwiGLU
-    lr_init_method: str = "random"      # TODO: "copy_first_layers" / "svd_compress"
+    # ── Latent Reasoner (SwiGLU + GQA + RoPE, 1/4 主模型尺寸) ──
+    # 默认全 0 = auto 推断 (build_latent_reasoner_from_main 从主模型 config 自动算 1/4 缩放)
+    # 兼容 R1-Distill-Qwen-7B / Qwen3-4B-Thinking 等不同尺寸基座
+    # 显式设值 > 0 时覆盖 auto, 用于精细调控
+    lr_num_layers: int = 0          # 0 → main_layers // 4 (R1-7B → 7, Qwen3-4B 36 层 → 9)
+    lr_hidden_size: int = 0         # 0 → lr_num_heads × lr_head_dim
+    lr_num_heads: int = 0           # 0 → main_heads // 4
+    lr_num_kv_heads: int = 0        # 0 → main_kv_heads // 4 (保持 GQA 比例)
+    lr_head_dim: int = 0            # 0 → main_head_dim (主模型 head_dim 不变)
+    lr_intermediate_size: int = 0   # 0 → lr_hidden × (main_intermediate / main_hidden), 64 倍数
+    lr_init_method: str = "random"  # TODO: "copy_first_layers" / "svd_compress"
 
     # ── Loss 权重 ──
     alpha: float = 1.0        # student CE (显式段 + solution 的 next-token)

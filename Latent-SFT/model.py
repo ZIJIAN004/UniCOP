@@ -449,20 +449,83 @@ class LatentReasoner(nn.Module):
 
 
 def build_latent_reasoner_from_main(main_model, cfg) -> LatentReasoner:
-    """根据 HLRConfig 与主模型 config 构造 LatentReasoner。"""
+    """
+    根据 HLRConfig 与主模型 config 构造 LatentReasoner.
+
+    自动 1/4 缩放策略 (基座模型无关):
+        lr_num_layers     = main_layers // 4
+        lr_num_heads      = main_heads // 4
+        lr_num_kv_heads   = main_kv_heads // 4
+        lr_head_dim       = main_head_dim   (保持 head 维度不变)
+        lr_hidden_size    = lr_num_heads × lr_head_dim
+        lr_intermediate   = lr_hidden × (main_intermediate / main_hidden)
+                            (保持 SwiGLU intermediate 比例, 取 64 的倍数)
+
+    HLRConfig 字段 = 0 时走 auto 推断, > 0 时用 cfg 值 (override).
+
+    适配示例:
+      R1-Distill-Qwen-7B  (hidden=3584, L=28, H=28, KV=4, dh=128, FFN=18944)
+        → LR L=7, H=7, KV=1, dh=128, hidden=896,  FFN=4736   (~108M)
+      Qwen3-4B-Thinking    (hidden=2560, L=36, H=32, KV=8, dh=128, FFN=9728)
+        → LR L=9, H=8, KV=2, dh=128, hidden=1024, FFN=3904   (~125M)
+        (具体数字以模型真实 config 为准, 这里只是示意)
+    """
     main_cfg = main_model.config if hasattr(main_model, "config") else main_model.module.config
-    main_hidden = getattr(main_cfg, "hidden_size", 3584)
-    num_main_layers = getattr(main_cfg, "num_hidden_layers", 28)
+
+    main_hidden = getattr(main_cfg, "hidden_size")
+    main_layers = getattr(main_cfg, "num_hidden_layers")
+    main_heads = getattr(main_cfg, "num_attention_heads")
+    main_kv_heads = getattr(main_cfg, "num_key_value_heads", main_heads)
+    main_head_dim = getattr(main_cfg, "head_dim", main_hidden // main_heads)
+    main_intermediate = getattr(main_cfg, "intermediate_size", main_hidden * 4)
+
+    # 1/4 缩放 (cfg 字段 > 0 时尊重 user override)
+    lr_num_layers = cfg.lr_num_layers if cfg.lr_num_layers > 0 else max(1, main_layers // 4)
+    lr_num_heads = cfg.lr_num_heads if cfg.lr_num_heads > 0 else max(1, main_heads // 4)
+    lr_num_kv_heads = cfg.lr_num_kv_heads if cfg.lr_num_kv_heads > 0 else max(1, main_kv_heads // 4)
+    lr_head_dim = cfg.lr_head_dim if cfg.lr_head_dim > 0 else main_head_dim
+    lr_hidden_size = cfg.lr_hidden_size if cfg.lr_hidden_size > 0 else lr_num_heads * lr_head_dim
+
+    # SwiGLU intermediate 保持主模型 ratio, 圆整到 64 倍数
+    if cfg.lr_intermediate_size > 0:
+        lr_intermediate = cfg.lr_intermediate_size
+    else:
+        intermediate_ratio = main_intermediate / main_hidden
+        raw = int(lr_hidden_size * intermediate_ratio)
+        lr_intermediate = ((raw + 63) // 64) * 64   # 向上取整到 64 倍数
+
+    # 三个核心约束
+    if lr_num_heads * lr_head_dim != lr_hidden_size:
+        raise ValueError(
+            f"LR num_heads × head_dim ({lr_num_heads}×{lr_head_dim}={lr_num_heads*lr_head_dim}) "
+            f"!= hidden_size ({lr_hidden_size}). 调整 cfg.lr_num_heads / lr_head_dim / lr_hidden_size."
+        )
+    if lr_num_heads % lr_num_kv_heads != 0:
+        raise ValueError(
+            f"GQA 不齐: lr_num_heads ({lr_num_heads}) 不能被 lr_num_kv_heads ({lr_num_kv_heads}) 整除."
+        )
+    if main_layers % lr_num_layers != 0:
+        raise ValueError(
+            f"hidden sharing 不齐: main_layers ({main_layers}) 不能被 lr_num_layers ({lr_num_layers}) 整除. "
+            f"显式设 cfg.lr_num_layers 为 main_layers 的因子 ({main_layers} 的因子)."
+        )
+
+    print(f"  [build_latent_reasoner] auto-inferred from main config:")
+    print(f"    main: hidden={main_hidden} layers={main_layers} heads={main_heads}/{main_kv_heads} "
+          f"head_dim={main_head_dim} intermediate={main_intermediate}")
+    print(f"    LR:   hidden={lr_hidden_size} layers={lr_num_layers} heads={lr_num_heads}/{lr_num_kv_heads} "
+          f"head_dim={lr_head_dim} intermediate={lr_intermediate}")
+    print(f"    hidden sharing ratio = {main_layers // lr_num_layers} (每个 LR 层服务主模型 {main_layers // lr_num_layers} 层)")
 
     return LatentReasoner(
         main_hidden_size=main_hidden,
-        num_main_layers=num_main_layers,
-        hidden_size=cfg.lr_hidden_size or 896,
-        num_layers=cfg.lr_num_layers,
-        num_heads=cfg.lr_num_heads or 7,
-        num_kv_heads=cfg.lr_num_kv_heads or 1,
-        head_dim=cfg.lr_head_dim or 128,
-        intermediate_size=cfg.lr_intermediate_size or 4736,
+        num_main_layers=main_layers,
+        hidden_size=lr_hidden_size,
+        num_layers=lr_num_layers,
+        num_heads=lr_num_heads,
+        num_kv_heads=lr_num_kv_heads,
+        head_dim=lr_head_dim,
+        intermediate_size=lr_intermediate,
         max_latent_steps=cfg.max_latent_steps,
     )
 
