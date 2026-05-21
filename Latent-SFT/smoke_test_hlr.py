@@ -1,0 +1,487 @@
+"""
+HLR Smoke Test —— 严格检查 Hierarchical Latent Reasoner 各模块。
+
+分 7 个 stage，独立检测，任一失败立即报告 + traceback。
+
+  [1] HLRConfig 字段 / 默认值 / 一致性
+  [2] 小组件 (RoPE / GQA / SwiGLU / RMSNorm)
+  [3] LatentReasoner forward + KV cache 一致性 (incremental == initial)
+  [4] HLRDataset 加载 + collate_hlr
+  [5] compute_hlr_loss forward + backward + 梯度覆盖
+  [6] HLRInferenceEngine.generate
+  [7] LatentReasoner state_dict 保存 / 重新加载
+
+运行:
+  # 完整 (需要主模型 + profiled jsonl)
+  python smoke_test_hlr.py --model ../output_grpo/final_model --data ./data/profiled_cvrp20.jsonl
+
+  # 跳过需要主模型的阶段 (4-6)
+  python smoke_test_hlr.py --no_main_model
+
+退出码 0 = 所有 stage PASS; 非 0 = 至少一个 FAIL。
+"""
+
+import argparse
+import sys
+import traceback
+from functools import partial
+from pathlib import Path
+
+
+# ====================================================================
+# Stages
+# ====================================================================
+
+
+def stage_1_config():
+    from config import HLRConfig
+
+    cfg = HLRConfig()
+    expected = {
+        "lr_num_layers": 7,
+        "lr_hidden_size": 896,
+        "lr_num_heads": 7,
+        "lr_num_kv_heads": 1,
+        "lr_head_dim": 128,
+        "lr_intermediate_size": 4736,
+        "latent_compression_ratio": 4,
+    }
+    for field, exp in expected.items():
+        got = getattr(cfg, field)
+        assert got == exp, f"{field} = {got}, 期望 {exp}"
+
+    # 结构一致性检查
+    assert cfg.lr_num_heads * cfg.lr_head_dim == cfg.lr_hidden_size, \
+        f"GQA shape 不齐: heads({cfg.lr_num_heads}) × head_dim({cfg.lr_head_dim}) != hidden({cfg.lr_hidden_size})"
+    assert cfg.lr_num_heads % cfg.lr_num_kv_heads == 0, \
+        f"num_heads ({cfg.lr_num_heads}) 不能被 num_kv_heads ({cfg.lr_num_kv_heads}) 整除"
+
+    print(f"    config: layers={cfg.lr_num_layers}, hidden={cfg.lr_hidden_size}, "
+          f"GQA Q:KV={cfg.lr_num_heads}:{cfg.lr_num_kv_heads}, "
+          f"intermediate={cfg.lr_intermediate_size}, SwiGLU+RoPE")
+
+
+def stage_2_components():
+    import torch
+    from model import RotaryEmbedding, GQAAttention, SwiGLUFFN, SimpleRMSNorm
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"    device = {device}")
+
+    # ── RoPE: start_pos 区分 ──
+    rope = RotaryEmbedding(dim=128, max_position=128)
+    cos_a, sin_a = rope(seq_len=4, device=device, dtype=torch.float32, start_pos=0)
+    cos_b, sin_b = rope(seq_len=4, device=device, dtype=torch.float32, start_pos=2)
+    assert cos_a.shape == (4, 128) and sin_a.shape == (4, 128)
+    assert not torch.allclose(cos_a[0], cos_b[0]), "RoPE start_pos=0 vs 2 应该不同"
+    print(f"    RoPE [4,128] OK, start_pos 区分位置")
+
+    # ── RMSNorm: 输出 RMS ≈ 1 ──
+    norm = SimpleRMSNorm(896).to(device)
+    out = norm(torch.randn(2, 5, 896, device=device))
+    rms = out.float().pow(2).mean(-1).sqrt().mean().item()
+    assert 0.9 < rms < 1.1, f"RMSNorm 后 RMS={rms} 偏离 1"
+    print(f"    SimpleRMSNorm shape OK, RMS={rms:.3f}")
+
+    # ── SwiGLU ──
+    ffn = SwiGLUFFN(hidden_size=896, intermediate_size=4736).to(device)
+    out = ffn(torch.randn(2, 5, 896, device=device))
+    assert out.shape == (2, 5, 896)
+    print(f"    SwiGLU [2,5,896] OK")
+
+    # ── GQA initial forward ──
+    gqa = GQAAttention(hidden_size=896, num_heads=7, num_kv_heads=1, head_dim=128).to(device)
+    x = torch.randn(2, 4, 896, device=device)
+    cos, sin = rope(seq_len=4, device=device, dtype=torch.float32)
+    out, (k_cache, v_cache) = gqa(x, cos, sin)
+    assert out.shape == (2, 4, 896)
+    assert k_cache.shape == (2, 1, 4, 128), f"K cache shape: {k_cache.shape}"
+    assert v_cache.shape == (2, 1, 4, 128)
+    print(f"    GQA initial: out [2,4,896] cache [2,1,4,128] (GQA 7:1, unrepeated)")
+
+    # ── GQA incremental forward (KV 累积) ──
+    x_new = torch.randn(2, 1, 896, device=device)
+    cos2, sin2 = rope(seq_len=1, device=device, dtype=torch.float32, start_pos=4)
+    out2, (k2, v2) = gqa(x_new, cos2, sin2, past_kv=(k_cache, v_cache))
+    assert out2.shape == (2, 1, 896)
+    assert k2.shape == (2, 1, 5, 128), f"incremental K cache: {k2.shape}, 期望 [2,1,5,128]"
+    print(f"    GQA incremental: cache 4 → 5, mask 正确处理")
+
+
+def stage_3_latent_reasoner():
+    import torch
+    from model import LatentReasoner
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    lr = LatentReasoner(
+        main_hidden_size=3584,
+        num_main_layers=28,
+        hidden_size=896,
+        num_layers=7,
+        num_heads=7,
+        num_kv_heads=1,
+        head_dim=128,
+        intermediate_size=4736,
+    ).to(device)
+
+    n_params = sum(p.numel() for p in lr.parameters())
+    print(f"    LatentReasoner 参数: {n_params/1e6:.2f}M")
+    assert 100e6 < n_params < 130e6, f"参数量异常: {n_params/1e6:.2f}M (期望 100-130M)"
+
+    h_in = torch.randn(1, 3584, device=device)
+
+    # ── Initial forward k=5 ──
+    lr.eval()
+    with torch.no_grad():
+        hiddens_5, kv_5 = lr(h_in, k=5)
+
+    assert len(hiddens_5) == 7, f"layer_hiddens 长度: {len(hiddens_5)}"
+    for L in range(7):
+        assert hiddens_5[L].shape == (1, 5, 896), f"layer {L} hidden: {hiddens_5[L].shape}"
+    assert len(kv_5) == 7
+    for L in range(7):
+        kk, vv = kv_5[L]
+        assert kk.shape == (1, 1, 5, 128) and vv.shape == (1, 1, 5, 128)
+    print(f"    Initial k=5: 7 hiddens [1,5,896] + KV [1,1,5,128]")
+
+    # ── Incremental forward k=1, past=kv_5 ──
+    with torch.no_grad():
+        hiddens_inc, kv_inc = lr(h_in, k=1, past_kv=kv_5)
+    for L in range(7):
+        assert hiddens_inc[L].shape == (1, 1, 896)
+        kk, vv = kv_inc[L]
+        assert kk.shape == (1, 1, 6, 128), f"incremental layer {L} K: {kk.shape}"
+    print(f"    Incremental k=1: KV 累积到 6")
+
+    # ── 一致性: initial(k=6) vs initial(k=5) + incremental(k=1) ──
+    with torch.no_grad():
+        hiddens_6, _ = lr(h_in, k=6)
+    max_diff = 0.0
+    for L in range(7):
+        full_last = hiddens_6[L][:, -1, :].float()
+        inc_last = hiddens_inc[L][:, -1, :].float()
+        diff = (full_last - inc_last).abs().max().item()
+        max_diff = max(max_diff, diff)
+    print(f"    一致性 max diff (initial vs incremental) = {max_diff:.2e}")
+    threshold = 5e-3  # fp32 下应该接近 0; 浮点累计误差容忍
+    assert max_diff < threshold, f"训练/推理 forward 不一致: diff={max_diff:.4f} > {threshold}"
+
+    # ── project_for_main_layer: 同 LR 层 + 不同 layer_emb 应输出不同 hidden ──
+    proj_5 = lr.project_for_main_layer(hiddens_5, main_layer_idx=5)    # L_lr=1
+    proj_6 = lr.project_for_main_layer(hiddens_5, main_layer_idx=6)    # L_lr=1 (同 LR 层)
+    proj_27 = lr.project_for_main_layer(hiddens_5, main_layer_idx=27)  # L_lr=6
+    assert proj_5.shape == (1, 5, 3584)
+    same_lr_diff = (proj_5 - proj_6).abs().mean().item()
+    diff_lr_diff = (proj_5 - proj_27).abs().mean().item()
+    assert same_lr_diff > 1e-4, f"同 LR 层不同 layer_emb 应有差异 (layer_emb 没监督?), 差异={same_lr_diff}"
+    assert diff_lr_diff > same_lr_diff, "不同 LR 层应比同 LR 层差异更大"
+    print(f"    project_for_main_layer: 同 LR 层 layer_emb 差异={same_lr_diff:.4f}, "
+          f"跨 LR 层差异={diff_lr_diff:.4f}")
+
+
+def stage_4_dataset(args):
+    if not args.data or not Path(args.data).exists():
+        print(f"    ⚠ SKIP: --data 未提供或文件不存在 ({args.data})")
+        return None
+    if not args.model:
+        print(f"    ⚠ SKIP: --model 未提供 (需要 tokenizer)")
+        return None
+
+    from transformers import AutoTokenizer
+    from data_utils import HLRDataset, collate_hlr
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    if getattr(tokenizer, "add_bos_token", False):
+        tokenizer.add_bos_token = False
+    if tokenizer.pad_token_id is None or tokenizer.pad_token_id == tokenizer.eos_token_id:
+        tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
+    tokenizer.padding_side = "right"
+
+    dataset = HLRDataset(
+        args.data, tokenizer,
+        max_length=8192,
+        latent_compression_ratio=4,
+    )
+    assert len(dataset) > 0, "HLRDataset 加载 0 条样本"
+
+    # 找一条有 latent 段的样本作为检查样本
+    sample = None
+    n_with_latent = 0
+    for i in range(min(len(dataset), 20)):
+        s = dataset[i]
+        n_lat = sum(1 for seg in s.segments if seg.type == "latent")
+        if n_lat > 0 and sample is None:
+            sample = s
+        if n_lat > 0:
+            n_with_latent += 1
+    if sample is None:
+        sample = dataset[0]
+        print(f"    ⚠ 前 20 条都没 latent 段, 使用首条 (entropy 阈值可能偏严)")
+    else:
+        print(f"    前 20 条中 {n_with_latent} 条有 latent 段")
+
+    n_exp = sum(1 for s in sample.segments if s.type == "explicit")
+    n_lat = sum(1 for s in sample.segments if s.type == "latent")
+    n_sol = sum(1 for s in sample.segments if s.type == "solution")
+    print(f"    数据集: {len(dataset)} 条")
+    print(f"    样本 segments: {len(sample.segments)} 段 "
+          f"(explicit={n_exp}, latent={n_lat}, solution={n_sol})")
+    assert n_sol >= 1, "样本必须有 solution 段"
+
+    # collate
+    collate_fn = partial(collate_hlr, pad_token_id=tokenizer.pad_token_id)
+    batch = collate_fn([sample])
+    expected_keys = {"teacher_input_ids", "teacher_attention_mask",
+                     "teacher_labels", "prompt_ids", "segments"}
+    actual_keys = set(batch.keys())
+    missing = expected_keys - actual_keys
+    assert not missing, f"collate 缺字段: {missing}"
+    print(f"    collate_hlr 字段完整: {sorted(actual_keys)}")
+
+    return (tokenizer, dataset, sample, batch)
+
+
+def stage_5_loss(args, data_result):
+    if args.no_main_model or data_result is None:
+        print(f"    ⚠ SKIP: --no_main_model 或 stage 4 跳过了")
+        return None
+
+    import torch
+    from transformers import AutoModelForCausalLM
+    from peft import LoraConfig, get_peft_model
+    from model import build_latent_reasoner_from_main, compute_hlr_loss
+    from config import HLRConfig
+
+    tokenizer, dataset, sample, batch = data_result
+    cfg = HLRConfig()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    print(f"    加载主模型 {args.model} (bf16) ...")
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, torch_dtype=torch.bfloat16, trust_remote_code=True,
+    ).to(device)
+    if len(tokenizer) > model.get_input_embeddings().num_embeddings:
+        model.resize_token_embeddings(len(tokenizer))
+
+    peft_cfg = LoraConfig(
+        r=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, peft_cfg)
+    model.train()
+
+    latent_reasoner = build_latent_reasoner_from_main(model, cfg).to(device).to(torch.bfloat16)
+    latent_reasoner.train()
+    lr_n = sum(p.numel() for p in latent_reasoner.parameters())
+    print(f"    LatentReasoner: {lr_n/1e6:.2f}M params")
+
+    print(f"    forward + backward 单 sample ...")
+    total, t, s, a = compute_hlr_loss(
+        model=model,
+        latent_reasoner=latent_reasoner,
+        teacher_input_ids=batch["teacher_input_ids"],
+        teacher_attention_mask=batch["teacher_attention_mask"],
+        teacher_labels=batch["teacher_labels"],
+        prompt_ids=batch["prompt_ids"],
+        segments=batch["segments"],
+        alpha=1.0, beta=1.0, gamma=1.0,
+    )
+
+    for name, val in [("teacher_ce", t), ("student_ce", s), ("align_l1", a), ("total", total)]:
+        assert torch.isfinite(val).all(), f"{name} 是 NaN/Inf: {val}"
+        print(f"    {name} = {val.item():.4f}")
+
+    # Backward
+    total.backward()
+
+    # ── 梯度覆盖检查 ──
+    lr_total_params = sum(1 for p in latent_reasoner.parameters() if p.requires_grad)
+    lr_has_grad = sum(
+        1 for p in latent_reasoner.parameters()
+        if p.grad is not None and p.grad.abs().sum().item() > 0
+    )
+    assert lr_has_grad >= lr_total_params * 0.5, \
+        f"LR 梯度覆盖率过低: {lr_has_grad}/{lr_total_params}"
+    print(f"    LR 梯度: {lr_has_grad}/{lr_total_params} ({100*lr_has_grad/lr_total_params:.0f}%) 有非零梯度")
+
+    lora_total = sum(1 for n, p in model.named_parameters() if "lora_" in n and p.requires_grad)
+    lora_has_grad = sum(
+        1 for n, p in model.named_parameters()
+        if "lora_" in n and p.grad is not None and p.grad.abs().sum().item() > 0
+    )
+    print(f"    LoRA 梯度: {lora_has_grad}/{lora_total} 有非零梯度")
+    assert lora_has_grad >= lora_total * 0.5, f"LoRA 梯度覆盖率过低: {lora_has_grad}/{lora_total}"
+
+    # layer_emb 必须有梯度 (28 个对齐点的关键测试)
+    layer_emb_grad = latent_reasoner.layer_emb.weight.grad
+    assert layer_emb_grad is not None, "layer_emb.weight.grad is None"
+    nonzero_rows = (layer_emb_grad.abs().sum(dim=-1) > 0).sum().item()
+    print(f"    layer_emb 梯度: {nonzero_rows}/28 行有非零梯度")
+    assert nonzero_rows == 28, \
+        f"layer_emb 仅 {nonzero_rows}/28 行有梯度 (期望 28, 说明 align loss 没覆盖每层)"
+
+    return (model, latent_reasoner, tokenizer)
+
+
+def stage_6_inference(args, loss_result):
+    if loss_result is None:
+        print(f"    ⚠ SKIP: stage 5 没产出模型")
+        return
+
+    import torch
+    from inference import HLRInferenceEngine
+    from config import HLRConfig
+
+    model, latent_reasoner, tokenizer = loss_result
+
+    # 临时保存 latent_reasoner.pt 给 inference engine 加载
+    tmp_dir = Path("./smoke_test_tmp")
+    tmp_dir.mkdir(exist_ok=True)
+    lr_path = tmp_dir / "latent_reasoner.pt"
+    torch.save(latent_reasoner.state_dict(), lr_path)
+    print(f"    临时保存 latent_reasoner.pt 到 {lr_path}")
+
+    cfg = HLRConfig()
+    print(f"    初始化 HLRInferenceEngine (会重新加载主模型) ...")
+    engine = HLRInferenceEngine(
+        model_path=args.model,
+        latent_reasoner_path=str(lr_path),
+        cfg=cfg,
+        entropy_window=3,
+        max_latent_steps=8,
+    )
+
+    prompt = tokenizer.apply_chat_template(
+        [{"role": "system", "content": "You are a helpful assistant."},
+         {"role": "user", "content": "Briefly say hello."}],
+        tokenize=False, add_generation_prompt=True,
+    )
+
+    out_text, info = engine.generate(prompt, max_new_tokens=32, temperature=0.0)
+    assert isinstance(out_text, str)
+    assert info["num_tokens"] > 0
+    print(f"    generate: {info['num_tokens']} tokens, "
+          f"{info['latent_steps']} latent steps, "
+          f"entropy_history len={len(info['entropy_history'])}")
+    print(f"    输出 (前 80 字符): {out_text[:80]!r}")
+
+
+def stage_7_checkpoint():
+    import torch
+    from model import LatentReasoner
+
+    lr1 = LatentReasoner(
+        main_hidden_size=3584, num_main_layers=28,
+        hidden_size=896, num_layers=7, num_heads=7,
+        num_kv_heads=1, head_dim=128, intermediate_size=4736,
+    )
+    lr2 = LatentReasoner(
+        main_hidden_size=3584, num_main_layers=28,
+        hidden_size=896, num_layers=7, num_heads=7,
+        num_kv_heads=1, head_dim=128, intermediate_size=4736,
+    )
+
+    state = lr1.state_dict()
+    lr2.load_state_dict(state)
+
+    # 参数应该完全相同
+    mismatches = []
+    for (n1, p1), (n2, p2) in zip(lr1.named_parameters(), lr2.named_parameters()):
+        assert n1 == n2, f"param 名字不匹配: {n1} vs {n2}"
+        if not torch.allclose(p1, p2):
+            mismatches.append(n1)
+    assert not mismatches, f"加载后参数不一致: {mismatches}"
+    print(f"    state_dict 保存 / 重新加载 OK ({len(state)} 个键)")
+
+
+# ====================================================================
+# Driver
+# ====================================================================
+
+
+def main():
+    parser = argparse.ArgumentParser(description="HLR Smoke Test")
+    parser.add_argument("--model", type=str, default=None, help="主模型路径")
+    parser.add_argument("--data", type=str, default=None, help="profiled jsonl 路径")
+    parser.add_argument("--no_main_model", action="store_true",
+                        help="跳过需要主模型的阶段 (4-6)")
+    args = parser.parse_args()
+
+    print("=" * 72)
+    print("  HLR Smoke Test")
+    print("=" * 72)
+    if args.no_main_model:
+        print("  模式: 跳过主模型相关阶段 (stage 4-6)")
+    else:
+        print(f"  model: {args.model}")
+        print(f"  data:  {args.data}")
+    print()
+
+    results: dict[str, str] = {}
+
+    def _run(name, fn):
+        print(f"\n{name}")
+        try:
+            return fn(), "PASS"
+        except Exception as e:
+            print(f"    ✗ FAIL: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            return None, f"FAIL ({type(e).__name__})"
+
+    # Stage 1
+    _, results["[1] HLRConfig"] = _run("[1] HLRConfig 字段", stage_1_config)
+
+    # Stage 2
+    _, results["[2] 小组件"] = _run("[2] 小组件 (RoPE/GQA/SwiGLU/RMSNorm)", stage_2_components)
+
+    # Stage 3
+    _, results["[3] LatentReasoner"] = _run(
+        "[3] LatentReasoner forward + KV consistency", stage_3_latent_reasoner
+    )
+
+    # Stage 4 (依赖 args)
+    data_result, status = _run("[4] HLRDataset + collate", lambda: stage_4_dataset(args))
+    results["[4] HLRDataset"] = status
+
+    # Stage 5 (依赖 stage 4 输出)
+    loss_result, status = _run(
+        "[5] compute_hlr_loss forward+backward",
+        lambda: stage_5_loss(args, data_result),
+    )
+    results["[5] compute_hlr_loss"] = status
+
+    # Stage 6 (依赖 stage 5)
+    _, results["[6] HLRInferenceEngine"] = _run(
+        "[6] HLRInferenceEngine.generate", lambda: stage_6_inference(args, loss_result)
+    )
+
+    # Stage 7
+    _, results["[7] checkpoint"] = _run(
+        "[7] LatentReasoner state_dict 保存/加载", stage_7_checkpoint
+    )
+
+    # 汇总
+    print("\n" + "=" * 72)
+    print("  Summary")
+    print("=" * 72)
+    all_pass = True
+    for name, status in results.items():
+        marker = "✓" if status == "PASS" else "✗"
+        print(f"  {marker} {name:35s} {status}")
+        if status != "PASS" and "SKIP" not in status:
+            all_pass = False
+
+    print()
+    if all_pass:
+        print("  Smoke test ALL PASS ✓")
+        sys.exit(0)
+    else:
+        print("  Smoke test HAS FAILURES ✗")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -261,3 +261,242 @@ def collate_codi(batch: list[CODISample], pad_token_id: int):
         "latent_positions": [s.latent_positions for s in batch],
         "align_pairs": [s.align_pairs for s in batch],
     }
+
+
+# ====================================================================
+# Hierarchical Latent Reasoner (HLR) — 分段数据结构
+# ====================================================================
+#
+# 与 CODISample 的关键差异:
+#   - student 序列不再平铺，而是拆成 segments 列表
+#   - latent 段没有 token id，只记录 k (latent 数) 和 teacher_align_pos
+#   - 训练时 train.py / model 的 loss fn 按 segments 顺序流水 forward
+#
+# Phase 1 限制: collate 强制 batch_size=1，不做跨样本 padding。
+
+
+@dataclass
+class HLRSegment:
+    """单个段：explicit / latent / solution。"""
+    type: str                                # "explicit" | "latent" | "solution"
+    ids: torch.Tensor | None = None          # explicit/solution: token ids
+    labels: torch.Tensor | None = None       # explicit/solution: labels (-100 屏蔽)
+    k: int | None = None                     # latent: 要生成的 latent 数
+    teacher_align_pos: int | None = None     # latent: 对齐到 teacher 的位置 (绝对索引)
+
+
+@dataclass
+class HLRSample:
+    teacher_input_ids: torch.Tensor
+    teacher_labels: torch.Tensor
+    prompt_ids: torch.Tensor                 # 单独存，方便主模型分段 forward
+    segments: list[HLRSegment]
+
+
+class HLRDataset(Dataset):
+    """
+    分段构造 HLR 训练样本。
+
+    Teacher (沿用 CODI 路径)：
+        prompt + <think>完整CoT</think> + solution + EOS
+        labels 只在 solution 区间计 CE
+
+    Student segments:
+        [prompt_ids]   ── 不放进 segments，单独保存
+        然后依次:
+          explicit (CoT 段前部分)
+          latent   (k_1)
+          explicit (段间)
+          latent   (k_2)
+          ...
+          solution (</think>\n + solution + EOS)
+    """
+
+    def __init__(self, data_path: str, tokenizer,
+                 max_length: int = 8192,
+                 latent_compression_ratio: int = 4,
+                 filter_problems=None, filter_sizes=None):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.compression_ratio = latent_compression_ratio
+        self.samples = []
+
+        skipped = 0
+        with open(data_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    skipped += 1
+                    continue
+
+                if filter_problems and r.get("problem_type") not in filter_problems:
+                    continue
+                if filter_sizes and r.get("n") not in filter_sizes:
+                    continue
+
+                output = r.get("output", "")
+                if not output or not output.strip():
+                    skipped += 1
+                    continue
+
+                sample = self._build_sample(r)
+                if sample is not None:
+                    self.samples.append(sample)
+
+        if skipped:
+            print(f"  跳过 {skipped} 条无效记录")
+        print(f"  成功加载 {len(self.samples)} 条 HLR 训练样本")
+
+    def _build_sample(self, record):
+        tokenizer = self.tokenizer
+
+        orig_system = strip_posthoc(record["prompt"]["system"], _POSTHOC_SYSTEM_MARKER)
+        orig_user = strip_posthoc(record["prompt"]["user"], _POSTHOC_USER_MARKER)
+        output = record["output"]
+
+        prompt_text = tokenizer.apply_chat_template(
+            [{"role": "system", "content": orig_system},
+             {"role": "user", "content": orig_user}],
+            tokenize=False, add_generation_prompt=True,
+        )
+        if not prompt_text.rstrip().endswith("<think>"):
+            prompt_text += "<think>\n"
+
+        output_stripped = output.lstrip()
+        if output_stripped.startswith("<think>"):
+            output_stripped = output_stripped[len("<think>"):].lstrip("\n")
+
+        think_end = output_stripped.find("</think>")
+        if think_end == -1:
+            return None
+
+        cot_text = output_stripped[:think_end]
+        solution_text = output_stripped[think_end + len("</think>"):].lstrip("\n")
+        if not solution_text.strip():
+            return None
+
+        # ── Teacher 序列 (沿用 CODI 处理) ──
+        teacher_text = (
+            prompt_text + cot_text + "</think>\n"
+            + solution_text + tokenizer.eos_token
+        )
+        teacher_ids = tokenizer.encode(teacher_text, add_special_tokens=False)
+        if len(teacher_ids) > self.max_length:
+            return None
+
+        think_close_search = tokenizer.encode("</think>", add_special_tokens=False)
+        tc_len = len(think_close_search)
+        teacher_solution_align = None
+        for idx in range(len(teacher_ids) - tc_len, -1, -1):
+            if teacher_ids[idx : idx + tc_len] == think_close_search:
+                teacher_solution_align = idx + tc_len
+                break
+        if teacher_solution_align is None or teacher_solution_align >= len(teacher_ids):
+            return None
+
+        teacher_label_start = teacher_solution_align + 1
+        teacher_labels = [-100] * teacher_label_start + teacher_ids[teacher_label_start:]
+
+        # ── Student 分段构造 ──
+        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+        cot_ids = tokenizer.encode(cot_text, add_special_tokens=False)
+        think_close_nl = tokenizer.encode("</think>\n", add_special_tokens=False)
+        solution_ids = tokenizer.encode(
+            solution_text + tokenizer.eos_token, add_special_tokens=False
+        )
+
+        teacher_cot_start = len(prompt_ids)
+        latent_meta = record.get("latent_segments", [])
+
+        segments: list[HLRSegment] = []
+        cot_cursor = 0
+
+        for seg in latent_meta:
+            seg_start = max(seg["start"], cot_cursor)
+            seg_end = seg["end"]
+            if seg_end < seg_start:
+                continue
+            orig_len = seg_end - seg_start + 1
+            k = max(1, math.ceil(orig_len / self.compression_ratio))
+
+            # 段前显式
+            if seg_start > cot_cursor:
+                explicit_ids = cot_ids[cot_cursor:seg_start]
+                segments.append(HLRSegment(
+                    type="explicit",
+                    ids=torch.tensor(explicit_ids, dtype=torch.long),
+                    labels=torch.tensor(explicit_ids, dtype=torch.long),
+                ))
+
+            teacher_align_pos = teacher_cot_start + seg_end
+            if teacher_align_pos >= len(teacher_ids):
+                # teacher 序列在 max_length 处被截断, latent 段对齐 anchor 不可用
+                # → align loss 不准, 整条样本丢弃 (这种情况在 max_length=8192 下很少触发)
+                return None
+            segments.append(HLRSegment(
+                type="latent",
+                k=k,
+                teacher_align_pos=teacher_align_pos,
+            ))
+
+            cot_cursor = seg_end + 1
+
+        # CoT 尾部显式
+        if cot_cursor < len(cot_ids):
+            remaining = cot_ids[cot_cursor:]
+            segments.append(HLRSegment(
+                type="explicit",
+                ids=torch.tensor(remaining, dtype=torch.long),
+                labels=torch.tensor(remaining, dtype=torch.long),
+            ))
+
+        # solution 段: </think>\n 不计 loss，solution + EOS 计 loss
+        sol_ids = think_close_nl + solution_ids
+        sol_labels = [-100] * len(think_close_nl) + solution_ids
+        segments.append(HLRSegment(
+            type="solution",
+            ids=torch.tensor(sol_ids, dtype=torch.long),
+            labels=torch.tensor(sol_labels, dtype=torch.long),
+        ))
+
+        # 粗略长度上限检查 (prompt + 所有段实际占位)
+        total_len = len(prompt_ids) + sum(
+            (s.ids.size(0) if s.ids is not None else (s.k or 0))
+            for s in segments
+        )
+        if total_len > self.max_length:
+            return None
+
+        return HLRSample(
+            teacher_input_ids=torch.tensor(teacher_ids, dtype=torch.long),
+            teacher_labels=torch.tensor(teacher_labels, dtype=torch.long),
+            prompt_ids=torch.tensor(prompt_ids, dtype=torch.long),
+            segments=segments,
+        )
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        return self.samples[idx]
+
+
+def collate_hlr(batch: list[HLRSample], pad_token_id: int):
+    """
+    Phase 1: 强制 batch_size=1，不做跨样本 padding。
+    返回字典里的 segments / prompt_ids 直接传给 model 的分段 forward。
+    """
+    assert len(batch) == 1, "HLR Phase 1 仅支持 per_device_batch_size=1"
+    sample = batch[0]
+
+    return {
+        "teacher_input_ids": sample.teacher_input_ids.unsqueeze(0),
+        "teacher_attention_mask": torch.ones_like(sample.teacher_input_ids).unsqueeze(0),
+        "teacher_labels": sample.teacher_labels.unsqueeze(0),
+        "prompt_ids": sample.prompt_ids,
+        "segments": sample.segments,
+    }

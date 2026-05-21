@@ -51,15 +51,47 @@ def compute_entropies(model, input_ids):
     return entropies
 
 
-def detect_latent_segments(entropies, window, min_segment):
+def detect_latent_segments(
+    entropies,
+    window,
+    min_segment,
+    max_segment,
+    quantile=0.5,
+    cooldown=24,
+):
     """
-    基于熵趋势检测 latent 段。
+    检测可压缩的低熵段 (确定性 / 机械重复). 训练侧与推理侧规则镜像一致.
 
-    连续 window 步上升 → 进入 latent（entry = 上升起点）
-    连续 window 步下降 → 退出 latent（exit = 下降终点）
-    段之间不重叠。
+    进入 latent (低熵段):
+      1. 连续 window 步熵下降
+      2. 当前熵 < quantile 百分位 (默认 50 分位数 = 中位数)
+      3. 距上次段结束至少 cooldown 个 token (防抖)
+    退出 latent:
+      1. 连续 window 步熵上升  OR
+      2. 段长 >= max_segment (强制切断)
+    段长检查:
+      段长 >= min_segment 才保留 (太短的段没有压缩价值)
+
+    Args:
+        entropies: list[float], CoT 区间逐 token 熵
+        window:    趋势窗口 (默认 3)
+        min_segment: 段长下限 (token 数), 一般 = min_latent_steps × compression_ratio
+        max_segment: 段长上限, 一般 = max_latent_steps × compression_ratio
+        quantile:  绝对熵阈值的分位数 (0..1)
+        cooldown:  段间最小间隔 (token 数)
+
+    Returns:
+        list[{"start": int, "end": int}]  inclusive 区间
     """
     n = len(entropies)
+    if n == 0:
+        return []
+
+    # 该 CoT 自己的熵分位数作为绝对阈值
+    sorted_e = sorted(entropies)
+    q_idx = min(int(len(sorted_e) * quantile), len(sorted_e) - 1)
+    threshold = sorted_e[q_idx]
+
     segments = []
     in_latent = False
     entry = None
@@ -67,30 +99,39 @@ def detect_latent_segments(entropies, window, min_segment):
 
     for i in range(window, n):
         if not in_latent:
-            rising = all(
-                entropies[i - window + j] < entropies[i - window + j + 1]
+            falling = all(
+                entropies[i - window + j] > entropies[i - window + j + 1]
                 for j in range(window)
             )
-            if rising:
+            below_threshold = entropies[i] < threshold
+            cooldown_ok = (last_exit < 0) or (i - last_exit) >= cooldown
+
+            if falling and below_threshold and cooldown_ok:
                 candidate = i - window
                 if candidate > last_exit:
                     entry = candidate
                     in_latent = True
         else:
-            falling = all(
-                entropies[i - window + j] > entropies[i - window + j + 1]
+            rising = all(
+                entropies[i - window + j] < entropies[i - window + j + 1]
                 for j in range(window)
             )
-            if falling:
-                if (i - entry + 1) >= min_segment:
+            force_exit = (i - entry + 1) >= max_segment
+
+            if rising or force_exit:
+                seg_len = i - entry + 1
+                if seg_len >= min_segment:
                     segments.append({"start": entry, "end": i})
                     last_exit = i
                 in_latent = False
                 entry = None
 
+    # 收尾: 末尾未退出的段
     if in_latent and entry is not None:
-        if (n - entry) >= min_segment:
-            segments.append({"start": entry, "end": n - 1})
+        seg_len = n - entry
+        if seg_len >= min_segment:
+            end = min(entry + max_segment - 1, n - 1)
+            segments.append({"start": entry, "end": end})
 
     return segments
 
@@ -172,7 +213,12 @@ def profile_dataset(args):
         cot_entropies = entropies[cot_start - 1 : cot_start + len(cot_ids) - 1]
 
         segments = detect_latent_segments(
-            cot_entropies, args.entropy_window, args.min_segment
+            cot_entropies,
+            window=args.entropy_window,
+            min_segment=args.min_segment,
+            max_segment=args.max_segment,
+            quantile=args.entropy_quantile,
+            cooldown=args.cooldown,
         )
 
         item = {**r, "latent_segments": segments}
@@ -196,15 +242,27 @@ def profile_dataset(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Entropy profiling for mixed latent/explicit training"
+        description="Entropy profiling for HLR training "
+                    "(标注低熵确定性段, 训练侧规则与 inference.py 镜像一致)"
     )
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--data", type=str, required=True)
     parser.add_argument("--output", type=str, required=True)
-    parser.add_argument("--entropy_window", type=int, default=3)
-    parser.add_argument("--min_segment", type=int, default=8)
     parser.add_argument("--max_length", type=int, default=8192)
     parser.add_argument("--save_entropies", action="store_true")
+
+    # Latent 进出 trigger (与 HLRConfig 默认值对齐)
+    parser.add_argument("--entropy_window", type=int, default=3,
+                        help="趋势窗口")
+    parser.add_argument("--entropy_quantile", type=float, default=0.5,
+                        help="分位数阈值 (默认 0.5 = 中位数), 当前熵 < 该分位数才算低熵")
+    parser.add_argument("--min_segment", type=int, default=12,
+                        help="段长下限 (token 数) = min_latent_steps × compression_ratio (默认 3×4=12)")
+    parser.add_argument("--max_segment", type=int, default=32,
+                        help="段长上限 (token 数) = max_latent_steps × compression_ratio (默认 8×4=32)")
+    parser.add_argument("--cooldown", type=int, default=24,
+                        help="段间最小间隔 (显式 token 数, 默认 24 ≈ 6 latent step)")
+
     args = parser.parse_args()
 
     try:
