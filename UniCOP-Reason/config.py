@@ -32,13 +32,17 @@ class Config:
 
     # ── GRPO 训练 ────────────────────────────────────────────────────
     # num_generations=8: 朴素扩量，缓解 gradient starvation（替代 DAPO Dynamic Sampling）
-    # max_completion_length=4096: 平衡显存与截断率，不够再调
     num_generations: int               = 8
-    # max_prompt_length=1024: Qwen3 tokenizer BPE 比 R1 拆得更细, smoke test
-    # 实测 CVRP-10 prompt 在 Qwen3 上是 921 token (R1 约 700), 768 会截掉关键
-    # 信息. 1024 对两个模型都安全, R1 prompt 短不会触发上限.
-    max_prompt_length: int             = 1024
-    max_completion_length: int         = 4096
+    # ── prompt / completion 长度按 token ratio 适配 Qwen3 ──
+    # Qwen3 tokenizer BPE 比 R1 拆得更细 (smoke test 实测 CVRP-10 prompt 921 vs
+    # R1 估 ~700, ratio ≈ 1.32). 为保 R1 → Qwen3 切换时实际 output capacity
+    # 不缩水, 按 ratio 等比放大:
+    #   max_prompt_length:     768 → 1280 (CVRP-20 prompt 留 buffer)
+    #   max_completion_length: 4096 → 6144 (Qwen3 等价于 R1 4096 token 内容)
+    # 两个值对 R1 path 无副作用 (R1 prompt 短不触发上限).
+    # vLLM 端 max_model_len 同步 5120 → 8192 (1280 + 6144 + chat overhead).
+    max_prompt_length: int             = 1280
+    max_completion_length: int         = 6144
     learning_rate: float               = 1e-5   # GRPO + LoRA rank 64 推荐 5e-6~2e-5 (原 1e-6 过低,SFT 已升到 1e-4)
                                                 # 6 卡 effective batch 192 (vs 4 卡 128, +50%) + grad_norm 长期 ~0.1 远低于 clip 阈值
                                                 # 说明信号空间还有, 从 5e-6 上调到 1e-5 (~2x, 比 linear scaling 1.5x 略激进)

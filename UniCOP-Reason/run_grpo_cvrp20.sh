@@ -77,7 +77,7 @@ OUTPUT_DIR_BASE="$WORK_DIR/output"
 # vLLM server 参数 (与 auto_train.sh 对齐)
 VLLM_PORT=8000
 VLLM_GPU_MEM_UTIL=0.85
-VLLM_MAX_MODEL_LEN=6144
+VLLM_MAX_MODEL_LEN=8192
 VLLM_DTYPE=bfloat16
 VLLM_NGRAM_SIZE=0                # 0 = 禁用 NoRepeatNgram (vllm_serve_ngram.py:77 检查 >1 才注入)
 VLLM_STARTUP_TIMEOUT=300
