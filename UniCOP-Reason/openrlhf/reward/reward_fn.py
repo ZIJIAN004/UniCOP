@@ -40,7 +40,10 @@ _PROBLEM_TYPE: str = os.environ.get("PROBLEM_TYPE", "tsp")
 _PROBLEM_SIZE: int = int(os.environ.get("PROBLEM_SIZE", "10"))
 
 _INSTANCE_MARKER_RE = re.compile(r"\[\[instance_id:([^\]]+)\]\]")
-_ASSISTANT_MARKERS = ["<|Assistant|>", "<|assistant|>", "<｜Assistant｜>"]
+_ASSISTANT_MARKERS = [
+    "<|Assistant|>", "<|assistant|>", "<｜Assistant｜>",  # R1-Distill chat template
+    "<|im_start|>assistant",                              # Qwen3 chat template
+]
 
 
 def _ensure_loaded():

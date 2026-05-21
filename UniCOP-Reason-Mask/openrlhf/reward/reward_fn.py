@@ -40,7 +40,10 @@ _PROBLEM_TYPE: str = os.environ.get("PROBLEM_TYPE", "tsp")
 _PROBLEM_SIZE: int = int(os.environ.get("PROBLEM_SIZE", "10"))
 
 _INSTANCE_MARKER_RE = re.compile(r"\[\[instance_id:([^\]]+)\]\]")
-_ASSISTANT_MARKERS = ["<|Assistant|>", "<|assistant|>", "<｜Assistant｜>"]
+_ASSISTANT_MARKERS = [
+    "<|Assistant|>", "<|assistant|>", "<｜Assistant｜>",  # R1-Distill chat template
+    "<|im_start|>assistant",                              # Qwen3 chat template
+]
 
 
 def _ensure_loaded():
@@ -76,8 +79,13 @@ def _extract_completion(query: str, prompt: str) -> str:
         idx = query.rfind(marker)
         if idx >= 0:
             tail = query[idx + len(marker):]
-            if tail.startswith("<think>\n"):
-                tail = tail[len("<think>\n"):]
+            # chat template 自动 prepend <think>: R1-Distill 和 Qwen3-Thinking
+            # 都自动在 assistant header 后加 `<think>\n`. lstrip 容忍前导空白/换行差异.
+            _lt = tail.lstrip()
+            if _lt.startswith("<think>"):
+                tail = _lt[len("<think>"):]
+                if tail.startswith("\n"):
+                    tail = tail[1:]
             return tail
     return query
 

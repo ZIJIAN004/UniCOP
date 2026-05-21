@@ -83,10 +83,14 @@ case "$BASE_MODEL_TYPE" in
         ;;
     qwen3_thinking)
         BASE_MODEL="$BASE_MODEL_QWEN3"
-        # vLLM >=0.9 用 --reasoning-parser qwen3 解析 <think>...</think>。
-        # 注意: 启用后 content 只含最终答案, thinking 在 message.reasoning_content,
+        # Qwen3-4B-Thinking-2507 官方推荐 --reasoning-parser deepseek_r1
+        # (model card 原文: `--enable-reasoning --reasoning-parser deepseek_r1`)。
+        # 原因: 2507 系列的 chat_template 自动 prepend <think>, 模型只输出
+        # </think>...content, 跟 R1 行为一致, qwen3 parser 是给老 Qwen3 base
+        # (有 <think> open tag 自己输出) 用的, 2507 用 qwen3 parser 会解析失败。
+        # 启用后 thinking 段进 message.reasoning_content, 最终答案进 message.content,
         # rationalize_solutions.py 的 call_vllm 已适配。
-        VLLM_REASONING_FLAGS="$_VLLM_COMMON_FLAGS --reasoning-parser qwen3"
+        VLLM_REASONING_FLAGS="$_VLLM_COMMON_FLAGS --reasoning-parser deepseek_r1"
         # Qwen3-4B-Thinking-2507 官方推荐采样参数
         GEN_TEMPERATURE="0.6"
         GEN_TOP_P="0.95"
