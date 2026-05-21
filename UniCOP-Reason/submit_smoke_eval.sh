@@ -2,7 +2,6 @@
 #SBATCH --qos normal
 #SBATCH --gpus=1
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason/smoke_eval_%j.log
-#SBATCH --time=00:45:00
 
 # evaluate.py 兼容性 smoke test (Qwen3-Thinking)
 # 8 个层面: tokenizer.decode / chat_template / generate / 长度 / 结构 / token 残留 / parse / 采样

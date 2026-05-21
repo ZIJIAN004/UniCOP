@@ -2,7 +2,6 @@
 #SBATCH --qos normal
 #SBATCH --gpus=1
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/smoke_qwen3_%j.log
-#SBATCH --time=00:30:00
 
 # Smoke test for Qwen3-4B-Thinking-2507 migration
 # - Offline 11 sections (tokenizer / chat_template / labels mask / 思维链是否进 loss / ...)

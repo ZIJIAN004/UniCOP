@@ -2,7 +2,6 @@
 #SBATCH --qos normal
 #SBATCH --gpus=1
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/sft_qwen3_test_%j.log
-#SBATCH --time=02:00:00
 
 # Stage 2 SFT — Qwen3-4B-Thinking 测试跑: 单卡 / 1 epoch / chains_template_cvrp20
 # 用于在跑 full 之前确认 pipeline 端到端通顺(数据加载 / template / labels mask /

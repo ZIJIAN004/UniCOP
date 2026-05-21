@@ -2,7 +2,6 @@
 #SBATCH --qos large
 #SBATCH --gpus=4
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/sft_qwen3_full_%j.log
-#SBATCH --time=72:00:00
 
 # Stage 2 SFT — Qwen3-4B-Thinking 一体化: 训练 → merge → eval
 #   Step 1: 4 GPU ZeRO-2 SFT (3 epoch, 全量数据)
