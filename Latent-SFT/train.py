@@ -347,6 +347,37 @@ def train_hlr(cfg: HLRConfig):
     if len(tokenizer) > model.get_input_embeddings().num_embeddings:
         model.resize_token_embeddings(len(tokenizer))
 
+    # ── Auto-rebuild profiled jsonl (用户没传 --data 时强制重新构造) ──
+    # 在 LoRA 包装 / gradient checkpointing 之前用 base model 跑 entropy profile.
+    # 这样保证训练数据跟当前用的基座模型的 chat_template / tokenizer 严格一致.
+    if cfg.auto_rebuild_data:
+        if accelerator.is_main_process:
+            from entropy_profile import auto_profile_inplace
+            print(f"\n[auto-rebuild] 重新构造 profiled jsonl ...")
+            print(f"  原始数据: {cfg.raw_chains_path}")
+            print(f"  输出:     {cfg.data_path}")
+            device = accelerator.device
+            model = model.to(device)
+            min_seg = cfg.min_latent_steps * cfg.latent_compression_ratio
+            max_seg = cfg.max_latent_steps * cfg.latent_compression_ratio
+            auto_profile_inplace(
+                model=model,
+                tokenizer=tokenizer,
+                raw_data_path=cfg.raw_chains_path,
+                output_path=cfg.data_path,
+                entropy_window=cfg.entropy_window,
+                entropy_quantile=cfg.entropy_quantile,
+                min_segment=min_seg,
+                max_segment=max_seg,
+                cooldown=cfg.latent_cooldown,
+                max_length=cfg.max_length,
+                filter_problems=cfg.filter_problems,
+                filter_sizes=cfg.filter_sizes,
+            )
+            # 移回 CPU, 让 accelerator.prepare 自己决定 device 放置
+            model = model.cpu()
+        accelerator.wait_for_everyone()
+
     if cfg.gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if hasattr(model, "enable_input_require_grads"):
@@ -570,6 +601,13 @@ def main():
         if args.latent_reasoner_lr is not None: cfg.latent_reasoner_lr = args.latent_reasoner_lr
         if args.lr_num_layers is not None: cfg.lr_num_layers = args.lr_num_layers
         if args.lr_hidden_size is not None: cfg.lr_hidden_size = args.lr_hidden_size
+        # 用户没显式传 --data → 强制从原始 chains 重新构造 profiled jsonl
+        # (避免用过时数据 / 跨基座数据)
+        if args.data is None:
+            cfg.auto_rebuild_data = True
+            print("⚠ 未指定 --data, 训练前会用 base model 重新跑 entropy profile")
+            print(f"   原始 chains: {cfg.raw_chains_path}")
+            print(f"   输出 profiled: {cfg.data_path}")
     else:
         cfg = LatentSFTConfig()
         if args.latent_lr is not None: cfg.latent_lr = args.latent_lr

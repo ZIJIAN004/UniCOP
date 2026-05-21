@@ -136,6 +136,126 @@ def detect_latent_segments(
     return segments
 
 
+@torch.no_grad()
+def auto_profile_inplace(
+    model,
+    tokenizer,
+    raw_data_path: str,
+    output_path: str,
+    entropy_window: int = 3,
+    entropy_quantile: float = 0.5,
+    min_segment: int = 12,
+    max_segment: int = 32,
+    cooldown: int = 24,
+    max_length: int = 8192,
+    save_entropies: bool = False,
+    filter_problems=None,
+    filter_sizes=None,
+):
+    """
+    train_hlr 内联版: 用已加载的 model + tokenizer 跑 entropy profile, 不重新加载.
+
+    用于 cfg.auto_rebuild_data=True 时, train_hlr 启动时把原始 chains jsonl 转成 profiled jsonl.
+    复用主模型避免 subprocess 二次加载 ~15B 模型.
+
+    输出格式跟 profile_dataset 一致: 原 record 附加 latent_segments 字段写回 output_path.
+    """
+    import os
+    model.eval()
+
+    records = []
+    with open(raw_data_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if filter_problems and r.get("problem_type") not in filter_problems:
+                continue
+            if filter_sizes and r.get("n") not in filter_sizes:
+                continue
+            records.append(r)
+
+    results = []
+    skipped = 0
+
+    for r in tqdm(records, desc="auto entropy profile"):
+        output = r.get("output", "")
+        if not output or not output.strip():
+            skipped += 1
+            continue
+
+        orig_system = _strip_posthoc(r["prompt"]["system"], _POSTHOC_SYSTEM_MARKER)
+        orig_user = _strip_posthoc(r["prompt"]["user"], _POSTHOC_USER_MARKER)
+
+        prompt_text = tokenizer.apply_chat_template(
+            [{"role": "system", "content": orig_system},
+             {"role": "user", "content": orig_user}],
+            tokenize=False, add_generation_prompt=True,
+        )
+        if not prompt_text.rstrip().endswith("<think>"):
+            prompt_text += "<think>\n"
+
+        output_stripped = output.lstrip()
+        if output_stripped.startswith("<think>"):
+            output_stripped = output_stripped[len("<think>"):].lstrip("\n")
+        think_end = output_stripped.find("</think>")
+        if think_end == -1:
+            skipped += 1
+            continue
+        cot_text = output_stripped[:think_end]
+        if not output_stripped[think_end + len("</think>"):].strip():
+            skipped += 1
+            continue
+
+        teacher_text = prompt_text + output_stripped + tokenizer.eos_token
+        teacher_ids = tokenizer.encode(teacher_text, add_special_tokens=False)
+        if len(teacher_ids) > max_length:
+            skipped += 1
+            continue
+
+        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+        cot_ids = tokenizer.encode(cot_text, add_special_tokens=False)
+        if len(cot_ids) < min_segment:
+            results.append({**r, "latent_segments": []})
+            continue
+
+        cot_start = len(prompt_ids)
+        input_tensor = torch.tensor([teacher_ids], device=model.device)
+        entropies = compute_entropies(model, input_tensor)
+        cot_entropies = entropies[cot_start - 1 : cot_start + len(cot_ids) - 1]
+
+        segments = detect_latent_segments(
+            cot_entropies,
+            window=entropy_window,
+            min_segment=min_segment,
+            max_segment=max_segment,
+            quantile=entropy_quantile,
+            cooldown=cooldown,
+        )
+
+        item = {**r, "latent_segments": segments}
+        if save_entropies:
+            item["cot_entropies"] = [round(e, 4) for e in cot_entropies]
+        results.append(item)
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        for item in results:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+    total_segs = sum(len(r["latent_segments"]) for r in results)
+    with_latent = sum(1 for r in results if r["latent_segments"])
+    print(f"  [auto-profile] {len(results)} 有效 / {skipped} 跳过")
+    print(f"  含 latent 段: {with_latent}/{len(results)}, 总段数: {total_segs}")
+    print(f"  写入: {output_path}")
+
+    return len(results), skipped
+
+
 def profile_dataset(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
@@ -189,10 +309,9 @@ def profile_dataset(args):
             skipped += 1
             continue
 
-        teacher_text = (
-            prompt_text + cot_text + "</think>\n"
-            + solution_text + tokenizer.eos_token
-        )
+        # Distill Stage 2 风原样拼接: prompt + output_stripped + eos
+        # output_stripped 已剥重复 <think>, 仍含 </think> + 原始换行 + solution
+        teacher_text = prompt_text + output_stripped + tokenizer.eos_token
         teacher_ids = tokenizer.encode(teacher_text, add_special_tokens=False)
 
         if len(teacher_ids) > args.max_length:

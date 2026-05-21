@@ -88,6 +88,10 @@ class HLRConfig:
 
     # ── 数据 ──
     data_path: str = "./data/profiled_cvrp20.jsonl"
+    raw_chains_path: str = "../UniCOP-Distill/data/chains_template_cvrp20.jsonl"
+    auto_rebuild_data: bool = False        # train.py main() 检测到 args.data is None 时置 True,
+                                            # train_hlr 启动时用 base model 跑 entropy profile
+                                            # 覆盖 data_path, 确保数据与本次训练用的基座一致
     filter_problems: list[str] = field(default_factory=lambda: ["cvrp"])
     filter_sizes: list[int] = field(default_factory=lambda: [20])
     max_length: int = 8192

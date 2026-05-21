@@ -38,6 +38,11 @@ cd Latent-SFT
 # $BASE_MODEL 由 paths.sh 根据 BASE_MODEL_TYPE 派生
 MODEL_PATH="${HLR_MODEL:-$BASE_MODEL}"
 DATA_PATH="${HLR_DATA:-./data/profiled_cvrp20.jsonl}"
+# profiled jsonl 不存在时 smoke test 自动降级到 stage 1-3 + 7;
+# 要跑完整 7 stage, 先在 zhuoyi 上手动跑一次:
+#   python train.py --hlr   (会用 auto_rebuild_data 把 chains_template_cvrp20.jsonl 转成 profiled)
+# 或直接调:
+#   python entropy_profile.py --model $BASE_MODEL --data ../UniCOP-Distill/data/chains_template_cvrp20.jsonl --output ./data/profiled_cvrp20.jsonl
 
 echo "============================================================"
 echo "  HLR Smoke Test"

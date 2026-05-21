@@ -352,11 +352,21 @@ class HLRDataset(Dataset):
         print(f"  成功加载 {len(self.samples)} 条 HLR 训练样本")
 
     def _build_sample(self, record):
+        """
+        数据处理对齐 UniCOP-Distill/stage2_reasoning/train_sft_stage2.py 的 load_sft_dataset:
+          - strip_posthoc 剥后验标记 (template 数据无标记时穿透)
+          - chat_template + add_generation_prompt, fallback 补 <think>\\n
+          - output 剥重复 <think>, 余下原样保留 (不再 hardcode </think>\\n)
+          - teacher_text = prompt + output_stripped + eos (Distill 风原样)
+          - teacher CE 整段 output 都算 (与 Distill Stage 2 completion-only loss 等价)
+        """
         tokenizer = self.tokenizer
 
         orig_system = strip_posthoc(record["prompt"]["system"], _POSTHOC_SYSTEM_MARKER)
         orig_user = strip_posthoc(record["prompt"]["user"], _POSTHOC_USER_MARKER)
-        output = record["output"]
+        output = record.get("output", "")
+        if not output or not output.strip():
+            return None
 
         prompt_text = tokenizer.apply_chat_template(
             [{"role": "system", "content": orig_system},
@@ -366,48 +376,43 @@ class HLRDataset(Dataset):
         if not prompt_text.rstrip().endswith("<think>"):
             prompt_text += "<think>\n"
 
+        # Output: 剥重复 <think>, 余下原样保留
         output_stripped = output.lstrip()
         if output_stripped.startswith("<think>"):
             output_stripped = output_stripped[len("<think>"):].lstrip("\n")
 
-        think_end = output_stripped.find("</think>")
-        if think_end == -1:
+        think_close_idx = output_stripped.find("</think>")
+        if think_close_idx == -1:
             return None
 
-        cot_text = output_stripped[:think_end]
-        solution_text = output_stripped[think_end + len("</think>"):].lstrip("\n")
-        if not solution_text.strip():
+        cot_text = output_stripped[:think_close_idx]
+        # post_think_text 含 </think> 自身 + raw 换行 + solution (原始格式保留, 不 lstrip 换行)
+        post_think_text = output_stripped[think_close_idx:]
+        if not post_think_text[len("</think>"):].strip():
             return None
 
-        # ── Teacher 序列 (沿用 CODI 处理) ──
-        teacher_text = (
-            prompt_text + cot_text + "</think>\n"
-            + solution_text + tokenizer.eos_token
-        )
+        # ── Teacher 序列 (Distill 风原样拼接) ──
+        teacher_text = prompt_text + output_stripped + tokenizer.eos_token
         teacher_ids = tokenizer.encode(teacher_text, add_special_tokens=False)
         if len(teacher_ids) > self.max_length:
             return None
 
-        think_close_search = tokenizer.encode("</think>", add_special_tokens=False)
-        tc_len = len(think_close_search)
-        teacher_solution_align = None
-        for idx in range(len(teacher_ids) - tc_len, -1, -1):
-            if teacher_ids[idx : idx + tc_len] == think_close_search:
-                teacher_solution_align = idx + tc_len
-                break
-        if teacher_solution_align is None or teacher_solution_align >= len(teacher_ids):
-            return None
+        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
 
-        teacher_label_start = teacher_solution_align + 1
+        # Teacher CE 范围: 整段 output (cot + </think> + post_think + eos) 都算 CE.
+        # 跟 Distill Stage 2 的 completion-only loss 语义一致 (保留显式推理能力)
+        teacher_label_start = len(prompt_ids)
         teacher_labels = [-100] * teacher_label_start + teacher_ids[teacher_label_start:]
 
         # ── Student 分段构造 ──
-        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
         cot_ids = tokenizer.encode(cot_text, add_special_tokens=False)
-        think_close_nl = tokenizer.encode("</think>\n", add_special_tokens=False)
-        solution_ids = tokenizer.encode(
-            solution_text + tokenizer.eos_token, add_special_tokens=False
+        # post_think_ids: </think> + 原始换行 + solution + eos (不再 hardcode "</think>\n")
+        post_think_ids = tokenizer.encode(
+            post_think_text + tokenizer.eos_token, add_special_tokens=False
         )
+        # </think> 在 post_think_ids 开头占的 token 数 (后面 solution segment 用)
+        think_close_search = tokenizer.encode("</think>", add_special_tokens=False)
+        tc_len = len(think_close_search)
 
         teacher_cot_start = len(prompt_ids)
         latent_meta = record.get("latent_segments", [])
@@ -454,13 +459,12 @@ class HLRDataset(Dataset):
                 labels=torch.tensor(remaining, dtype=torch.long),
             ))
 
-        # solution 段: </think>\n 不计 loss，solution + EOS 计 loss
-        sol_ids = think_close_nl + solution_ids
-        sol_labels = [-100] * len(think_close_nl) + solution_ids
+        # solution 段: </think> 自身不计 loss (是 cot 边界), 之后 (含原始换行 + solution + eos) 计 loss
+        sol_labels_list = [-100] * tc_len + post_think_ids[tc_len:]
         segments.append(HLRSegment(
             type="solution",
-            ids=torch.tensor(sol_ids, dtype=torch.long),
-            labels=torch.tensor(sol_labels, dtype=torch.long),
+            ids=torch.tensor(post_think_ids, dtype=torch.long),
+            labels=torch.tensor(sol_labels_list, dtype=torch.long),
         ))
 
         # 粗略长度上限检查 (prompt + 所有段实际占位)

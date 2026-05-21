@@ -236,15 +236,46 @@ class HLRInferenceEngine:
         entropy = -(log_p.exp() * log_p).sum(dim=-1)
         return entropy.item()
 
-    def _sample(self, logits: torch.Tensor, temperature: float) -> int:
+    def _sample(self, logits: torch.Tensor, temperature: float,
+                top_p: float = 1.0, top_k: int = -1) -> int:
+        """支持 temperature / top_p / top_k 联动 (与 paths.sh GEN_TEMPERATURE/TOP_P/TOP_K 对齐).
+
+        temperature<=0 → greedy.
+        top_k>0 → 截断到 top-k tokens.
+        top_p<1.0 → nucleus sampling (累积 prob >= top_p 后停).
+        """
         if temperature <= 0:
             return logits.argmax(dim=-1).item()
-        probs = F.softmax(logits / temperature, dim=-1)
+
+        scaled = logits / temperature
+
+        # top-k 截断
+        if top_k is not None and top_k > 0:
+            k = min(top_k, scaled.size(-1))
+            topk_vals, _ = torch.topk(scaled, k, dim=-1)
+            min_keep = topk_vals[..., -1, None]
+            scaled = torch.where(scaled < min_keep, torch.full_like(scaled, float("-inf")), scaled)
+
+        probs = F.softmax(scaled, dim=-1)
+
+        # top-p (nucleus) 截断
+        if top_p is not None and 0.0 < top_p < 1.0:
+            sorted_probs, sorted_idx = torch.sort(probs, descending=True, dim=-1)
+            cumprob = torch.cumsum(sorted_probs, dim=-1)
+            # 保留累积 prob <= top_p 的部分, 第一个超过 top_p 的也保留 (避免空集)
+            sorted_keep = cumprob - sorted_probs <= top_p
+            sorted_probs = sorted_probs * sorted_keep.to(sorted_probs.dtype)
+            # 重新归一化
+            sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            # 散回原顺序
+            probs = torch.zeros_like(probs).scatter_(-1, sorted_idx, sorted_probs)
+
         return torch.multinomial(probs, num_samples=1).item()
 
     @torch.no_grad()
     def generate(self, prompt: str, max_new_tokens: int = 512,
-                 temperature: float = 0.0):
+                 temperature: float = 0.0,
+                 top_p: float = 1.0, top_k: int = -1):
         """
         生成解, 显式/latent 动态切换 (新方向: 压缩低熵段省算力).
 
@@ -274,7 +305,7 @@ class HLRInferenceEngine:
         last_main_hidden = prefill_out.hidden_states[-1][:, -1, :]
 
         first_logits = prefill_out.logits[:, -1, :]
-        first_id = self._sample(first_logits, temperature)
+        first_id = self._sample(first_logits, temperature, top_p=top_p, top_k=top_k)
         generated_tokens = [first_id]
         current_input = torch.tensor([[first_id]], device=self.model.device)
 
@@ -349,7 +380,7 @@ class HLRInferenceEngine:
                     window_entropies = []
                     explicit_count_since_exit = 0  # 重置 cooldown 计数
 
-                    token_id = self._sample(logits, temperature)
+                    token_id = self._sample(logits, temperature, top_p=top_p, top_k=top_k)
                     generated_tokens.append(token_id)
                     current_input = torch.tensor([[token_id]], device=self.model.device)
                     if token_id == self.tokenizer.eos_token_id:
@@ -373,7 +404,7 @@ class HLRInferenceEngine:
                 full_entropy_history.append(entropy)
                 explicit_count_since_exit += 1
 
-                token_id = self._sample(logits, temperature)
+                token_id = self._sample(logits, temperature, top_p=top_p, top_k=top_k)
                 generated_tokens.append(token_id)
                 current_input = torch.tensor([[token_id]], device=self.model.device)
                 if token_id == self.tokenizer.eos_token_id:
