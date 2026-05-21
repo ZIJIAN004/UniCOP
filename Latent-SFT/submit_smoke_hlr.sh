@@ -1,0 +1,53 @@
+#!/bin/bash
+#SBATCH --qos express
+#SBATCH --gpus=1
+#SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/Latent-SFT/smoke_hlr_%j.log
+
+# HLR Smoke Test — 严格检查 Hierarchical Latent Reasoner 7 个 stage
+#   [1-3, 7] 不依赖主模型 (LR forward / KV cache 一致性等)
+#   [4-6]    需要主模型 + profiled jsonl
+#
+# 默认配置 (可通过环境变量覆盖):
+#   HLR_MODEL  - 主模型路径 (默认 $BASE_MODEL_R1, 即 DeepSeek-R1-Distill-Qwen-7B)
+#   HLR_DATA   - profiled jsonl 路径 (默认 ./data/profiled_cvrp20.jsonl)
+#
+# 用法:
+#   sbatch Latent-SFT/submit_smoke_hlr.sh
+#   HLR_MODEL=/path/to/grpo_checkpoint sbatch Latent-SFT/submit_smoke_hlr.sh
+#
+# 1 GPU express, 5-10 分钟结束 (主要是加载 7B 模型 + forward/backward)
+
+export HOME=/homes/zhuoyi
+export PIP_CACHE_DIR=/homes/zhuoyi/.pip_cache
+export TMPDIR=/homes/zhuoyi/tmp
+export XDG_CACHE_HOME=/homes/zhuoyi/.cache
+export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
+
+source /homes/zhuoyi/.bashrc
+eval "$(conda shell.bash hook)"
+conda activate unicop
+
+cd /homes/zhuoyi/zijianliu/UniCOP
+source paths.sh
+
+cd Latent-SFT
+
+MODEL_PATH="${HLR_MODEL:-$BASE_MODEL_R1}"
+DATA_PATH="${HLR_DATA:-./data/profiled_cvrp20.jsonl}"
+
+echo "============================================================"
+echo "  HLR Smoke Test"
+echo "  HOST  = $HOST_ID"
+echo "  MODEL = $MODEL_PATH"
+echo "  DATA  = $DATA_PATH"
+echo "============================================================"
+
+if [ -f "$DATA_PATH" ]; then
+    echo "✓ profiled jsonl 存在, 跑完整 7 stage"
+    python smoke_test_hlr.py --model "$MODEL_PATH" --data "$DATA_PATH"
+else
+    echo "⚠ profiled jsonl 不存在 ($DATA_PATH)"
+    echo "  跑 stage 1-3 + 7 (跳过需要数据的 stage 4-6)"
+    echo "  先跑 entropy_profile.py 生成 profiled jsonl 后再用完整模式"
+    python smoke_test_hlr.py --no_main_model
+fi
