@@ -76,7 +76,7 @@ FLASHINFER_DISABLE_VERSION_CHECK=1 \
     --tensor_parallel_size 1 \
     --port "$VLLM_PORT" \
     --gpu_memory_utilization 0.85 \
-    --max_model_len 4096 \
+    --max_model_len 8192 \
     --dtype bfloat16 \
     --enable_prefix_caching True \
     > "$VLLM_LOG" 2>&1 &
