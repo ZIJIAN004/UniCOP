@@ -34,7 +34,10 @@ class Config:
     # num_generations=8: 朴素扩量，缓解 gradient starvation（替代 DAPO Dynamic Sampling）
     # max_completion_length=4096: 平衡显存与截断率，不够再调
     num_generations: int               = 8
-    max_prompt_length: int             = 768
+    # max_prompt_length=1024: Qwen3 tokenizer BPE 比 R1 拆得更细, smoke test
+    # 实测 CVRP-10 prompt 在 Qwen3 上是 921 token (R1 约 700), 768 会截掉关键
+    # 信息. 1024 对两个模型都安全, R1 prompt 短不会触发上限.
+    max_prompt_length: int             = 1024
     max_completion_length: int         = 4096
     learning_rate: float               = 1e-5   # GRPO + LoRA rank 64 推荐 5e-6~2e-5 (原 1e-6 过低,SFT 已升到 1e-4)
                                                 # 6 卡 effective batch 192 (vs 4 卡 128, +50%) + grad_norm 长期 ~0.1 远低于 clip 阈值

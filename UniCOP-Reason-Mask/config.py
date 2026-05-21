@@ -34,7 +34,10 @@ class Config:
     # num_generations=8: 朴素扩量，缓解 gradient starvation（替代 DAPO Dynamic Sampling）
     # max_completion_length=4096: 平衡显存与截断率，不够再调
     num_generations: int               = 8
-    max_prompt_length: int             = 768
+    # max_prompt_length=1024: Qwen3 tokenizer BPE 比 R1 拆得更细, smoke test
+    # 实测 CVRP-10 prompt 在 Qwen3 上是 921 token (R1 约 700), 768 会截掉关键
+    # 信息. 1024 对两个模型都安全, R1 prompt 短不会触发上限.
+    max_prompt_length: int             = 1024
     max_completion_length: int         = 4096
     learning_rate: float               = 1e-5   # v5 用 2e-5 第 1 step grad_norm explode (3.87 clip→1.0,
                                                 # Δθ=2e-5, 比 v4 第 1 step Δθ=2e-8 大 100,000x), 模型 push 过头进 plateau.

@@ -37,7 +37,7 @@ FREE_GPUS=""
 # ── vLLM server 参数 ─────────────────────────────────────────────────
 VLLM_PORT_BASE=8000      # 实际端口 = BASE + 任务索引，避免多任务冲突
 VLLM_GPU_MEM_UTIL=0.85   # vLLM 卡显存利用率（防 OOM 保守值）
-VLLM_MAX_MODEL_LEN=5120  # prompt(768) + completion(4096) + 余量;不限会用模型 config 里 131072 → KV 塞不下
+VLLM_MAX_MODEL_LEN=6144  # prompt(1024) + completion(4096) + 余量;Qwen3 CVRP-10 prompt 实测 921 token
 VLLM_DTYPE=bfloat16      # bf16 匹配训练侧精度
 # GRPO 一个 prompt 生成 num_generations=8 条 completion,prefix caching 可大幅加速
 # 注意: trl vllm-serve 的 --enable_prefix_caching 是 store_true flag, 不吃值。
