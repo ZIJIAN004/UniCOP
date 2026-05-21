@@ -326,6 +326,8 @@ def main():
     # 多卡
     parser.add_argument("--zero_stage",   type=int, default=0, choices=[0, 2, 3])
     parser.add_argument("--gradient_checkpointing", action="store_true")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+                        help="从 ckpt 恢复, 可传具体路径或 'auto' 自动找 output_dir 内最新 checkpoint-*")
 
     # 输出
     parser.add_argument("--output_dir",   type=str, default="./output_sft")
@@ -495,7 +497,25 @@ def main():
     )
 
     print("\n开始 SFT 训练...")
-    trainer.train()
+    # ── resume 处理: 'auto' 自动找 output_dir 下最新 checkpoint-*, 否则传具体路径 ──
+    resume = args.resume_from_checkpoint
+    if resume == "auto":
+        ckpts = []
+        if os.path.isdir(args.output_dir):
+            for d in os.listdir(args.output_dir):
+                if d.startswith("checkpoint-") and d[len("checkpoint-"):].isdigit():
+                    ckpts.append((int(d[len("checkpoint-"):]), os.path.join(args.output_dir, d)))
+        if ckpts:
+            ckpts.sort()
+            resume = ckpts[-1][1]
+            print(f"  ✓ resume_from_checkpoint=auto → 选最新 ckpt: {resume}")
+        else:
+            print(f"  [INFO] resume=auto 但 {args.output_dir} 下无 checkpoint-*, 从头训")
+            resume = None
+    if resume:
+        trainer.train(resume_from_checkpoint=resume)
+    else:
+        trainer.train()
 
     # ── 保存 ─────────────────────────────────────────────────────────────
     save_path = os.path.join(args.output_dir, "final_model")

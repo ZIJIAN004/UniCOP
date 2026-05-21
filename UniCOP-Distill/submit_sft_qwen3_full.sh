@@ -2,7 +2,7 @@
 #SBATCH --qos large
 #SBATCH --gpus=4
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Distill/sft_qwen3_full_%j.log
-#SBATCH --time=24:00:00
+#SBATCH --time=72:00:00
 
 # Stage 2 SFT — Qwen3-4B-Thinking 一体化: 训练 → merge → eval
 #   Step 1: 4 GPU ZeRO-2 SFT (3 epoch, 全量数据)
@@ -69,6 +69,7 @@ accelerate launch --num_processes 4 --main_process_port 29600 \
     --lora_rank 64 --lora_alpha 128 \
     --zero_stage 3 \
     --gradient_checkpointing \
+    --resume_from_checkpoint auto \
     --output_dir "$OUTPUT_DIR" \
     --logging_steps 10 --save_steps 200
 
