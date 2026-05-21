@@ -62,11 +62,26 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,nohead
     | sed 's/^/      /' || echo "      (no processes)"
 echo "============================================================"
 
-# 任何卡剩余 < 20 GiB 就立刻 abort, 让 SLURM 知道这次 job 不行 (而不是跑 5min 后 OOM)
+# 任何卡剩余 < 20 GiB 就立刻 abort 并自动 resubmit, exclude 当前节点
+# 7679 / 7841 都被 luk 的 /data/luk/project/2025_amd/ui (绕开 SLURM 直接占 GPU 4) 撞到,
+# SLURM 看不到外部占用就照旧分卡 → 自助 exclude 是唯一可行方案.
 _min_free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -n | head -1)
 if [ -n "$_min_free" ] && [ "$_min_free" -lt 20000 ]; then
-    echo "❌ 某张卡 free memory 只剩 ${_min_free} MiB (<20 GiB), 别人在占! 立刻退出, 重新提交即可让 SLURM 重分卡."
-    exit 1
+    echo "❌ 某张卡 free memory 只剩 ${_min_free} MiB (<20 GiB), 别人在占!"
+    _bad_node="$SLURM_NODELIST"
+    _self_path="$(realpath "$0")"
+    # 累加 exclude list (从 env BAD_NODES 继承, 加上当前节点)
+    if [ -n "${BAD_NODES:-}" ]; then
+        _new_bad="$BAD_NODES,$_bad_node"
+    else
+        _new_bad="$_bad_node"
+    fi
+    echo "  当前脏节点: $_bad_node"
+    echo "  累计 exclude: $_new_bad"
+    echo "  自动 resubmit: sbatch --exclude=$_new_bad $_self_path"
+    sbatch --exclude="$_new_bad" --export=ALL,BAD_NODES="$_new_bad" "$_self_path"
+    echo "  resubmit 提交完成, 当前 job 退出"
+    exit 0
 fi
 
 # ══════════════════════════════════════════════════════════════════
