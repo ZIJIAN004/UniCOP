@@ -43,6 +43,32 @@ echo "  EVAL_DIR     = $EVAL_DIR"
 echo "  采样参数     = T=$GEN_TEMPERATURE top_p=$GEN_TOP_P top_k=$GEN_TOP_K"
 echo "============================================================"
 
+# ── GPU 占用诊断 (排查 OOM "别人占着卡" 场景) ────────────────────────
+# 7679 job OOM: GPU 3 上有外部 PID 3543 占 14.83 GiB, 排查思路:
+#   1. SLURM 实际给我哪几张卡? (CUDA_VISIBLE_DEVICES + SLURM_*GPUS)
+#   2. 那几张卡 free memory 还剩多少? 有别人占吗?
+# 如果某卡 used > 1 GiB 就该 scancel + 重提, 让 SLURM 重分卡
+echo "============================================================"
+echo "  GPU allocation diagnostic ($(date +%H:%M:%S))"
+echo "    SLURM_JOB_ID          = ${SLURM_JOB_ID:-(not in slurm)}"
+echo "    SLURM_JOB_GPUS        = ${SLURM_JOB_GPUS:-(unset)}"
+echo "    SLURM_STEP_GPUS       = ${SLURM_STEP_GPUS:-(unset)}"
+echo "    CUDA_VISIBLE_DEVICES  = ${CUDA_VISIBLE_DEVICES:-(unset)}"
+echo "    nvidia-smi (我可见的卡):"
+nvidia-smi --query-gpu=index,memory.used,memory.free,memory.total --format=csv,noheader \
+    | sed 's/^/      /'
+echo "    nvidia-smi processes (这些卡上谁在跑):"
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader \
+    | sed 's/^/      /' || echo "      (no processes)"
+echo "============================================================"
+
+# 任何卡剩余 < 20 GiB 就立刻 abort, 让 SLURM 知道这次 job 不行 (而不是跑 5min 后 OOM)
+_min_free=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | sort -n | head -1)
+if [ -n "$_min_free" ] && [ "$_min_free" -lt 20000 ]; then
+    echo "❌ 某张卡 free memory 只剩 ${_min_free} MiB (<20 GiB), 别人在占! 立刻退出, 重新提交即可让 SLURM 重分卡."
+    exit 1
+fi
+
 # ══════════════════════════════════════════════════════════════════
 # Step 1: SFT 训练 (4 GPU ZeRO-2, 3 epoch)
 # ══════════════════════════════════════════════════════════════════
