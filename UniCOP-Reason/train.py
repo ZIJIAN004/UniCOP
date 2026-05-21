@@ -238,6 +238,109 @@ def _placeholder_reward_fn(completions, **kwargs):
     return [0.0] * len(completions)
 
 
+# ── Token 长度 probe (R1 ↔ Qwen3 tokenizer 差异自适应) ──────────────────────
+# 启动时跑 5 个真实样本, 测 prompt 和 completion 的实际 token 数, 推荐 max_*
+# 值 (向上取 128 的倍数, 加 10% buffer). 对比当前 config 给 WARN.
+#
+# 设计:
+#   - prompt: 直接 build_prompt + tokenizer 算长度 (确定性)
+#   - completion: 用 vllm_client.generate 跑 1 个 (max_tokens 用当前上限)
+#   - 5 个 sample 取 max, ceil_128(max * 1.1) 给推荐值
+#   - 不修改 config, 只 print 提示, 让用户决定是否 scancel + 改 config 重提
+
+def _ceil_128(x: int) -> int:
+    """向上取整到 128 的倍数 (x*1.1 后取整, 留 10% buffer)."""
+    if x <= 0:
+        return 128
+    target = int(x * 1.1)
+    return ((target + 127) // 128) * 128
+
+
+def _probe_token_lengths(trainer, tokenizer, problem_types, problem_size, num_samples=5):
+    """跑 5 个样本, 测 prompt + completion 实际 token 数, 推荐 max_* 值."""
+    import numpy as _np
+    print("\n" + "=" * 70)
+    print(f"  Token-length probe ({num_samples} samples, n={problem_size})")
+    print(f"  目的: 测 prompt + completion 实际长度, 推荐 max_* 配置")
+    print("=" * 70)
+
+    rng = _np.random.default_rng(seed=2025)
+    prompt_lens = []
+    completion_lens = []
+
+    # vLLM client 在 trainer.__init__ 里已建好 (use_vllm=True 时)
+    vllm_client = getattr(trainer, "vllm_client", None)
+    if vllm_client is None:
+        print("  ⚠️ trainer.vllm_client 未就绪, 只测 prompt 长度, 跳过 completion")
+
+    for i in range(num_samples):
+        pt = problem_types[i % len(problem_types)]
+        prob = _get_problem(pt)
+        inst = prob.generate_instance(problem_size, rng)
+        prompt_msgs = prob.build_prompt(inst)
+        chat_text = tokenizer.apply_chat_template(
+            prompt_msgs, tokenize=False, add_generation_prompt=True
+        )
+        prompt_ids = tokenizer(
+            chat_text, return_tensors="pt", add_special_tokens=False,
+        ).input_ids
+        p_len = prompt_ids.shape[1]
+        prompt_lens.append(p_len)
+
+        c_len_str = "(skipped)"
+        if vllm_client is not None:
+            try:
+                comp_ids_list = vllm_client.generate(
+                    prompts=[chat_text],
+                    n=1,
+                    temperature=float(getattr(trainer, "temperature", 1.0)),
+                    top_p=float(getattr(trainer, "top_p", 1.0)),
+                    top_k=-1 if getattr(trainer, "top_k", None) is None
+                          else int(trainer.top_k),
+                    max_tokens=config.max_completion_length,
+                )
+                c_len = len(comp_ids_list[0])
+                completion_lens.append(c_len)
+                c_len_str = f"{c_len}"
+                # 接近 max_tokens 提示模型可能被截断了, 实际更长
+                if c_len >= config.max_completion_length - 5:
+                    c_len_str += " (touched max_tokens cap!)"
+            except Exception as _e:
+                print(f"  样本 {i+1} vllm.generate 失败: {type(_e).__name__}: {_e}")
+
+        print(f"  样本 {i+1} ({pt:>6} n={problem_size}): "
+              f"prompt={p_len:>5}  completion={c_len_str}")
+
+    if not prompt_lens:
+        return
+
+    max_p = max(prompt_lens)
+    suggested_p = _ceil_128(max_p)
+
+    print(f"\n  实测 prompt max = {max_p} → 推荐 max_prompt_length = {suggested_p}")
+    print(f"    当前 config.max_prompt_length = {config.max_prompt_length} "
+          f"{'✓' if config.max_prompt_length >= max_p else '❌ 太小, 训练会截 prompt!'}")
+
+    if completion_lens:
+        max_c = max(completion_lens)
+        suggested_c = _ceil_128(max_c)
+        # 推荐 max_model_len: prompt + completion + 256 chat overhead
+        suggested_mml = ((suggested_p + suggested_c + 256 + 127) // 128) * 128
+        print(f"  实测 completion max = {max_c} → 推荐 max_completion_length = {suggested_c}")
+        print(f"    当前 config.max_completion_length = {config.max_completion_length} "
+              f"{'✓' if config.max_completion_length >= max_c else '❌ 太小'}")
+        print(f"  推荐 VLLM_MAX_MODEL_LEN = {suggested_mml}")
+        # 若 completion 触顶, 真实长度可能更大, 强 warn
+        n_touched = sum(1 for c in completion_lens
+                        if c >= config.max_completion_length - 5)
+        if n_touched > 0:
+            print(f"  ⚠️ {n_touched}/{len(completion_lens)} 样本 completion 触顶 "
+                  f"max_completion_length={config.max_completion_length}, "
+                  f"真实长度可能更大, 强烈建议调大 max_completion_length 重提.")
+
+    print("=" * 70 + "\n")
+
+
 # ── 主函数 ──────────────────────────────────────────────────────────────────
 
 def main():
@@ -547,6 +650,16 @@ def main():
         f"  save_steps={config.save_steps}  logging_steps={config.logging_steps}  "
         f"resample_start_step={getattr(config, 'resample_start_step', 100)}\n"
     )
+
+    # ── Token-length probe: 5 个真实样本, 推荐 max_prompt / max_completion ─
+    # 防 Qwen3 ↔ R1 切换时 tokenizer 差异导致截断 (R1 估算的 max_* 在 Qwen3
+    # 不够). 只在 main process 跑, 等 vLLM client 就绪后 (resample 也用这个 client).
+    # 推荐值: ceil_128(实测 max × 1.1), 既对齐 128 倍数又留 10% buffer.
+    if trainer.accelerator.is_main_process:
+        try:
+            _probe_token_lengths(trainer, tokenizer, problem_types, args.problem_size)
+        except Exception as _e:
+            print(f"⚠️ token-length probe 失败 (不阻塞训练): {type(_e).__name__}: {_e}")
 
     # ── resume_from_checkpoint: 自动从最新 checkpoint 恢复 ──────────────
     # 配合 auto_train.sh 的 vLLM-disconnect 重试逻辑: vLLM 死亡后整个 job
