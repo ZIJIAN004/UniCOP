@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --qos normal
 #SBATCH --gpus=1
-#SBATCH --time=00:30:00
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/probe_mask_inference_%j.log
 
 # Mask Inference Probe - 不训练, 用 vLLM 跑 5 个 CVRP prompt 对比 mask vs no-mask

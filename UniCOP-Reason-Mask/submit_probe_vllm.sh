@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --qos normal
 #SBATCH --gpus=1
-#SBATCH --time=00:15:00
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/probe_vllm_%j.log
 
 # Probe vLLM 0.7.3 logits_processor 行为, 验证 stateless mask 设计的关键假设.
