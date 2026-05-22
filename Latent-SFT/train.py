@@ -130,7 +130,11 @@ def train(cfg: LatentSFTConfig):
         model.resize_token_embeddings(len(tokenizer))
 
     if cfg.gradient_checkpointing:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        # use_reentrant=True 是 ZeRO-3 + LoRA + GC 三件套的实战 workaround
+        # (见 LLM训练踩坑.md 坑 #14, trl#2514). HF/PEFT 文档推荐 False,
+        # 但 ZeRO-3 下 non-reentrant checkpoint 和参数 partition 在 recompute
+        # 阶段会产生 shape [0] 反传错, 必须用 True.
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
 
@@ -379,7 +383,8 @@ def train_hlr(cfg: HLRConfig):
         accelerator.wait_for_everyone()
 
     if cfg.gradient_checkpointing:
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        # use_reentrant=True: ZeRO-3 + LoRA + GC 三件套 workaround (踩坑 #14)
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
 
