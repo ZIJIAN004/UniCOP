@@ -11,12 +11,12 @@ HLR Smoke Test —— 严格检查 Hierarchical Latent Reasoner 各模块。
   [6] HLRInferenceEngine.generate
   [7] LatentReasoner state_dict 保存 / 重新加载
 
-运行:
+运行 (cwd = UniCOP 根目录):
   # 完整 (需要主模型 + profiled jsonl)
-  python smoke_test_hlr.py --model ../output_grpo/final_model --data ./data/profiled_cvrp20.jsonl
+  python Latent-SFT/smoke_test_hlr.py --model "$BASE_MODEL" --data Latent-SFT/data/profiled_cvrp20.jsonl
 
   # 跳过需要主模型的阶段 (4-6)
-  python smoke_test_hlr.py --no_main_model
+  python Latent-SFT/smoke_test_hlr.py --no_main_model
 
 退出码 0 = 所有 stage PASS; 非 0 = 至少一个 FAIL。
 """

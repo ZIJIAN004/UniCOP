@@ -21,7 +21,9 @@ class LatentSFTConfig:
     lora_dropout: float = 0.05
 
     # ── 数据 ──
-    data_path: str = "../UniCOP-Distill/data/chains_self_cvrp20.jsonl"
+    # 路径相对 UniCOP/ 根目录 (sbatch / accelerate launch 在 UniCOP/ 下跑)
+    # 实际用 chains_template (Distill 模板生成); chains_self 是 rationalize 流程产物, 本项目未用
+    data_path: str = "UniCOP-Distill/data/chains_template_cvrp20.jsonl"
     filter_problems: list[str] = field(default_factory=lambda: ["cvrp"])
     filter_sizes: list[int] = field(default_factory=lambda: [20])
     max_length: int = 8192
@@ -86,9 +88,11 @@ class HLRConfig:
     lora_alpha: int = 128
     lora_dropout: float = 0.05
 
-    # ── 数据 ──
-    data_path: str = "./data/profiled_cvrp20.jsonl"
-    raw_chains_path: str = "../UniCOP-Distill/data/chains_template_cvrp20.jsonl"
+    # ── 数据 (路径相对 UniCOP/ 根目录, 与 sbatch cwd 对齐) ──
+    # raw_chains_path: Distill 阶段产出的模板化 CoT, Latent-SFT 共用
+    # data_path:       本阶段 entropy_profile 后的派生数据, 放 Latent-SFT/data/ 下
+    data_path: str = "Latent-SFT/data/profiled_cvrp20.jsonl"
+    raw_chains_path: str = "UniCOP-Distill/data/chains_template_cvrp20.jsonl"
     auto_rebuild_data: bool = False        # train.py main() 检测到 args.data is None 时置 True,
                                             # train_hlr 启动时用 base model 跑 entropy profile
                                             # 覆盖 data_path, 确保数据与本次训练用的基座一致

@@ -3,12 +3,12 @@ Latent-SFT 训练脚本：CODI 式隐式推理训练。
 
 使用 accelerate 做分布式，自定义训练循环处理 teacher/student 双 forward。
 
-单卡运行:
-    python train.py
-    python train.py --model ./path/to/grpo_model --data ../UniCOP-Distill/data/chains_self_cvrp20.jsonl
+单卡运行 (cwd = UniCOP 根目录):
+    python Latent-SFT/train.py
+    python Latent-SFT/train.py --model "$BASE_MODEL" --data UniCOP-Distill/data/chains_template_cvrp20.jsonl
 
-多卡运行:
-    accelerate launch --num_processes 4 train.py --zero_stage 2 --gradient_checkpointing
+多卡运行 (cwd = UniCOP 根目录):
+    accelerate launch --num_processes 4 Latent-SFT/train.py --zero_stage 2 --gradient_checkpointing
 """
 
 import argparse
