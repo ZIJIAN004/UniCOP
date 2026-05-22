@@ -274,6 +274,10 @@ def profile_dataset(args):
                 except json.JSONDecodeError:
                     continue
 
+    if getattr(args, "limit", 0) > 0:
+        print(f"[limit] 只处理前 {args.limit} 条 (smoke 模式)")
+        records = records[: args.limit]
+
     results = []
     skipped = 0
 
@@ -369,6 +373,8 @@ def main():
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--max_length", type=int, default=8192)
     parser.add_argument("--save_entropies", action="store_true")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="只处理前 N 条样本 (0 = 全量); smoke 模式用 200 条快速验证")
 
     # Latent 进出 trigger (与 HLRConfig 默认值对齐)
     parser.add_argument("--entropy_window", type=int, default=3,
