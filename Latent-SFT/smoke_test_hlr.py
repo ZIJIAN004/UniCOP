@@ -37,28 +37,22 @@ def stage_1_config():
     from config import HLRConfig
 
     cfg = HLRConfig()
-    expected = {
-        "lr_num_layers": 7,
-        "lr_hidden_size": 896,
-        "lr_num_heads": 7,
-        "lr_num_kv_heads": 1,
-        "lr_head_dim": 128,
-        "lr_intermediate_size": 4736,
-        "latent_compression_ratio": 4,
-    }
-    for field, exp in expected.items():
+    # 默认 lr_* 全 0 (auto-infer from main config, 自适应 R1-7B / Qwen3-4B / ...)
+    # 真实 LR 架构由 build_latent_reasoner_from_main 推断, stage 3 验证形状
+    auto_fields = ["lr_num_layers", "lr_hidden_size", "lr_num_heads",
+                   "lr_num_kv_heads", "lr_head_dim", "lr_intermediate_size"]
+    for field in auto_fields:
         got = getattr(cfg, field)
-        assert got == exp, f"{field} = {got}, 期望 {exp}"
+        assert got == 0, f"{field} = {got}, 期望默认 0 (auto-infer)"
 
-    # 结构一致性检查
-    assert cfg.lr_num_heads * cfg.lr_head_dim == cfg.lr_hidden_size, \
-        f"GQA shape 不齐: heads({cfg.lr_num_heads}) × head_dim({cfg.lr_head_dim}) != hidden({cfg.lr_hidden_size})"
-    assert cfg.lr_num_heads % cfg.lr_num_kv_heads == 0, \
-        f"num_heads ({cfg.lr_num_heads}) 不能被 num_kv_heads ({cfg.lr_num_kv_heads}) 整除"
+    assert cfg.latent_compression_ratio == 4
+    assert cfg.entropy_window == 3 and cfg.entropy_quantile == 0.5
+    assert cfg.min_latent_steps == 3 and cfg.max_latent_steps == 8
+    assert cfg.latent_cooldown == 24
 
-    print(f"    config: layers={cfg.lr_num_layers}, hidden={cfg.lr_hidden_size}, "
-          f"GQA Q:KV={cfg.lr_num_heads}:{cfg.lr_num_kv_heads}, "
-          f"intermediate={cfg.lr_intermediate_size}, SwiGLU+RoPE")
+    print(f"    config: lr_* 全 0 (auto-infer 自适应基座), compression_ratio={cfg.latent_compression_ratio}")
+    print(f"    trigger: window={cfg.entropy_window}, q={cfg.entropy_quantile}, "
+          f"min={cfg.min_latent_steps}, max={cfg.max_latent_steps}, cooldown={cfg.latent_cooldown}")
 
 
 def stage_2_components():
@@ -205,21 +199,35 @@ def stage_4_dataset(args):
     )
     assert len(dataset) > 0, "HLRDataset 加载 0 条样本"
 
-    # 找一条有 latent 段的样本作为检查样本
-    sample = None
+    # 找一条 (a) 有 latent 段 + (b) teacher_ids 尽量短 的样本 (防 stage 5 OOM)
+    # 优先选 <= 2048 token; 否则退回首个有 latent 段的;
+    # 都没有则退回首条
+    short_with_latent = None  # < 2048 + 有 latent
+    any_with_latent = None    # 有 latent (长度不限)
     n_with_latent = 0
-    for i in range(min(len(dataset), 20)):
+    n_scanned = min(len(dataset), 50)
+    for i in range(n_scanned):
         s = dataset[i]
         n_lat = sum(1 for seg in s.segments if seg.type == "latent")
-        if n_lat > 0 and sample is None:
-            sample = s
+        seq_len = s.teacher_input_ids.size(0)
         if n_lat > 0:
             n_with_latent += 1
-    if sample is None:
-        sample = dataset[0]
-        print(f"    ⚠ 前 20 条都没 latent 段, 使用首条 (entropy 阈值可能偏严)")
+            if any_with_latent is None:
+                any_with_latent = s
+            if seq_len <= 2048 and short_with_latent is None:
+                short_with_latent = s
+
+    if short_with_latent is not None:
+        sample = short_with_latent
+        print(f"    选短样本 ({sample.teacher_input_ids.size(0)} tokens) 防 stage 5 OOM, "
+              f"前 {n_scanned} 条中 {n_with_latent} 条有 latent")
+    elif any_with_latent is not None:
+        sample = any_with_latent
+        print(f"    ⚠ 前 {n_scanned} 条没有 <=2048 token 的样本, 用 {sample.teacher_input_ids.size(0)} token 的 "
+              f"(stage 5 可能 OOM, 需更大显存)")
     else:
-        print(f"    前 20 条中 {n_with_latent} 条有 latent 段")
+        sample = dataset[0]
+        print(f"    ⚠ 前 {n_scanned} 条都没 latent 段, 使用首条 (entropy 阈值可能偏严)")
 
     n_exp = sum(1 for s in sample.segments if s.type == "explicit")
     n_lat = sum(1 for s in sample.segments if s.type == "latent")
@@ -264,6 +272,14 @@ def stage_5_loss(args, data_result):
     if len(tokenizer) > model.get_input_embeddings().num_embeddings:
         model.resize_token_embeddings(len(tokenizer))
 
+    # ── 防 OOM: 单卡 24GB + Qwen3-4B + bf16 + LoRA + LR + teacher/student 双 forward
+    #    没 GC 必爆. 必须在 LoRA wrap 之前 enable GC + input_require_grads
+    #    use_reentrant=True (踩坑 #14: ZeRO-3+LoRA+GC 三件套同因)
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    print(f"    [smoke 防 OOM] gradient_checkpointing=True, use_reentrant=True")
+
     peft_cfg = LoraConfig(
         r=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj",
@@ -272,6 +288,12 @@ def stage_5_loss(args, data_result):
     )
     model = get_peft_model(model, peft_cfg)
     model.train()
+
+    seq_len = batch["teacher_input_ids"].size(1)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        free_gb = torch.cuda.mem_get_info()[0] / 1024**3
+        print(f"    样本长度: {seq_len} tokens, GPU 剩余 free: {free_gb:.2f} GB")
 
     latent_reasoner = build_latent_reasoner_from_main(model, cfg).to(device).to(torch.bfloat16)
     latent_reasoner.train()
