@@ -290,6 +290,8 @@ def stage_5_loss(args, data_result):
     if len(tokenizer) > model.get_input_embeddings().num_embeddings:
         model.resize_token_embeddings(len(tokenizer))
 
+    # GC 与 use_cache 互斥, 训练时显式 False 抑制 attention 层的 warning
+    model.config.use_cache = False
     # GC + input_require_grads 必须在 PEFT wrap 之前 (踩坑 #14)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
     if hasattr(model, "enable_input_require_grads"):

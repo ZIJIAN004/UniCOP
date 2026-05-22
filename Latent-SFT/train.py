@@ -384,6 +384,7 @@ def train_hlr(cfg: HLRConfig):
 
     if cfg.gradient_checkpointing:
         # use_reentrant=True: ZeRO-3 + LoRA + GC 三件套 workaround (踩坑 #14)
+        model.config.use_cache = False  # 抑制 GC + use_cache 互斥 warning
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()

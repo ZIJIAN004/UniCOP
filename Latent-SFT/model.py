@@ -645,48 +645,66 @@ def compute_hlr_loss(
     # hidden_states[0] = embedding, hidden_states[i] = main layer (i-1) 输出 (0-indexed main)
 
     # ── (2)+(3) 准备拼接 student inputs_embeds ──
-    embed_tokens = model.get_input_embeddings()
-    prompt_embeds = embed_tokens(prompt_ids_dev).unsqueeze(0)  # [1, P, H_main]
-    student_embeds_parts = [prompt_embeds]
-    # labels 在 prompt 区间全 -100
-    student_labels_parts = [torch.full((prompt_embeds.size(1),), -100,
-                                       dtype=torch.long, device=device)]
+    # Unwrap DeepSpeedEngine / DDP / PEFT 直到能调 get_input_embeddings
+    inner_model = model
+    while not hasattr(inner_model, "get_input_embeddings") and hasattr(inner_model, "module"):
+        inner_model = inner_model.module
+    embed_module = inner_model.get_input_embeddings()
 
-    align_records = []  # [(layer_hiddens, teacher_align_pos)] 给 align loss 用
+    # ZeRO-3 下 embedding.weight 被 partition, 直接调 embed_module(ids) 拿不到完整 weight.
+    # 用 deepspeed.zero.GatheredParameters 临时 gather (非 ZeRO-3 下为 no-op).
+    try:
+        import deepspeed
+        gather_ctx = deepspeed.zero.GatheredParameters(
+            [embed_module.weight], enabled=True
+        )
+    except ImportError:
+        from contextlib import nullcontext
+        gather_ctx = nullcontext()
 
-    for seg in segments:
-        if seg.type in ("explicit", "solution"):
-            seg_ids = seg.ids.to(device)
-            seg_labels = seg.labels.to(device)
-            seg_embeds = embed_tokens(seg_ids).unsqueeze(0)        # [1, T_seg, H_main]
-            student_embeds_parts.append(seg_embeds)
-            student_labels_parts.append(seg_labels)
+    student_embeds_parts: list[torch.Tensor] = []
+    student_labels_parts: list[torch.Tensor] = []
+    align_records: list = []  # [(layer_hiddens, teacher_align_pos)]
 
-        elif seg.type == "latent":
-            k = seg.k
-            # LR 输入: teacher 段起始前一个位置最后一层 hidden (detach, CODI 风)
-            # 双向 detach: teacher 端断梯度, LR input 也是 detach 后的 teacher hidden,
-            # align 不污染主模型, 但 LR 输出仍通过 up_proj 接 student CE 路径回传 LR
-            in_pos = seg.teacher_input_pos
-            in_pos = min(max(in_pos, 0), T_teacher - 1)
-            h_input = teacher_hidden_states[-1][:, in_pos, :].detach()  # [1, H_main]
+    with gather_ctx:
+        # prompt embeds
+        prompt_embeds = embed_module(prompt_ids_dev).unsqueeze(0).clone()  # [1, P, H]
+        student_embeds_parts.append(prompt_embeds)
+        student_labels_parts.append(torch.full(
+            (prompt_embeds.size(1),), -100, dtype=torch.long, device=device
+        ))
 
-            layer_hiddens, _ = latent_reasoner(h_input, k=k)
-            # list of N_lr × [1, k, lr_hidden]
+        for seg in segments:
+            if seg.type in ("explicit", "solution"):
+                seg_ids = seg.ids.to(device)
+                seg_labels = seg.labels.to(device)
+                # clone() 让 embed 在 context 退出后仍有效
+                seg_embeds = embed_module(seg_ids).unsqueeze(0).clone()  # [1, T_seg, H]
+                student_embeds_parts.append(seg_embeds)
+                student_labels_parts.append(seg_labels)
 
-            # 注入位置 inputs_embeds = up_proj(顶层 hidden)
-            top_hidden = layer_hiddens[-1]                              # [1, k, lr_hidden]
-            latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)  # [1, k, H_main]
-            student_embeds_parts.append(latent_inputs_embeds)
-            # latent 段位置 labels 全 -100 (latent 是连续向量, 无 token 目标)
-            student_labels_parts.append(
-                torch.full((k,), -100, dtype=torch.long, device=device)
-            )
+            elif seg.type == "latent":
+                k = seg.k
+                # LR 输入: teacher 段起始前 token 最后一层 hidden (双向 detach, CODI 风)
+                in_pos = seg.teacher_input_pos
+                in_pos = min(max(in_pos, 0), T_teacher - 1)
+                h_input = teacher_hidden_states[-1][:, in_pos, :].detach()  # [1, H]
 
-            align_records.append((layer_hiddens, seg.teacher_align_pos))
+                layer_hiddens, _ = latent_reasoner(h_input, k=k)
+                # list of N_lr × [1, k, lr_hidden]
 
-        else:
-            raise ValueError(f"未知 segment 类型: {seg.type}")
+                # 注入: up_proj(顶层 hidden)
+                top_hidden = layer_hiddens[-1]
+                latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)  # [1, k, H]
+                student_embeds_parts.append(latent_inputs_embeds)
+                student_labels_parts.append(torch.full(
+                    (k,), -100, dtype=torch.long, device=device
+                ))
+
+                align_records.append((layer_hiddens, seg.teacher_align_pos))
+
+            else:
+                raise ValueError(f"未知 segment 类型: {seg.type}")
 
     student_embeds = torch.cat(student_embeds_parts, dim=1)        # [1, T_student, H_main]
     student_labels = torch.cat(student_labels_parts, dim=0).unsqueeze(0)  # [1, T_student]
