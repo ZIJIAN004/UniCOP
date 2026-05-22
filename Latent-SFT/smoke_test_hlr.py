@@ -199,35 +199,23 @@ def stage_4_dataset(args):
     )
     assert len(dataset) > 0, "HLRDataset 加载 0 条样本"
 
-    # 找一条 (a) 有 latent 段 + (b) teacher_ids 尽量短 的样本 (防 stage 5 OOM)
-    # 优先选 <= 2048 token; 否则退回首个有 latent 段的;
-    # 都没有则退回首条
-    short_with_latent = None  # < 2048 + 有 latent
-    any_with_latent = None    # 有 latent (长度不限)
+    # 找一条有 latent 段的样本作为检查样本 (不挑短样本, 用真实分布)
+    sample = None
     n_with_latent = 0
     n_scanned = min(len(dataset), 50)
     for i in range(n_scanned):
         s = dataset[i]
         n_lat = sum(1 for seg in s.segments if seg.type == "latent")
-        seq_len = s.teacher_input_ids.size(0)
         if n_lat > 0:
             n_with_latent += 1
-            if any_with_latent is None:
-                any_with_latent = s
-            if seq_len <= 2048 and short_with_latent is None:
-                short_with_latent = s
-
-    if short_with_latent is not None:
-        sample = short_with_latent
-        print(f"    选短样本 ({sample.teacher_input_ids.size(0)} tokens) 防 stage 5 OOM, "
-              f"前 {n_scanned} 条中 {n_with_latent} 条有 latent")
-    elif any_with_latent is not None:
-        sample = any_with_latent
-        print(f"    ⚠ 前 {n_scanned} 条没有 <=2048 token 的样本, 用 {sample.teacher_input_ids.size(0)} token 的 "
-              f"(stage 5 可能 OOM, 需更大显存)")
-    else:
+            if sample is None:
+                sample = s
+    if sample is None:
         sample = dataset[0]
-        print(f"    ⚠ 前 {n_scanned} 条都没 latent 段, 使用首条 (entropy 阈值可能偏严)")
+        print(f"    ⚠ 前 {n_scanned} 条都没 latent 段, 使用首条 (entropy 阈值偏严?)")
+    else:
+        print(f"    前 {n_scanned} 条中 {n_with_latent} 条有 latent 段, "
+              f"用首个 ({sample.teacher_input_ids.size(0)} tokens)")
 
     n_exp = sum(1 for s in sample.segments if s.type == "explicit")
     n_lat = sum(1 for s in sample.segments if s.type == "latent")
@@ -263,22 +251,51 @@ def stage_5_loss(args, data_result):
 
     tokenizer, dataset, sample, batch = data_result
     cfg = HLRConfig()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(f"    加载主模型 {args.model} (bf16) ...")
+    # ── 镜像训练配置: GC + ZeRO-3 + CPU offload (与 submit_train_hlr.sh 一致) ──
+    # 不挑短样本, 用真实长度分布; 必须靠 GC + ZeRO offload 撑住 24GB 单卡
+    from accelerate import Accelerator
+    from accelerate.utils import DeepSpeedPlugin
+
+    # 4 GPU + ZeRO-3 切片 (无 CPU offload, 24GB×4=96GB 等效, Qwen3-4B 充裕)
+    # 与 submit_train_hlr.sh 完全镜像
+    ds_config = {
+        "bf16": {"enabled": True},
+        "train_micro_batch_size_per_gpu": 1,
+        "train_batch_size": "auto",
+        "gradient_accumulation_steps": 1,
+        "gradient_clipping": 1.0,
+        "zero_optimization": {
+            "stage": 3,
+            "overlap_comm": True,
+            "contiguous_gradients": True,
+            "reduce_bucket_size": "auto",
+            "stage3_prefetch_bucket_size": "auto",
+            "stage3_param_persistence_threshold": "auto",
+            "gather_16bit_weights_on_model_save": True,
+        },
+    }
+    accelerator = Accelerator(
+        deepspeed_plugin=DeepSpeedPlugin(hf_ds_config=ds_config),
+        mixed_precision="bf16",
+    )
+    print(f"    accelerator: num_processes={accelerator.num_processes}, "
+          f"is_main={accelerator.is_main_process}, device={accelerator.device}")
+
+    if accelerator.is_main_process:
+        print(f"    加载主模型 {args.model} (bf16) ...")
     model = AutoModelForCausalLM.from_pretrained(
         args.model, torch_dtype=torch.bfloat16, trust_remote_code=True,
-    ).to(device)
+    )
     if len(tokenizer) > model.get_input_embeddings().num_embeddings:
         model.resize_token_embeddings(len(tokenizer))
 
-    # ── 防 OOM: 单卡 24GB + Qwen3-4B + bf16 + LoRA + LR + teacher/student 双 forward
-    #    没 GC 必爆. 必须在 LoRA wrap 之前 enable GC + input_require_grads
-    #    use_reentrant=True (踩坑 #14: ZeRO-3+LoRA+GC 三件套同因)
+    # GC + input_require_grads 必须在 PEFT wrap 之前 (踩坑 #14)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
-    print(f"    [smoke 防 OOM] gradient_checkpointing=True, use_reentrant=True")
+    if accelerator.is_main_process:
+        print(f"    [smoke 镜像训练] gradient_checkpointing=True, use_reentrant=True, ZeRO-3 + CPU offload")
 
     peft_cfg = LoraConfig(
         r=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
@@ -289,61 +306,81 @@ def stage_5_loss(args, data_result):
     model = get_peft_model(model, peft_cfg)
     model.train()
 
+    # Optimizer 必须传给 accelerate.prepare, ZeRO-3 才能切分 (即使 smoke 只跑 1 step)
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad], lr=1e-5
+    )
+    model, optimizer = accelerator.prepare(model, optimizer)
+    device = accelerator.device
+
     seq_len = batch["teacher_input_ids"].size(1)
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         free_gb = torch.cuda.mem_get_info()[0] / 1024**3
-        print(f"    样本长度: {seq_len} tokens, GPU 剩余 free: {free_gb:.2f} GB")
+        print(f"    样本长度: {seq_len} tokens, GPU 剩余 free: {free_gb:.2f} GB (ZeRO-3 init 后)")
 
-    latent_reasoner = build_latent_reasoner_from_main(model, cfg).to(device).to(torch.bfloat16)
+    # LatentReasoner 不进 ZeRO-3 (与 train_hlr 一致, 每 rank 独立完整副本 + 手动 all_reduce)
+    unwrapped_main = accelerator.unwrap_model(model)
+    latent_reasoner = build_latent_reasoner_from_main(unwrapped_main, cfg).to(device).to(torch.bfloat16)
     latent_reasoner.train()
     lr_n = sum(p.numel() for p in latent_reasoner.parameters())
-    print(f"    LatentReasoner: {lr_n/1e6:.2f}M params")
+    n_main_layers = unwrapped_main.config.num_hidden_layers  # Qwen3-4B=36, R1-7B=28
+    if accelerator.is_main_process:
+        print(f"    LatentReasoner: {lr_n/1e6:.2f}M params, n_main_layers={n_main_layers}")
 
-    print(f"    forward + backward 单 sample ...")
+    # batch tensors 移到 device
+    batch_dev = {
+        "teacher_input_ids": batch["teacher_input_ids"].to(device),
+        "teacher_attention_mask": batch["teacher_attention_mask"].to(device),
+        "teacher_labels": batch["teacher_labels"].to(device),
+        "prompt_ids": batch["prompt_ids"].to(device),
+        "segments": batch["segments"],  # list[HLRSegment], 内部 tensors 由 compute_hlr_loss 自处理
+    }
+
+    if accelerator.is_main_process:
+        print(f"    forward + backward 单 sample ...")
     total, t, s, a = compute_hlr_loss(
         model=model,
         latent_reasoner=latent_reasoner,
-        teacher_input_ids=batch["teacher_input_ids"],
-        teacher_attention_mask=batch["teacher_attention_mask"],
-        teacher_labels=batch["teacher_labels"],
-        prompt_ids=batch["prompt_ids"],
-        segments=batch["segments"],
+        teacher_input_ids=batch_dev["teacher_input_ids"],
+        teacher_attention_mask=batch_dev["teacher_attention_mask"],
+        teacher_labels=batch_dev["teacher_labels"],
+        prompt_ids=batch_dev["prompt_ids"],
+        segments=batch_dev["segments"],
         alpha=1.0, beta=1.0, gamma=1.0,
     )
 
     for name, val in [("teacher_ce", t), ("student_ce", s), ("align_l1", a), ("total", total)]:
         assert torch.isfinite(val).all(), f"{name} 是 NaN/Inf: {val}"
-        print(f"    {name} = {val.item():.4f}")
+        if accelerator.is_main_process:
+            print(f"    {name} = {val.item():.4f}")
 
-    # Backward
-    total.backward()
+    # ZeRO-3 backward 必须走 accelerator (hook param gather)
+    accelerator.backward(total)
 
-    # ── 梯度覆盖检查 ──
+    # ── 梯度覆盖检查 (LR 每 rank 完整副本, 可直接查; LoRA/main 在 ZeRO-3 下分片, 放宽) ──
     lr_total_params = sum(1 for p in latent_reasoner.parameters() if p.requires_grad)
     lr_has_grad = sum(
         1 for p in latent_reasoner.parameters()
         if p.grad is not None and p.grad.abs().sum().item() > 0
     )
+    if accelerator.is_main_process:
+        print(f"    LR 梯度: {lr_has_grad}/{lr_total_params} "
+              f"({100*lr_has_grad/lr_total_params:.0f}%) 有非零梯度")
     assert lr_has_grad >= lr_total_params * 0.5, \
         f"LR 梯度覆盖率过低: {lr_has_grad}/{lr_total_params}"
-    print(f"    LR 梯度: {lr_has_grad}/{lr_total_params} ({100*lr_has_grad/lr_total_params:.0f}%) 有非零梯度")
 
-    lora_total = sum(1 for n, p in model.named_parameters() if "lora_" in n and p.requires_grad)
-    lora_has_grad = sum(
-        1 for n, p in model.named_parameters()
-        if "lora_" in n and p.grad is not None and p.grad.abs().sum().item() > 0
-    )
-    print(f"    LoRA 梯度: {lora_has_grad}/{lora_total} 有非零梯度")
-    assert lora_has_grad >= lora_total * 0.5, f"LoRA 梯度覆盖率过低: {lora_has_grad}/{lora_total}"
-
-    # layer_emb 必须有梯度 (28 个对齐点的关键测试)
+    # layer_emb 行数 = 主模型层数 (Qwen3-4B=36, R1-7B=28); align loss 应覆盖每层
     layer_emb_grad = latent_reasoner.layer_emb.weight.grad
     assert layer_emb_grad is not None, "layer_emb.weight.grad is None"
     nonzero_rows = (layer_emb_grad.abs().sum(dim=-1) > 0).sum().item()
-    print(f"    layer_emb 梯度: {nonzero_rows}/28 行有非零梯度")
-    assert nonzero_rows == 28, \
-        f"layer_emb 仅 {nonzero_rows}/28 行有梯度 (期望 28, 说明 align loss 没覆盖每层)"
+    if accelerator.is_main_process:
+        print(f"    layer_emb 梯度: {nonzero_rows}/{n_main_layers} 行有非零梯度")
+    assert nonzero_rows == n_main_layers, \
+        f"layer_emb {nonzero_rows}/{n_main_layers} 行有梯度 (align loss 应覆盖每主模型层)"
+
+    if accelerator.is_main_process:
+        print(f"    ✓ stage 5 ZeRO-3 + GC + 双 forward 跑通")
 
     return (model, latent_reasoner, tokenizer)
 
@@ -352,6 +389,16 @@ def stage_6_inference(args, loss_result):
     if loss_result is None:
         print(f"    ⚠ SKIP: stage 5 没产出模型")
         return
+
+    # 多 rank 环境下只在 main process 跑 (重新加载主模型, 跨 rank 重复会爆显存)
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized() and dist.get_rank() != 0:
+            print(f"    ⚠ SKIP: 非 main process, stage 6 仅 rank 0 跑")
+            dist.barrier()
+            return
+    except Exception:
+        pass
 
     import torch
     from inference import HLRInferenceEngine
@@ -389,6 +436,14 @@ def stage_6_inference(args, loss_result):
           f"{info['latent_steps']} latent steps, "
           f"entropy_history len={len(info['entropy_history'])}")
     print(f"    输出 (前 80 字符): {out_text[:80]!r}")
+
+    # 同步其他 rank
+    try:
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.barrier()
+    except Exception:
+        pass
 
 
 def stage_7_checkpoint():

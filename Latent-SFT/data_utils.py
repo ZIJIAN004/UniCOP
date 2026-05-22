@@ -323,7 +323,10 @@ class HLRDataset(Dataset):
         # 收集被成功 build 的 record 子集做覆盖率统计 (与 entropy_profile 端共用 schema)
         accepted_records = []
 
-        skipped = 0
+        n_invalid = 0          # 跳过 (json 解析失败 / output 空 / </think> 缺失)
+        n_truncated = 0        # 因 teacher_ids > max_length 而 drop
+        n_filtered = 0         # 因 filter_problems / filter_sizes 而 drop
+        record_total_len_before_filter = 0  # 用于截断率分母
         with open(data_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -332,29 +335,52 @@ class HLRDataset(Dataset):
                 try:
                     r = json.loads(line)
                 except json.JSONDecodeError:
-                    skipped += 1
+                    n_invalid += 1
                     continue
 
                 if filter_problems and r.get("problem_type") not in filter_problems:
+                    n_filtered += 1
                     continue
                 if filter_sizes and r.get("n") not in filter_sizes:
+                    n_filtered += 1
                     continue
 
                 output = r.get("output", "")
                 if not output or not output.strip():
-                    skipped += 1
+                    n_invalid += 1
                     continue
 
-                sample = self._build_sample(r)
+                record_total_len_before_filter += 1
+                sample, reason = self._build_sample_with_reason(r)
                 if sample is not None:
                     self.samples.append(sample)
                     accepted_records.append(r)
+                elif reason == "truncated":
+                    n_truncated += 1
+                else:
+                    n_invalid += 1
 
-        if skipped:
-            print(f"  跳过 {skipped} 条无效记录")
-        print(f"  成功加载 {len(self.samples)} 条 HLR 训练样本")
+        print(f"  HLRDataset 加载: {len(self.samples)} 接受 | "
+              f"{n_truncated} 截断 (max_length={self.max_length}) | "
+              f"{n_invalid} 无效 | {n_filtered} 被 filter")
 
-        # ── token-level 压缩比例报送 (训练侧, 与 entropy_profile 输出对齐) ──
+        # ── 长度分布报送 (帮助调 max_length / Distill 数据生成端) ──
+        if self.samples:
+            import statistics
+            lens = sorted(s.teacher_input_ids.size(0) for s in self.samples)
+            n = len(lens)
+            print(f"  Teacher token 长度分布 (接受样本 n={n}):")
+            print(f"    min/max          : {lens[0]} / {lens[-1]}")
+            print(f"    mean / median    : {sum(lens)/n:.0f} / {lens[n // 2]}")
+            print(f"    p50/p75/p90/p95/p99: "
+                  f"{lens[int(0.50*n)]}/{lens[int(0.75*n)]}/{lens[int(0.90*n)]}/"
+                  f"{lens[int(0.95*n)]}/{lens[min(int(0.99*n), n-1)]}")
+            if record_total_len_before_filter > 0:
+                trunc_rate = n_truncated / record_total_len_before_filter
+                print(f"  截断率: {n_truncated}/{record_total_len_before_filter} "
+                      f"= {100*trunc_rate:.2f}%  (越高说明 max_length 越小, 浪费数据)")
+
+        # ── token-level 压缩比例报送 ──
         try:
             from entropy_profile import summarize_latent_coverage, print_coverage_summary
             stats = summarize_latent_coverage(accepted_records, compression_ratio=self.compression_ratio)
@@ -364,6 +390,41 @@ class HLRDataset(Dataset):
                 print("  ⚠ 训练样本里没有 cot_token_count 字段 (旧版 profiled jsonl?), 跳过覆盖率报送")
         except ImportError:
             pass
+
+    def _build_sample_with_reason(self, record):
+        """包装 _build_sample, 返回 (sample, reason) 以区分截断 vs 其它无效."""
+        # 简单实现: 先 tokenize 一次看长度, 再走完整 build
+        # 如果未来想避免双重 tokenize, 可以重写 _build_sample 让它返回 reason
+        try:
+            sample = self._build_sample(record)
+            if sample is not None:
+                return sample, "ok"
+            # _build_sample 返回 None 的原因可能是: 截断 / </think> 缺失 / teacher_align_pos OOB
+            # 这里再做一次轻量截断探测 (复用 tokenizer 但只 encode 一次)
+            output = record.get("output", "")
+            if "</think>" not in output:
+                return None, "no_think_close"
+            # 估算长度判断是否截断
+            tokenizer = self.tokenizer
+            from data_utils import _POSTHOC_SYSTEM_MARKER, _POSTHOC_USER_MARKER, strip_posthoc
+            sys_text = strip_posthoc(record["prompt"]["system"], _POSTHOC_SYSTEM_MARKER)
+            usr_text = strip_posthoc(record["prompt"]["user"], _POSTHOC_USER_MARKER)
+            prompt_text = tokenizer.apply_chat_template(
+                [{"role": "system", "content": sys_text}, {"role": "user", "content": usr_text}],
+                tokenize=False, add_generation_prompt=True,
+            )
+            if not prompt_text.rstrip().endswith("<think>"):
+                prompt_text += "<think>\n"
+            output_stripped = output.lstrip()
+            if output_stripped.startswith("<think>"):
+                output_stripped = output_stripped[len("<think>"):].lstrip("\n")
+            est_ids = tokenizer.encode(prompt_text + output_stripped + tokenizer.eos_token,
+                                       add_special_tokens=False)
+            if len(est_ids) > self.max_length:
+                return None, "truncated"
+            return None, "invalid"
+        except Exception:
+            return None, "invalid"
 
     def _build_sample(self, record):
         """
