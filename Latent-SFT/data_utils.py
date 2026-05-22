@@ -282,7 +282,8 @@ class HLRSegment:
     ids: torch.Tensor | None = None          # explicit/solution: token ids
     labels: torch.Tensor | None = None       # explicit/solution: labels (-100 屏蔽)
     k: int | None = None                     # latent: 要生成的 latent 数
-    teacher_align_pos: int | None = None     # latent: 对齐到 teacher 的位置 (绝对索引)
+    teacher_align_pos: int | None = None     # latent: 段末位对齐到 teacher 的绝对索引
+    teacher_input_pos: int | None = None     # latent: LR input 对应 teacher 位置 (段起始前一个 token)
 
 
 @dataclass
@@ -513,6 +514,9 @@ class HLRDataset(Dataset):
                 ))
 
             teacher_align_pos = teacher_cot_start + seg_end
+            teacher_input_pos = max(0, teacher_cot_start + seg_start - 1)
+            # teacher_input_pos 取段起始前一个 teacher 位置;
+            # 若段从 cot 开头开始 (seg_start=0), 退到 prompt 末位 (= teacher_cot_start - 1)
             if teacher_align_pos >= len(teacher_ids):
                 # teacher 序列在 max_length 处被截断, latent 段对齐 anchor 不可用
                 # → align loss 不准, 整条样本丢弃 (这种情况在 max_length=8192 下很少触发)
@@ -521,6 +525,7 @@ class HLRDataset(Dataset):
                 type="latent",
                 k=k,
                 teacher_align_pos=teacher_align_pos,
+                teacher_input_pos=teacher_input_pos,
             ))
 
             cot_cursor = seg_end + 1

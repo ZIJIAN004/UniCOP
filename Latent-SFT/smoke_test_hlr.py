@@ -390,11 +390,22 @@ def stage_6_inference(args, loss_result):
         print(f"    ⚠ SKIP: stage 5 没产出模型")
         return
 
-    # 多 rank 环境下只在 main process 跑 (重新加载主模型, 跨 rank 重复会爆显存)
+    # 在 DeepSpeed ZeRO-3 / 分布式环境下跳过, 推理不需要 ZeRO-3, 而且
+    # HLRInferenceEngine 用 device_map='auto' 加载主模型, 与 ZeRO-3 互斥.
+    # 训练 smoke 通过后, 用户单独跑 inference.py 验证生成.
     try:
         import torch.distributed as dist
-        if dist.is_initialized() and dist.get_rank() != 0:
-            print(f"    ⚠ SKIP: 非 main process, stage 6 仅 rank 0 跑")
+        if dist.is_initialized():
+            try:
+                rank = dist.get_rank()
+            except Exception:
+                rank = 0
+            if rank == 0:
+                print(f"    ⚠ SKIP: 检测到 ZeRO-3 / distributed env, stage 6 不在此跑")
+                print(f"       推理验证请单独运行 (zhuoyi 上):")
+                print(f"         srun --gpus=1 python Latent-SFT/inference.py \\")
+                print(f"           --model {args.model} \\")
+                print(f"           --prompt '...'")
             dist.barrier()
             return
     except Exception:

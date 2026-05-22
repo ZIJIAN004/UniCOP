@@ -598,28 +598,42 @@ def compute_hlr_loss(
     gamma: float = 1.0,
 ):
     """
-    HLR 训练 loss (Phase 1)。
+    HLR 训练 loss (Phase 1, GC-兼容单次拼接 forward 版).
+
+    设计 (从"逐段 KV cache 接力"改为"单次拼接 inputs_embeds"):
+      use_cache=True 与 gradient_checkpointing 互斥 (HF 会强制 use_cache=False),
+      原 "prompt → 段1 → 段2 ..." KV cache 接力路径在 GC 下静默失效.
+      新设计:
+        1. Teacher: 完整 forward 一次 → teacher_loss + teacher_hidden_states (供 LR 用)
+        2. LR: 每个 latent 段独立 forward, 输入 = teacher hidden(段起始前一个 token).detach()
+           输出 = layer_hiddens (各层 × [1, k, lr_hidden])
+        3. Student: prompt + 各段 (含 latent 段 LR输出·up_proj) 拼成完整 inputs_embeds,
+           一次 model(inputs_embeds=..., labels=...) → student_loss
+           GC 兼容, 不依赖 KV cache, 跨段语义靠 self-attention 自然连接.
+        4. Align: 每个 latent 段末位 LR 输出 vs teacher 段末位 hidden (每主模型层 1 个对齐点).
+           teacher hidden 端 detach (CODI 风, 不污染主模型 teacher 路径).
+           LR input 也用 detach 的 teacher hidden, align 梯度不回传主模型.
+
+    梯度路径:
+      α · student CE → 主模型 LoRA (直接) + LR 全部参数 (通过 inputs_embeds 拼接)
+      β · align L1   → LR 全部 (含 layer_emb / up_proj), 不更新主模型 (双向 detach)
+      γ · teacher CE → 主模型 LoRA
 
     Args:
-        model:               PEFT-wrapped 主模型 (LoRA + base)
-        latent_reasoner:     LatentReasoner 实例
-        teacher_input_ids:   [1, T_teacher]
-        teacher_attention_mask: [1, T_teacher]
-        teacher_labels:      [1, T_teacher]，solution 区间外为 -100
-        prompt_ids:          [P]  无 batch 维, prompt token id 序列
-        segments:            list[HLRSegment]，HLRDataset 输出的分段
-        alpha, beta, gamma:  loss 加权系数
+        prompt_ids:          [P] 无 batch 维 (token id 序列)
+        segments:            list[HLRSegment], explicit/solution 含 ids+labels,
+                              latent 含 k + teacher_align_pos + teacher_input_pos
 
-    Returns:
-        total_loss, teacher_loss, student_loss, align_loss  (后三者 detach)
+    Returns: (total_loss, teacher_loss[d], student_loss[d], align_loss[d])
     """
     device = next(model.parameters()).device
     teacher_input_ids = teacher_input_ids.to(device)
     teacher_attention_mask = teacher_attention_mask.to(device)
     teacher_labels = teacher_labels.to(device)
-    prompt_ids_dev = prompt_ids.to(device).unsqueeze(0)  # [1, P]
+    prompt_ids_dev = prompt_ids.to(device)
+    T_teacher = teacher_input_ids.size(1)
 
-    # ── Teacher forward (完整一次) ──
+    # ── (1) Teacher forward 一次 ──
     teacher_out = model(
         input_ids=teacher_input_ids,
         attention_mask=teacher_attention_mask,
@@ -630,99 +644,86 @@ def compute_hlr_loss(
     teacher_hidden_states = teacher_out.hidden_states  # tuple of (L+1) × [1, T, H]
     # hidden_states[0] = embedding, hidden_states[i] = main layer (i-1) 输出 (0-indexed main)
 
-    # ── Student 分段流水 ──
-    student_ce_sum = torch.tensor(0.0, device=device)
-    student_token_count = 0
+    # ── (2)+(3) 准备拼接 student inputs_embeds ──
+    embed_tokens = model.get_input_embeddings()
+    prompt_embeds = embed_tokens(prompt_ids_dev).unsqueeze(0)  # [1, P, H_main]
+    student_embeds_parts = [prompt_embeds]
+    # labels 在 prompt 区间全 -100
+    student_labels_parts = [torch.full((prompt_embeds.size(1),), -100,
+                                       dtype=torch.long, device=device)]
 
-    align_loss_sum = torch.tensor(0.0, device=device)
-    align_seg_count = 0
-
-    # Prefill prompt
-    prompt_out = model(
-        input_ids=prompt_ids_dev,
-        use_cache=True,
-        output_hidden_states=True,
-    )
-    past_kv = prompt_out.past_key_values
-    last_main_hidden = prompt_out.hidden_states[-1][:, -1, :]  # [1, main_hidden]
+    align_records = []  # [(layer_hiddens, teacher_align_pos)] 给 align loss 用
 
     for seg in segments:
         if seg.type in ("explicit", "solution"):
-            seg_ids = seg.ids.to(device).unsqueeze(0)
-            seg_labels = seg.labels.to(device).unsqueeze(0)
-
-            seg_out = model(
-                input_ids=seg_ids,
-                past_key_values=past_kv,
-                use_cache=True,
-                output_hidden_states=True,
-            )
-            past_kv = seg_out.past_key_values
-
-            seg_ce, n_targets = _segment_ce(seg_out.logits, seg_labels)
-            if n_targets > 0:
-                student_ce_sum = student_ce_sum + seg_ce
-                student_token_count += n_targets
-
-            last_main_hidden = seg_out.hidden_states[-1][:, -1, :]
+            seg_ids = seg.ids.to(device)
+            seg_labels = seg.labels.to(device)
+            seg_embeds = embed_tokens(seg_ids).unsqueeze(0)        # [1, T_seg, H_main]
+            student_embeds_parts.append(seg_embeds)
+            student_labels_parts.append(seg_labels)
 
         elif seg.type == "latent":
             k = seg.k
+            # LR 输入: teacher 段起始前一个位置最后一层 hidden (detach, CODI 风)
+            # 双向 detach: teacher 端断梯度, LR input 也是 detach 后的 teacher hidden,
+            # align 不污染主模型, 但 LR 输出仍通过 up_proj 接 student CE 路径回传 LR
+            in_pos = seg.teacher_input_pos
+            in_pos = min(max(in_pos, 0), T_teacher - 1)
+            h_input = teacher_hidden_states[-1][:, in_pos, :].detach()  # [1, H_main]
 
-            # LR forward (训练: 一次性整段, 丢弃 KV cache)
-            layer_hiddens, _ = latent_reasoner(last_main_hidden, k=k)
-            # list of 7 × [1, k, lr_hidden=896]
+            layer_hiddens, _ = latent_reasoner(h_input, k=k)
+            # list of N_lr × [1, k, lr_hidden]
 
-            # ── Align loss: 28 个对齐点 (主模型每层各 1 个) ──
-            # 同一 LR layer hidden 在不同 layer_emb 调制下应贴近主模型每层 hidden,
-            # 这样 layer_emb 28 个向量全都有梯度信号。
-            seg_align = torch.tensor(0.0, device=device)
-            num_main_layers = latent_reasoner.num_main_layers
-            for L_main in range(num_main_layers):
-                teacher_hs_idx = L_main + 1   # HF index (skip embedding [0])
-
-                # LR hidden 段末位, 通过 project_for_main_layer 加 layer_emb(L_main) 调制 + up_proj
-                h_lr_main = latent_reasoner.project_for_main_layer(
-                    layer_hiddens, L_main
-                )[:, -1, :]   # [1, main_hidden]
-
-                # Teacher 主模型 layer L_main 在 teacher_align_pos 的 hidden (stop-grad)
-                h_teacher = teacher_hidden_states[teacher_hs_idx][
-                    :, seg.teacher_align_pos, :
-                ].detach()    # [1, main_hidden]
-
-                # L1 + std normalize
-                std = h_teacher.std(dim=-1).mean().clamp(min=0.1)
-                layer_align = (h_lr_main - h_teacher).abs().mean() / std
-
-                seg_align = seg_align + layer_align
-
-            seg_align = seg_align / num_main_layers
-            align_loss_sum = align_loss_sum + seg_align
-            align_seg_count += 1
-
-            # ── 注入主模型 (Phase 1: A'' 风, 用 LR 顶层 hidden 作 inputs_embeds) ──
-            # TODO_INJECT (Phase 2): 替换为严格 B2 KV inject
-            top_hidden = layer_hiddens[-1]                                # [1, k, 896]
-            latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)    # [1, k, main_hidden]
-
-            latent_out = model(
-                inputs_embeds=latent_inputs_embeds,
-                past_key_values=past_kv,
-                use_cache=True,
-                output_hidden_states=True,
+            # 注入位置 inputs_embeds = up_proj(顶层 hidden)
+            top_hidden = layer_hiddens[-1]                              # [1, k, lr_hidden]
+            latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)  # [1, k, H_main]
+            student_embeds_parts.append(latent_inputs_embeds)
+            # latent 段位置 labels 全 -100 (latent 是连续向量, 无 token 目标)
+            student_labels_parts.append(
+                torch.full((k,), -100, dtype=torch.long, device=device)
             )
-            past_kv = latent_out.past_key_values
-            last_main_hidden = latent_out.hidden_states[-1][:, -1, :]
+
+            align_records.append((layer_hiddens, seg.teacher_align_pos))
 
         else:
             raise ValueError(f"未知 segment 类型: {seg.type}")
 
-    # ── 汇总 ──
-    if student_token_count > 0:
-        student_loss = student_ce_sum / student_token_count
-    else:
-        student_loss = torch.tensor(0.0, device=device)
+    student_embeds = torch.cat(student_embeds_parts, dim=1)        # [1, T_student, H_main]
+    student_labels = torch.cat(student_labels_parts, dim=0).unsqueeze(0)  # [1, T_student]
+
+    # ── (3) Student forward 一次 (GC 友好, 不需 use_cache) ──
+    student_out = model(
+        inputs_embeds=student_embeds,
+        labels=student_labels,
+        # 不开 output_hidden_states (Phase 1 不用 student hidden), 省显存
+    )
+    student_loss = student_out.loss
+    if student_loss is None:
+        # 全 -100 边界情况 (理论上不会发生, 至少有 solution segment)
+        student_loss = torch.tensor(0.0, device=device, requires_grad=True)
+
+    # ── (4) Align loss: 每段末位 × 每主模型层 ──
+    align_loss_sum = torch.tensor(0.0, device=device)
+    align_seg_count = 0
+    num_main_layers = latent_reasoner.num_main_layers
+
+    for layer_hiddens, teacher_align_pos in align_records:
+        teacher_align_pos = min(max(teacher_align_pos, 0), T_teacher - 1)
+        seg_align = torch.tensor(0.0, device=device)
+        for L_main in range(num_main_layers):
+            teacher_hs_idx = L_main + 1   # skip embedding [0]
+            h_lr_main = latent_reasoner.project_for_main_layer(
+                layer_hiddens, L_main
+            )[:, -1, :]   # [1, H_main]  段末位 LR 输出
+            h_teacher = teacher_hidden_states[teacher_hs_idx][
+                :, teacher_align_pos, :
+            ].detach()    # [1, H_main]  teacher 段末位 (stop-grad)
+            std = h_teacher.std(dim=-1).mean().clamp(min=0.1)
+            seg_align = seg_align + (h_lr_main - h_teacher).abs().mean() / std
+
+        seg_align = seg_align / num_main_layers
+        align_loss_sum = align_loss_sum + seg_align
+        align_seg_count += 1
 
     if align_seg_count > 0:
         align_loss = align_loss_sum / align_seg_count
