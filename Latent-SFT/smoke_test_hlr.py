@@ -297,7 +297,8 @@ def stage_5_loss(args, data_result):
     if hasattr(model, "enable_input_require_grads"):
         model.enable_input_require_grads()
     if accelerator.is_main_process:
-        print(f"    [smoke 镜像训练] gradient_checkpointing=True, use_reentrant=True, ZeRO-3 + CPU offload")
+        print(f"    [smoke 镜像训练] gradient_checkpointing=True, use_reentrant=True, "
+              f"ZeRO-3 (4 GPU 切片, 无 CPU offload)")
 
     peft_cfg = LoraConfig(
         r=cfg.lora_rank, lora_alpha=cfg.lora_alpha,
@@ -307,6 +308,12 @@ def stage_5_loss(args, data_result):
     )
     model = get_peft_model(model, peft_cfg)
     model.train()
+
+    # 防御性检查: embed_tokens 必须 frozen (LoRA 不训 embed; 若 unfreeze 会破坏 GatheredParameters 反向路径)
+    embed_weight = model.get_input_embeddings().weight
+    assert not embed_weight.requires_grad, \
+        f"embed_tokens.weight.requires_grad = {embed_weight.requires_grad}, 期望 False " \
+        f"(PEFT 应 freeze 所有非 LoRA 参数)"
 
     # Optimizer 必须传给 accelerate.prepare, ZeRO-3 才能切分 (即使 smoke 只跑 1 step)
     optimizer = torch.optim.AdamW(
