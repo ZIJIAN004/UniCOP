@@ -320,6 +320,8 @@ class HLRDataset(Dataset):
         self.max_length = max_length
         self.compression_ratio = latent_compression_ratio
         self.samples = []
+        # 收集被成功 build 的 record 子集做覆盖率统计 (与 entropy_profile 端共用 schema)
+        accepted_records = []
 
         skipped = 0
         with open(data_path, "r", encoding="utf-8") as f:
@@ -346,10 +348,22 @@ class HLRDataset(Dataset):
                 sample = self._build_sample(r)
                 if sample is not None:
                     self.samples.append(sample)
+                    accepted_records.append(r)
 
         if skipped:
             print(f"  跳过 {skipped} 条无效记录")
         print(f"  成功加载 {len(self.samples)} 条 HLR 训练样本")
+
+        # ── token-level 压缩比例报送 (训练侧, 与 entropy_profile 输出对齐) ──
+        try:
+            from entropy_profile import summarize_latent_coverage, print_coverage_summary
+            stats = summarize_latent_coverage(accepted_records, compression_ratio=self.compression_ratio)
+            if stats["cot_total_tokens"] > 0:
+                print_coverage_summary(stats, title="Latent 覆盖统计 (HLRDataset 训练侧)")
+            else:
+                print("  ⚠ 训练样本里没有 cot_token_count 字段 (旧版 profiled jsonl?), 跳过覆盖率报送")
+        except ImportError:
+            pass
 
     def _build_sample(self, record):
         """
