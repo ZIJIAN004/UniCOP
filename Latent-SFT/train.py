@@ -263,63 +263,73 @@ def train_hlr(cfg: HLRConfig):
         latent_reasoner.train()
         epoch_loss = 0.0
 
+        # GA boundary 手动追踪 (不再用 accelerator.accumulate context):
+        # accelerator.accumulate 内部调 model.no_sync(), 跟 DeepSpeed ZeRO-3
+        # 不兼容 (Accelerate issue #3481), 导致 compute_hlr_loss forward 死锁.
+        # DeepSpeed 自己按 ds_config 的 gradient_accumulation_steps 处理累积:
+        #   - 前 GA-1 个 step 的 backward 累积梯度, optimizer.step() 是 no-op
+        #   - 第 GA 个 step 真正 all-reduce + optimizer.step()
+        # main_optimizer/scheduler 走 DeepSpeed wrap, 始终调用即可;
+        # lr_optimizer/scheduler 不在 DeepSpeed 内, 用 _is_sync 手动门控.
+        _ga = cfg.gradient_accumulation_steps
         for step, batch in enumerate(dataloader):
+            _is_sync = ((step + 1) % _ga == 0)
             # 前 3 步打细 stamp (定位 hang 用)
             _DBG = step < 3
             if _DBG:
                 _stamp(f"step {step}: batch fetched "
-                       f"(teacher_len={batch['teacher_input_ids'].size(1)})")
-            with accelerator.accumulate(model):
-                if _DBG:
-                    _stamp(f"step {step}: inside accumulate, BEFORE compute_hlr_loss "
-                           f"(sync_grad={accelerator.sync_gradients})")
-                total_loss, t_loss, s_loss, a_loss = compute_hlr_loss(
-                    model=model,
-                    latent_reasoner=latent_reasoner,
-                    teacher_input_ids=batch["teacher_input_ids"],
-                    teacher_attention_mask=batch["teacher_attention_mask"],
-                    teacher_labels=batch["teacher_labels"],
-                    prompt_ids=batch["prompt_ids"],
-                    segments=batch["segments"],
-                    alpha=cfg.alpha,
-                    beta=cfg.beta,
-                    gamma=cfg.gamma,
+                       f"(teacher_len={batch['teacher_input_ids'].size(1)}) "
+                       f"is_sync={_is_sync}")
+                _stamp(f"step {step}: BEFORE compute_hlr_loss")
+            total_loss, t_loss, s_loss, a_loss = compute_hlr_loss(
+                model=model,
+                latent_reasoner=latent_reasoner,
+                teacher_input_ids=batch["teacher_input_ids"],
+                teacher_attention_mask=batch["teacher_attention_mask"],
+                teacher_labels=batch["teacher_labels"],
+                prompt_ids=batch["prompt_ids"],
+                segments=batch["segments"],
+                alpha=cfg.alpha,
+                beta=cfg.beta,
+                gamma=cfg.gamma,
+            )
+            if _DBG:
+                _stamp(f"step {step}: AFTER compute_hlr_loss "
+                       f"(t={t_loss.item():.3f} s={s_loss.item():.3f} "
+                       f"a={a_loss.item():.3f})")
+
+            accelerator.backward(total_loss)
+            if _DBG:
+                _stamp(f"step {step}: AFTER accelerator.backward")
+
+            if _is_sync:
+                # 多卡 LatentReasoner 梯度手动 all-reduce (LR 没进 DeepSpeed sharding)
+                if accelerator.num_processes > 1:
+                    for p in latent_reasoner.parameters():
+                        if p.grad is not None:
+                            torch.distributed.all_reduce(
+                                p.grad, op=torch.distributed.ReduceOp.AVG
+                            )
+
+                accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(
+                    latent_reasoner.parameters(), cfg.max_grad_norm
                 )
-                if _DBG:
-                    _stamp(f"step {step}: AFTER compute_hlr_loss "
-                           f"(t={t_loss.item():.3f} s={s_loss.item():.3f} "
-                           f"a={a_loss.item():.3f})")
 
-                accelerator.backward(total_loss)
-                if _DBG:
-                    _stamp(f"step {step}: AFTER accelerator.backward "
-                           f"(sync_grad={accelerator.sync_gradients})")
+                lr_optimizer.step()
+                lr_scheduler.step()
+                lr_optimizer.zero_grad()
 
-                if accelerator.sync_gradients:
-                    # 多卡 LatentReasoner 梯度手动 all-reduce (LR 没进 DeepSpeed sharding)
-                    if accelerator.num_processes > 1:
-                        for p in latent_reasoner.parameters():
-                            if p.grad is not None:
-                                torch.distributed.all_reduce(
-                                    p.grad, op=torch.distributed.ReduceOp.AVG
-                                )
-
-                    accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
-                    torch.nn.utils.clip_grad_norm_(
-                        latent_reasoner.parameters(), cfg.max_grad_norm
-                    )
-
-                    lr_optimizer.step()
-                    lr_scheduler.step()
-                    lr_optimizer.zero_grad()
-
-                main_optimizer.step()
-                main_scheduler.step()
-                main_optimizer.zero_grad()
+            # main_optimizer 走 DeepSpeed wrap, 内部按 GA boundary 自动跳过非 boundary
+            main_optimizer.step()
+            main_scheduler.step()
+            main_optimizer.zero_grad()
+            if _DBG and _is_sync:
+                _stamp(f"step {step}: AFTER optimizer.step (sync boundary)")
 
             epoch_loss += total_loss.item()
 
-            if accelerator.sync_gradients:
+            if _is_sync:
                 global_step += 1
 
                 if global_step % cfg.logging_steps == 0 and accelerator.is_main_process:
