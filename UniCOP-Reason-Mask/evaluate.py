@@ -947,13 +947,15 @@ def main():
     if args.backend == "api" and not args.gcp_credentials:
         parser.error("backend=api 时必须通过 --gcp_credentials 指定服务账号密钥文件")
 
-    # 确定 max_completion_length
+    # 确定 max_completion_length: 命令行 > config.eval_max_completion_length_{model_type}
+    # 之前 hardcode (reasoning=10000, instruct=512) 让 config 字段成 dead config,
+    # 改为读 config 字段, 调长度只改 config.py 一处.
     if args.max_completion_length is not None:
         max_completion_length = args.max_completion_length
     elif args.model_type == "reasoning":
-        max_completion_length = 10000
+        max_completion_length = config.eval_max_completion_length_reasoning
     else:
-        max_completion_length = 512
+        max_completion_length = config.eval_max_completion_length_instruct
 
     prompt_mode = args.prompt_mode
 

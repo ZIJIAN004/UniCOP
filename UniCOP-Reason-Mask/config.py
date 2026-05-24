@@ -238,7 +238,10 @@ class Config:
     #   reasoning → 推理模型（DeepSeek-R1-Distill 系列），需长 completion 容纳 <think> 链
     #   instruct  → 普通指令模型（Qwen2.5-Instruct 等），直接输出答案，无需长 completion
     eval_model_type: str = "reasoning"
-    eval_max_completion_length_reasoning: int = 4096
+    # eval cap 调高: 训练 max_completion_length=6144, eval 留 ~2x 余量给 think outlier.
+    # 12000 < Qwen3-4B max_position_embeddings (262144) 和 R1-7B (131072), 引擎无障碍.
+    # evaluate.py:954 已改为读这个字段 (原来是 hardcode 10000, dead config), 改这里生效.
+    eval_max_completion_length_reasoning: int = 12000
     eval_max_completion_length_instruct:  int = 512
 
     # ── 评估后端 ─────────────────────────────────────────────────────
