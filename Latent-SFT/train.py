@@ -13,6 +13,7 @@ HLR 训练脚本 (Hierarchical Latent Reasoner).
 import argparse
 import math
 import os
+import time
 from functools import partial
 
 import torch
@@ -26,6 +27,19 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedul
 from hlr_config import HLRConfig
 from data_utils import HLRDataset, collate_hlr
 from model import build_latent_reasoner_from_main, compute_hlr_loss
+
+
+# ── Rank-level 时间戳打点 (用于定位 ZeRO-3 hang 发生在哪一步) ──────────────
+# 用 env RANK (accelerate launch 自动设, 4 卡场景 0..3),
+# 比 accelerator.process_index 早可用 (后者要等 Accelerator() 构造完).
+# 每条打点强制 flush, 让日志立刻可见即使后续 hang.
+_HLR_T0 = time.time()
+_HLR_RANK = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
+
+
+def _stamp(msg: str) -> None:
+    elapsed = time.time() - _HLR_T0
+    print(f"[STAMP rank={_HLR_RANK} +{elapsed:6.1f}s] {msg}", flush=True)
 
 
 def make_deepspeed_config(zero_stage: int) -> dict | None:
@@ -62,15 +76,18 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
 
 
 def train_hlr(cfg: HLRConfig):
+    _stamp("enter train_hlr()")
     ds_config = make_deepspeed_config(cfg.zero_stage)
     ds_plugin = None
     if ds_config is not None:
         ds_plugin = DeepSpeedPlugin(hf_ds_config=ds_config)
+    _stamp("before Accelerator()")
     accelerator = Accelerator(
         gradient_accumulation_steps=cfg.gradient_accumulation_steps,
         mixed_precision="bf16",
         deepspeed_plugin=ds_plugin,
     )
+    _stamp(f"after Accelerator()  process_index={accelerator.process_index}/{accelerator.num_processes}")
 
     set_seed(cfg.seed)
 
@@ -108,11 +125,13 @@ def train_hlr(cfg: HLRConfig):
     tokenizer.padding_side = "right"
 
     # ── 主模型 ──
+    _stamp("before from_pretrained (main model)")
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     )
+    _stamp("after from_pretrained (main model)")
 
     if len(tokenizer) > model.get_input_embeddings().num_embeddings:
         model.resize_token_embeddings(len(tokenizer))
@@ -152,17 +171,22 @@ def train_hlr(cfg: HLRConfig):
             bias="none",
             task_type="CAUSAL_LM",
         )
+        _stamp("before get_peft_model")
         model = get_peft_model(model, peft_config)
+        _stamp("after get_peft_model")
         if accelerator.is_main_process:
             model.print_trainable_parameters()
 
     # ── LatentReasoner ──
+    _stamp("before build_latent_reasoner_from_main")
     latent_reasoner = build_latent_reasoner_from_main(model, cfg)
+    _stamp("after build_latent_reasoner_from_main")
     if accelerator.is_main_process:
         n_params = sum(p.numel() for p in latent_reasoner.parameters())
         print(f"  LatentReasoner 参数量: {n_params/1e6:.2f}M")
 
     # ── 数据 ──
+    _stamp("before HLRDataset()")
     dataset = HLRDataset(
         cfg.data_path, tokenizer,
         max_length=cfg.max_length,
@@ -170,6 +194,7 @@ def train_hlr(cfg: HLRConfig):
         filter_problems=cfg.filter_problems,
         filter_sizes=cfg.filter_sizes,
     )
+    _stamp(f"after HLRDataset()  n={len(dataset)}")
 
     collate_fn = partial(collate_hlr, pad_token_id=tokenizer.pad_token_id)
     dataloader = DataLoader(
@@ -195,13 +220,16 @@ def train_hlr(cfg: HLRConfig):
 
     # ── Accelerate prepare ──
     # 主模型 + 主 optimizer + dataloader 进 DeepSpeed; LatentReasoner 单独管理
+    _stamp("before accelerator.prepare(model, opt, dataloader)  ← ZeRO-3 init")
     model, main_optimizer, dataloader = accelerator.prepare(
         model, main_optimizer, dataloader
     )
+    _stamp("after accelerator.prepare(model, opt, dataloader)  ← ZeRO-3 init done")
     # LR 必须显式转 bf16: 主模型走 DeepSpeed bf16, hidden 是 bf16;
     # LR 没进 accelerator.prepare, 默认 fp32 → 与 bf16 hidden 做 Linear 会 dtype mismatch.
     # smoke_test_hlr.py:332 已经这么做, train.py 之前漏了 (回归 bug).
     latent_reasoner = latent_reasoner.to(accelerator.device).to(torch.bfloat16)
+    _stamp("after latent_reasoner.to(bf16)")
 
     num_training_steps = math.ceil(
         len(dataloader) / cfg.gradient_accumulation_steps
@@ -222,6 +250,7 @@ def train_hlr(cfg: HLRConfig):
     )
 
     # ── 训练循环 ──
+    _stamp("before training loop (entering first epoch)")
     global_step = 0
     for epoch in range(cfg.num_epochs):
         model.train()
@@ -229,6 +258,8 @@ def train_hlr(cfg: HLRConfig):
         epoch_loss = 0.0
 
         for step, batch in enumerate(dataloader):
+            if step == 0:
+                _stamp("first batch fetched from dataloader, entering compute_hlr_loss")
             with accelerator.accumulate(model):
                 total_loss, t_loss, s_loss, a_loss = compute_hlr_loss(
                     model=model,

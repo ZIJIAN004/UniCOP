@@ -46,6 +46,12 @@ export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600
 export NCCL_TIMEOUT=3600
 export DEEPSPEED_TIMEOUT=3600
 
+# ── 诊断 env (定位 ZeRO-3 hang 用) ──
+export PYTHONFAULTHANDLER=1
+export TORCH_NCCL_TRACE_BUFFER_SIZE=20480
+export TORCH_NCCL_DUMP_ON_TIMEOUT=1
+export NCCL_DEBUG=WARN
+
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop
