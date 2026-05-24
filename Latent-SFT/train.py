@@ -177,13 +177,14 @@ def train_hlr(cfg: HLRConfig):
         if accelerator.is_main_process:
             model.print_trainable_parameters()
 
-    # ── LatentReasoner ──
-    _stamp("before build_latent_reasoner_from_main")
-    latent_reasoner = build_latent_reasoner_from_main(model, cfg)
-    _stamp("after build_latent_reasoner_from_main")
-    if accelerator.is_main_process:
-        n_params = sum(p.numel() for p in latent_reasoner.parameters())
-        print(f"  LatentReasoner 参数量: {n_params/1e6:.2f}M")
+    # LatentReasoner 必须在 accelerator.prepare 之后创建 (跟 smoke_test_hlr.py 一致):
+    # ZeRO-3 init context 在 Accelerator(deepspeed_plugin=...) 创建后激活,
+    # 在这个 context 内创建的所有 nn.Module 参数都被 zero.Init 自动 partition.
+    # LR 如果在 prepare 前创建, 参数会被 partition 但又不在 DeepSpeed engine 管理下,
+    # forward 时 ZeRO-3 hook 触发 partial gather collective → 跟 main model 的
+    # collective 顺序乱 → 死锁 (rank 间 LR forward 次数不同更易暴露).
+    # prepare(model) 会消耗 zero.Init context, 之后创建的 module 不被 partition.
+    # 见 smoke_test_hlr.py:332 设计.
 
     # ── 数据 ──
     # Smoke: limit > 0 时 HLRDataset 读到 N 条就停, 16min → 30sec 大幅缩短诊断 cycle
@@ -209,30 +210,37 @@ def train_hlr(cfg: HLRConfig):
         pin_memory=True,
     )
 
-    # ── Optimizers ──
+    # ── 主 Optimizer (LR optimizer 推迟到 LR 创建之后) ──
     main_optimizer = AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=cfg.lr,
         weight_decay=cfg.weight_decay,
     )
-    lr_optimizer = AdamW(
-        latent_reasoner.parameters(),
-        lr=cfg.latent_reasoner_lr,
-        weight_decay=cfg.weight_decay,
-    )
 
-    # ── Accelerate prepare ──
-    # 主模型 + 主 optimizer + dataloader 进 DeepSpeed; LatentReasoner 单独管理
+    # ── Accelerate prepare (先 prepare 主模型 + opt + dataloader, 不含 LR) ──
+    # 注意: LR 必须等 prepare 之后再创建, 避免被 zero.Init partition (见上面注释).
     _stamp("before accelerator.prepare(model, opt, dataloader)  ← ZeRO-3 init")
     model, main_optimizer, dataloader = accelerator.prepare(
         model, main_optimizer, dataloader
     )
     _stamp("after accelerator.prepare(model, opt, dataloader)  ← ZeRO-3 init done")
-    # LR 必须显式转 bf16: 主模型走 DeepSpeed bf16, hidden 是 bf16;
-    # LR 没进 accelerator.prepare, 默认 fp32 → 与 bf16 hidden 做 Linear 会 dtype mismatch.
-    # smoke_test_hlr.py:332 已经这么做, train.py 之前漏了 (回归 bug).
+
+    # ── 现在 zero.Init context 已退出, 安全创建 LR (每 rank 完整副本, 不被 partition) ──
+    _stamp("before build_latent_reasoner_from_main (POST-prepare, no zero.Init)")
+    unwrapped_main = accelerator.unwrap_model(model)
+    latent_reasoner = build_latent_reasoner_from_main(unwrapped_main, cfg)
     latent_reasoner = latent_reasoner.to(accelerator.device).to(torch.bfloat16)
-    _stamp("after latent_reasoner.to(bf16)")
+    if accelerator.is_main_process:
+        n_params = sum(p.numel() for p in latent_reasoner.parameters())
+        print(f"  LatentReasoner 参数量: {n_params/1e6:.2f}M")
+    _stamp(f"after latent_reasoner created + .to(bf16)")
+
+    # LR optimizer 在 LR 创建后, 不进 accelerator.prepare (LR 完整副本不 sharded)
+    lr_optimizer = AdamW(
+        latent_reasoner.parameters(),
+        lr=cfg.latent_reasoner_lr,
+        weight_decay=cfg.weight_decay,
+    )
 
     num_training_steps = math.ceil(
         len(dataloader) / cfg.gradient_accumulation_steps

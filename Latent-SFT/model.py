@@ -21,11 +21,11 @@ import torch.nn.functional as F
 
 
 # ── Step-0-only diag stamp (定位 compute_hlr_loss 内部 hang) ───────────
-# 只在前 N 次调用打印, 避免训练循环每步都打日志.
+# 修复验证期间保留, 等修复确认后再清理.
 _HLR_LOSS_T0 = time.time()
 _HLR_LOSS_RANK = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
 _HLR_LOSS_CALL_COUNT = 0
-_HLR_LOSS_MAX_DIAG_CALLS = 1   # 只在第 1 次 compute_hlr_loss 打全 stamp
+_HLR_LOSS_MAX_DIAG_CALLS = 1
 
 
 def _loss_stamp(msg: str) -> None:
@@ -548,7 +548,7 @@ def compute_hlr_loss(
     _loss_stamp(f"after .to(device) / read T_teacher={T_teacher}")
 
     # ── (1) Teacher forward 一次 ──
-    _loss_stamp("BEFORE teacher model.forward (ZeRO-3 first all_gather here)")
+    _loss_stamp("BEFORE teacher model.forward")
     teacher_out = model(
         input_ids=teacher_input_ids,
         attention_mask=teacher_attention_mask,
@@ -593,31 +593,24 @@ def compute_hlr_loss(
         student_labels_parts.append(torch.full(
             (prompt_embeds.size(1),), -100, dtype=torch.long, device=device
         ))
-        _loss_stamp("after prompt embed, entering segments loop")
 
-        _seg_explicit = 0
-        _seg_latent = 0
         _N_SEG = len(segments)
         for seg_idx, seg in enumerate(segments):
-            # 每 5 个 + 最后 15 个全打 (精确定位 hang 在第几个)
-            _hit_stamp = (seg_idx % 5 == 0) or (seg_idx >= _N_SEG - 15)
+            _hit_stamp = (seg_idx % 10 == 0) or (seg_idx >= _N_SEG - 5)
             if seg.type in ("explicit", "solution"):
                 if _hit_stamp:
-                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type} BEFORE embed")
+                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type}")
                 seg_ids = seg.ids.to(device)
                 seg_labels = seg.labels.to(device)
                 # clone() 让 embed 在 context 退出后仍有效
                 seg_embeds = embed_module(seg_ids).unsqueeze(0).clone()  # [1, T_seg, H]
                 student_embeds_parts.append(seg_embeds)
                 student_labels_parts.append(seg_labels)
-                _seg_explicit += 1
-                if _hit_stamp:
-                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type} AFTER embed (len={seg_ids.size(0)})")
 
             elif seg.type == "latent":
                 k = seg.k
                 if _hit_stamp:
-                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type=latent k={k} BEFORE LR forward")
+                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type=latent k={k}")
                 # LR 输入: teacher 段起始前 token 最后一层 hidden (双向 detach)
                 in_pos = seg.teacher_input_pos
                 in_pos = min(max(in_pos, 0), T_teacher - 1)
@@ -635,32 +628,13 @@ def compute_hlr_loss(
                 ))
 
                 align_records.append((layer_hiddens, seg.teacher_align_pos))
-                _seg_latent += 1
-                if _hit_stamp:
-                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type=latent k={k} AFTER LR forward")
 
             else:
                 raise ValueError(f"未知 segment 类型: {seg.type}")
 
-        # 退出 gather_ctx 前打 stamp (gather_ctx 退出是 ZeRO-3 partition collective,
-        # 4 rank 必须同时退出. 如果 rank 1/2 到这里但 rank 0/3 已经退出 → 矛盾说明
-        # GatheredParameters 退出不是阻塞 collective, 或者是 async pending 后续 hang)
-        _loss_stamp(f"END of segments loop, BEFORE exit gather_ctx")
-
     _loss_stamp("AFTER segments loop (exited gather_ctx)")
     student_embeds = torch.cat(student_embeds_parts, dim=1)        # [1, T_student, H_main]
     student_labels = torch.cat(student_labels_parts, dim=0).unsqueeze(0)  # [1, T_student]
-
-    # ── 防御: 强制 rank 同步到 student forward 入口 ──
-    # 不同样本 segments 数异质 (rank 0:42 latent vs rank 1:48 latent), 导致
-    # rank 0/3 先到 student forward 触发 ZeRO-3 all_gather collective,
-    # rank 1/2 还在 segments loop 跑 LR forward 没到, all_gather 死锁.
-    # barrier 让 4 rank 同时进 model.forward, ZeRO-3 collective 顺序对齐.
-    if torch.distributed.is_initialized():
-        _loss_stamp(f"BEFORE barrier (rank-sync before student forward)")
-        torch.distributed.barrier()
-        _loss_stamp(f"AFTER barrier (all ranks aligned)")
-
     _loss_stamp(f"BEFORE student forward (student_len={student_embeds.size(1)})")
 
     # ── (3) Student forward 一次 (GC 友好, 不需 use_cache) ──
