@@ -584,57 +584,98 @@ def compute_hlr_loss(
 
     n_segs = len(segments)
     n_lat = sum(1 for s in segments if s.type == "latent")
-    _loss_stamp(f"BEFORE gather_ctx (n_segs={n_segs} n_latent={n_lat})")
+    n_txt = n_segs - n_lat
+    _loss_stamp(f"BEFORE embed merge (n_segs={n_segs} n_latent={n_lat} n_text={n_txt})")
+
+    # ── 关键修复: 把所有 text segments (prompt + explicit + solution) 合并成
+    # 一次 embed_module call. 之前在 loop 内每段调 1 次, 4 rank 因 segments 数
+    # 异质 (85/86/90/92) 调用次数不同 → ZeRO-3 forward hook 在 embed_module
+    # attach, call 次数差异触发 collective 顺序乱 → 死锁.
+    # 现在: 4 rank 都只调 1 次 embed_module, collective 数一致, 不会死锁.
+    text_seg_ids_to_concat = [prompt_ids_dev]
+    text_seg_labels_to_concat = [torch.full(
+        (prompt_ids_dev.size(0),), -100, dtype=torch.long, device=device
+    )]
+    text_seg_sizes = [prompt_ids_dev.size(0)]   # 每段 size, 用于 split
+    text_seg_indices_in_segments = []   # 对应 segments 中的 idx (保留顺序)
+    for seg_idx, seg in enumerate(segments):
+        if seg.type in ("explicit", "solution"):
+            seg_ids_dev = seg.ids.to(device)
+            text_seg_ids_to_concat.append(seg_ids_dev)
+            text_seg_labels_to_concat.append(seg.labels.to(device))
+            text_seg_sizes.append(seg_ids_dev.size(0))
+            text_seg_indices_in_segments.append(seg_idx)
+
+    all_text_ids = torch.cat(text_seg_ids_to_concat, dim=0)  # [total_text_len]
+    _loss_stamp(f"BEFORE single embed_module call (total_text_len={all_text_ids.size(0)})")
     with gather_ctx:
-        _loss_stamp("inside gather_ctx, before prompt embed")
-        # prompt embeds
-        prompt_embeds = embed_module(prompt_ids_dev).unsqueeze(0).clone()  # [1, P, H]
-        student_embeds_parts.append(prompt_embeds)
-        student_labels_parts.append(torch.full(
-            (prompt_embeds.size(1),), -100, dtype=torch.long, device=device
-        ))
+        all_text_embeds = embed_module(all_text_ids).clone()   # [total_text_len, H]
+    _loss_stamp("AFTER single embed_module call (gather_ctx exited)")
 
-        _N_SEG = len(segments)
-        for seg_idx, seg in enumerate(segments):
-            _hit_stamp = (seg_idx % 10 == 0) or (seg_idx >= _N_SEG - 5)
-            if seg.type in ("explicit", "solution"):
-                if _hit_stamp:
-                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type}")
-                seg_ids = seg.ids.to(device)
-                seg_labels = seg.labels.to(device)
-                # clone() 让 embed 在 context 退出后仍有效
-                seg_embeds = embed_module(seg_ids).unsqueeze(0).clone()  # [1, T_seg, H]
-                student_embeds_parts.append(seg_embeds)
-                student_labels_parts.append(seg_labels)
+    # split 回各段
+    text_embeds_splits = torch.split(all_text_embeds, text_seg_sizes, dim=0)
+    prompt_embeds = text_embeds_splits[0].unsqueeze(0)   # [1, P, H]
+    # idx_in_segments → embed tensor [1, T_seg, H] (从 split[1:] 取)
+    seg_idx_to_embed = {
+        seg_idx: text_embeds_splits[i + 1].unsqueeze(0)
+        for i, seg_idx in enumerate(text_seg_indices_in_segments)
+    }
+    # idx_in_segments → labels (从 text_seg_labels_to_concat 同序取)
+    seg_idx_to_labels = {
+        seg_idx: text_seg_labels_to_concat[i + 1]
+        for i, seg_idx in enumerate(text_seg_indices_in_segments)
+    }
 
-            elif seg.type == "latent":
-                k = seg.k
-                if _hit_stamp:
-                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type=latent k={k}")
-                # LR 输入: teacher 段起始前 token 最后一层 hidden (双向 detach)
-                in_pos = seg.teacher_input_pos
-                in_pos = min(max(in_pos, 0), T_teacher - 1)
-                h_input = teacher_hidden_states[-1][:, in_pos, :].detach()  # [1, H]
+    # 按 segments 原顺序拼 student_embeds, latent 段单独 LR forward (pure local)
+    student_embeds_parts.append(prompt_embeds)
+    student_labels_parts.append(torch.full(
+        (prompt_embeds.size(1),), -100, dtype=torch.long, device=device
+    ))
 
-                layer_hiddens, _ = latent_reasoner(h_input, k=k)
-                # list of N_lr × [1, k, lr_hidden]
-
-                # 注入: up_proj(顶层 hidden)
-                top_hidden = layer_hiddens[-1]
-                latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)  # [1, k, H]
-                student_embeds_parts.append(latent_inputs_embeds)
-                student_labels_parts.append(torch.full(
-                    (k,), -100, dtype=torch.long, device=device
-                ))
-
-                align_records.append((layer_hiddens, seg.teacher_align_pos))
-
-            else:
-                raise ValueError(f"未知 segment 类型: {seg.type}")
+    _loss_stamp(f"BEFORE per-segment assembly + LR forward loop")
+    _N_SEG = len(segments)
+    for seg_idx, seg in enumerate(segments):
+        _hit_stamp = (seg_idx % 20 == 0) or (seg_idx >= _N_SEG - 3)
+        if seg.type in ("explicit", "solution"):
+            student_embeds_parts.append(seg_idx_to_embed[seg_idx])
+            student_labels_parts.append(seg_idx_to_labels[seg_idx])
+            if _hit_stamp:
+                _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type} assembled")
+        elif seg.type == "latent":
+            k = seg.k
+            in_pos = seg.teacher_input_pos
+            in_pos = min(max(in_pos, 0), T_teacher - 1)
+            h_input = teacher_hidden_states[-1][:, in_pos, :].detach()
+            # LR forward 是 pure local (LR 不在 ZeRO-3 wrap, 修复后), 不触发 collective
+            layer_hiddens, _ = latent_reasoner(h_input, k=k)
+            top_hidden = layer_hiddens[-1]
+            latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)
+            student_embeds_parts.append(latent_inputs_embeds)
+            student_labels_parts.append(torch.full(
+                (k,), -100, dtype=torch.long, device=device
+            ))
+            align_records.append((layer_hiddens, seg.teacher_align_pos))
+            if _hit_stamp:
+                _loss_stamp(f"seg {seg_idx}/{_N_SEG} type=latent k={k} LR forward done")
+        else:
+            raise ValueError(f"未知 segment 类型: {seg.type}")
 
     _loss_stamp("AFTER segments loop (exited gather_ctx)")
     student_embeds = torch.cat(student_embeds_parts, dim=1)        # [1, T_student, H_main]
     student_labels = torch.cat(student_labels_parts, dim=0).unsqueeze(0)  # [1, T_student]
+
+    # ── 必须 barrier: 4 rank 强制同步到 student forward 入口 ──
+    # 不同样本 segments 数异质 (85/86/90/92), rank 1/3 segments 少先到 student
+    # forward 触发 ZeRO-3 main model 第一层 all_gather, rank 0/2 还在 segments
+    # loop, ZeRO-3 collective 等不到 rank 0/2 一起 join → 死锁.
+    # barrier 保证 4 rank 同时进 model.forward, ZeRO-3 collective 顺序对齐.
+    # 即使 LR 创建顺序修复了 (LR 不再被 partition), main model 自身的 ZeRO-3
+    # collective 仍要求 4 rank 同步 entry.
+    if torch.distributed.is_initialized():
+        _loss_stamp("BEFORE barrier (sync 4 ranks to student forward entry)")
+        torch.distributed.barrier()
+        _loss_stamp("AFTER barrier (all 4 ranks aligned)")
+
     _loss_stamp(f"BEFORE student forward (student_len={student_embeds.size(1)})")
 
     # ── (3) Student forward 一次 (GC 友好, 不需 use_cache) ──
