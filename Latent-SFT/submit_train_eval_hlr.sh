@@ -47,6 +47,14 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 export NCCL_P2P_DISABLE=1
 export NCCL_SHM_DISABLE=1
 
+# zhuoyi 多卡 ZeRO-3 init 慢 (P2P_DISABLE 下 broadcast 8GB 模型 ~10-15 min),
+# 默认 PyTorch watchdog 480s 不够会 SIGABRT, 必须放宽。
+# 三个变量缺一不可: HEARTBEAT 是 watchdog 心跳, NCCL_TIMEOUT 是 collective 真超时,
+# DEEPSPEED_TIMEOUT 是 DeepSpeed 包装的 timeout (默认 10/30min 不一致)。
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600   # 1 hr, 容忍最慢的 ZeRO-3 init
+export NCCL_TIMEOUT=3600
+export DEEPSPEED_TIMEOUT=3600
+
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop

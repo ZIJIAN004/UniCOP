@@ -40,6 +40,12 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 export NCCL_P2P_DISABLE=1
 export NCCL_SHM_DISABLE=1
 
+# ZeRO-3 init 在 P2P_DISABLE 下 broadcast 8GB 模型 ~10-15 min,
+# 默认 PyTorch watchdog 480s 不够 → SIGABRT (踩坑 #30: 480s watchdog kill ZeRO-3 init).
+export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=3600
+export NCCL_TIMEOUT=3600
+export DEEPSPEED_TIMEOUT=3600
+
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop
