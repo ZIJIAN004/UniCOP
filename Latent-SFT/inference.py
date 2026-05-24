@@ -1,5 +1,5 @@
 """
-HLR 推理引擎 (Hierarchical Latent Reasoner) — online entropy 触发的混合解码.
+HLR 推理引擎 (Hierarchical Latent Reasoner) — batched online entropy 触发的混合解码.
 
 触发规则镜像 entropy_profile.detect_latent_segments (训练侧):
   进入 latent (低熵段):
@@ -11,26 +11,22 @@ HLR 推理引擎 (Hierarchical Latent Reasoner) — online entropy 触发的混�
     - latent step 数 >= max_latent_steps      OR
     - latent step 数 >= min_latent_steps 且连续 window 步熵上升
 
-每次显式步:
-  - 从 last_logits 采样 token, 累加 explicit_count
-  - 主模型 forward 一步, 更新 last_logits / last_hidden / past_kv
+Batched 实现:
+  所有样本统一走 inputs_embeds 模式, 每步同步推进:
+    - 显式 sample: input_emb = main_model.embedding(sampled_token)
+    - latent  sample: input_emb = LR.up_proj(LR.forward(enter_hidden, k=1, past))
+    - DONE   sample: input_emb = embedding(pad), 输出丢弃
+  主模型 KV cache past_len 对所有 sample 共享 (每步加 1).
+  LR past_kv per-sample 独立 (只在 latent 状态的 sample 才推进).
 
-每次 latent 步:
-  - LR.forward(enter_hidden, k=1, past_kv=lr_past) → top hidden
-  - up_proj → inputs_embeds 注入主模型 forward 一步, 拿 logits (不采样, 仅监控熵)
-  - 更新 lr_past 和 main_past; last_hidden 不变 (h_in 复用 enter_hidden, 与训练一致)
+Per-sample state:
+  mode ∈ {EXPLICIT, LATENT, DONE}
+  enter_hidden: 进 latent 时锁定的 main hidden (整段 LR 都用同一 h_in, 与训练一致)
+  lr_past, latent_steps_done, latent_entropies
+  entropy_history, tokens_since_exit, generated_tokens
+  explicit_count, latent_step_count, latent_segments_meta
 
-bs=1.
-
-返回 (text, info), info 字段:
-  explicit_tokens:           显式 token 总数
-  latent_steps:              latent 总步数
-  latent_steps_as_tokens:    latent_steps × compression_ratio (等效替代的显式 token 数)
-  total_equivalent_tokens:   explicit_tokens + latent_steps_as_tokens (公平对比 baseline 用)
-  entropy_history:           显式段累积熵
-  latent_segments:           [{enter_explicit_idx, steps, exit_entropy}]
-  wall_time_sec:             generate() 耗时
-  truncated:                 是否因 max_new_tokens 截断
+返回 list of (text, info), info 字段与单条一致.
 """
 
 import json
@@ -43,6 +39,39 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from hlr_config import HLRConfig
 from model import build_latent_reasoner_from_main
+
+
+# Per-sample state modes
+_EXPLICIT = 0
+_LATENT = 1
+_DONE = 2
+
+
+class _SampleState:
+    """Per-sample 状态容器."""
+    __slots__ = (
+        "mode", "enter_hidden", "lr_past",
+        "latent_steps_done", "latent_entropies",
+        "entropy_history", "tokens_since_exit",
+        "generated_tokens", "explicit_count", "latent_step_count",
+        "latent_segments_meta", "truncated", "hit_eos",
+    )
+
+    def __init__(self, cooldown_init: int):
+        self.mode = _EXPLICIT
+        self.enter_hidden = None
+        self.lr_past = None
+        self.latent_steps_done = 0
+        self.latent_entropies = []
+        self.entropy_history = []
+        # 允许首次触发, 但 history 不足会先 block
+        self.tokens_since_exit = cooldown_init
+        self.generated_tokens = []
+        self.explicit_count = 0
+        self.latent_step_count = 0
+        self.latent_segments_meta = []
+        self.truncated = False
+        self.hit_eos = False
 
 
 class HLRInferenceEngine:
@@ -58,14 +87,15 @@ class HLRInferenceEngine:
         self.device = device
         ckpt = Path(checkpoint_dir)
 
-        # ── tokenizer ──
+        # ── tokenizer (left padding 必须, 否则 batched last-pos 取不到 valid logits) ──
         self.tokenizer = AutoTokenizer.from_pretrained(
             checkpoint_dir, trust_remote_code=True
         )
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer.padding_side = "left"
 
-        # ── 主模型: 自动检测 adapter or merged ──
+        # ── 主模型 ──
         adapter_cfg = ckpt / "adapter_config.json"
         if adapter_cfg.exists():
             if base_model_path is None:
@@ -93,6 +123,14 @@ class HLRInferenceEngine:
 
         self.model = model
         self.model.eval()
+        self.model_dtype = next(self.model.parameters()).dtype
+
+        # 取主模型 input embedding (用于显式 token → embedding lookup, 走统一 inputs_embeds 路径)
+        # 处理 PEFT 包装
+        inner = self.model
+        while not hasattr(inner, "get_input_embeddings") and hasattr(inner, "module"):
+            inner = inner.module
+        self.embed_layer = inner.get_input_embeddings()
 
         # ── LatentReasoner ──
         lr_path = ckpt / "latent_reasoner.pt"
@@ -119,169 +157,236 @@ class HLRInferenceEngine:
     # ── helpers ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _entropy(logits: torch.Tensor) -> float:
-        log_p = F.log_softmax(logits.float(), dim=-1)
+    def _entropy(logits_1d: torch.Tensor) -> float:
+        """logits_1d: [V]"""
+        log_p = F.log_softmax(logits_1d.float(), dim=-1)
         return -(log_p.exp() * log_p).sum(dim=-1).item()
 
     @staticmethod
-    def _sample(logits: torch.Tensor, temperature: float) -> int:
+    def _sample(logits_1d: torch.Tensor, temperature: float) -> int:
         if temperature <= 0:
-            return logits.argmax(dim=-1).item()
-        probs = F.softmax(logits.float() / temperature, dim=-1)
-        return torch.multinomial(probs.squeeze(0), num_samples=1).item()
+            return logits_1d.argmax(dim=-1).item()
+        probs = F.softmax(logits_1d.float() / temperature, dim=-1)
+        return torch.multinomial(probs, num_samples=1).item()
 
-    def _should_enter_latent(
-        self, entropy_history: list[float], tokens_since_exit: int
-    ) -> bool:
-        if len(entropy_history) < max(self.window + 1, self.min_samples):
+    def _should_enter_latent(self, s: _SampleState) -> bool:
+        if len(s.entropy_history) < max(self.window + 1, self.min_samples):
             return False
-        if tokens_since_exit < self.cooldown:
+        if s.tokens_since_exit < self.cooldown:
             return False
-        recent = entropy_history[-(self.window + 1):]
+        recent = s.entropy_history[-(self.window + 1):]
         falling = all(recent[i] > recent[i + 1] for i in range(self.window))
         if not falling:
             return False
-        sorted_e = sorted(entropy_history)
+        sorted_e = sorted(s.entropy_history)
         q_idx = min(int(len(sorted_e) * self.quantile), len(sorted_e) - 1)
-        return entropy_history[-1] < sorted_e[q_idx]
+        return s.entropy_history[-1] < sorted_e[q_idx]
 
-    def _should_exit_latent(
-        self, latent_entropies: list[float], steps_done: int
-    ) -> bool:
-        if steps_done >= self.max_latent_steps:
+    def _should_exit_latent(self, s: _SampleState) -> bool:
+        if s.latent_steps_done >= self.max_latent_steps:
             return True
-        if steps_done < self.min_latent_steps:
+        if s.latent_steps_done < self.min_latent_steps:
             return False
-        if len(latent_entropies) < self.window + 1:
+        if len(s.latent_entropies) < self.window + 1:
             return False
-        recent = latent_entropies[-(self.window + 1):]
+        recent = s.latent_entropies[-(self.window + 1):]
         return all(recent[i] < recent[i + 1] for i in range(self.window))
 
-    # ── generate ────────────────────────────────────────────────────
+    # ── batched generate ────────────────────────────────────────────
 
     @torch.no_grad()
-    def generate(
+    def generate_batch(
         self,
-        prompt,
+        prompts: list,
         max_new_tokens: int = 4096,
         temperature: float = 0.0,
-    ) -> tuple[str, dict]:
+    ) -> list[tuple[str, dict]]:
         """
+        Batched HLR generation.
+
         Args:
-            prompt: str (raw text) 或 list[dict] (chat 格式, 走 apply_chat_template)
-            max_new_tokens: 总 equivalent token 数上限 (explicit + latent×compression)
+            prompts: list of str (raw text) 或 list[dict] (chat 格式)
+            max_new_tokens: 总 equivalent token 上限 (per sample, explicit + latent*compression)
             temperature: 0 → greedy, >0 → 采样
+
+        Returns: list of (text, info) 与 prompts 一一对应.
         """
         start = time.perf_counter()
+        B = len(prompts)
+        device = self.device
 
-        if isinstance(prompt, list):
-            text = self.tokenizer.apply_chat_template(
-                prompt, tokenize=False, add_generation_prompt=True,
-            )
-        else:
-            text = prompt
-        # 与 HLRDataset 训练侧防御一致: 如果 chat_template 没自动加 <think>
-        # (R1-Distill 不加, Qwen3-Thinking 加), 手动补上避免推理时分布 OOD
-        if not text.rstrip().endswith("<think>"):
-            text += "<think>\n"
-        input_ids = self.tokenizer(text, return_tensors="pt").input_ids.to(self.device)
+        # ── 文本化 + apply chat template + 补 think 防御 ──
+        texts: list[str] = []
+        for p in prompts:
+            if isinstance(p, list):
+                t = self.tokenizer.apply_chat_template(
+                    p, tokenize=False, add_generation_prompt=True,
+                )
+            else:
+                t = p
+            if not t.rstrip().endswith("<think>"):
+                t += "<think>\n"
+            texts.append(t)
+
+        # ── batched tokenize (left pad) ──
+        enc = self.tokenizer(
+            texts, return_tensors="pt", padding=True,
+        )
+        input_ids = enc.input_ids.to(device)              # [B, P_max]
+        attention_mask = enc.attention_mask.to(device)    # [B, P_max]
+        prompt_len = input_ids.shape[1]
 
         # ── prefill ──
         out = self.model(
-            input_ids=input_ids, use_cache=True, output_hidden_states=True,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+            output_hidden_states=True,
         )
         main_past = out.past_key_values
-        last_logits = out.logits[:, -1, :]
-        last_hidden = out.hidden_states[-1][:, -1, :]  # [1, H_main]
+        last_logits = out.logits[:, -1, :]                # [B, V]
+        last_hidden = out.hidden_states[-1][:, -1, :]     # [B, H]
 
-        generated_tokens: list[int] = []
-        entropy_history: list[float] = []
-        latent_segments: list[dict] = []
-        explicit_count = 0
-        latent_step_count = 0
-        tokens_since_exit = self.cooldown   # 允许首次触发 (但 history 不足会先 block)
-        truncated = False
-        hit_eos = False
+        # ── per-sample state init ──
+        states: list[_SampleState] = [_SampleState(self.cooldown) for _ in range(B)]
+
         eos_id = self.tokenizer.eos_token_id
+        pad_id = self.tokenizer.pad_token_id
 
+        # ── 主循环: 每 iter 决定 input_emb → batched forward 一次 ──
         while True:
-            equivalent = explicit_count + latent_step_count * self.compression_ratio
-            if equivalent >= max_new_tokens:
-                truncated = True
+            # 终止 1: 全部 DONE
+            if all(s.mode == _DONE for s in states):
+                break
+            # 终止 2: 所有未 done sample 都到 max equivalent tokens (per sample)
+            #         对各 sample 单独标 truncated, 然后 break 总循环 (全 truncated 后)
+            all_exceeded = True
+            for s in states:
+                if s.mode == _DONE:
+                    continue
+                eq = s.explicit_count + s.latent_step_count * self.compression_ratio
+                if eq < max_new_tokens:
+                    all_exceeded = False
+                    break
+            if all_exceeded:
+                for s in states:
+                    if s.mode != _DONE:
+                        s.truncated = True
+                        s.mode = _DONE
                 break
 
-            # ── 是否进 latent ──
-            if self._should_enter_latent(entropy_history, tokens_since_exit):
-                enter_at = explicit_count
-                enter_hidden = last_hidden  # 锁定: 整段 LR 都用同一 h_in (与训练一致)
-                lr_past = None
-                latent_ents: list[float] = []
-                steps_done = 0
-
-                while True:
-                    # LR 一步
-                    layer_hiddens, lr_past = self.latent_reasoner(
-                        enter_hidden, k=1, past_kv=lr_past,
+            # Phase A: per-sample 决策 input_emb
+            input_emb_list = []
+            for i, s in enumerate(states):
+                if s.mode == _DONE:
+                    input_emb_list.append(
+                        self.embed_layer(
+                            torch.tensor([pad_id], device=device, dtype=torch.long)
+                        )  # [1, H]
                     )
-                    top_h = layer_hiddens[-1]                              # [1, 1, lr_hidden]
-                    inj = self.latent_reasoner.up_proj(top_h)              # [1, 1, H_main]
+                    continue
 
-                    # 主模型一步 (inputs_embeds 模式, 不采样 token)
-                    out = self.model(
-                        inputs_embeds=inj.to(next(self.model.parameters()).dtype),
-                        past_key_values=main_past,
-                        use_cache=True,
-                        output_hidden_states=True,
+                # 提前 cap: 个别 sample 超 max_new_tokens 就提前 done
+                eq = s.explicit_count + s.latent_step_count * self.compression_ratio
+                if eq >= max_new_tokens:
+                    s.truncated = True
+                    s.mode = _DONE
+                    input_emb_list.append(
+                        self.embed_layer(
+                            torch.tensor([pad_id], device=device, dtype=torch.long)
+                        )
                     )
-                    main_past = out.past_key_values
-                    cur_logits = out.logits[:, -1, :]
-                    # last_hidden 在 latent 段内不更新 LR 入口 (enter_hidden 锁定),
-                    # 但段末位的 main hidden 是退出后第一个显式步要不要用? 不需要,
-                    # 因为退出后是从 cur_logits 采样, last_hidden 由那个 explicit token
-                    # 自己重新算.
+                    continue
 
-                    latent_ents.append(self._entropy(cur_logits))
-                    steps_done += 1
-                    latent_step_count += 1
+                if s.mode == _EXPLICIT:
+                    if self._should_enter_latent(s):
+                        # 进 latent: 不 sample 上一个 explicit 预测 (丢弃), 直接 LR step 1
+                        s.mode = _LATENT
+                        s.enter_hidden = last_hidden[i:i + 1].clone()  # [1, H]
+                        s.lr_past = None
+                        s.latent_entropies = []
+                        s.latent_steps_done = 1
+                        s.latent_step_count += 1
+                        s.latent_segments_meta.append({
+                            "enter_explicit_idx": s.explicit_count,
+                        })
+                        layer_h, s.lr_past = self.latent_reasoner(
+                            s.enter_hidden, k=1, past_kv=None,
+                        )
+                        inj = self.latent_reasoner.up_proj(layer_h[-1])  # [1, 1, H]
+                        input_emb_list.append(inj.squeeze(0))            # [1, H]
+                    else:
+                        # 继续显式: sample token from last_logits, input = embedding(token)
+                        token = self._sample(last_logits[i], temperature)
+                        s.generated_tokens.append(token)
+                        s.explicit_count += 1
+                        s.entropy_history.append(self._entropy(last_logits[i]))
+                        s.tokens_since_exit += 1
+                        if token == eos_id:
+                            s.hit_eos = True
+                            s.mode = _DONE
+                            input_emb_list.append(
+                                self.embed_layer(
+                                    torch.tensor([pad_id], device=device, dtype=torch.long)
+                                )
+                            )
+                            continue
+                        tok_t = torch.tensor([token], device=device, dtype=torch.long)
+                        input_emb_list.append(self.embed_layer(tok_t))   # [1, H]
 
-                    # 退出判断
-                    if self._should_exit_latent(latent_ents, steps_done):
-                        break
-                    # equivalent token 上限保护
-                    eq2 = explicit_count + latent_step_count * self.compression_ratio
-                    if eq2 >= max_new_tokens:
-                        break
+                elif s.mode == _LATENT:
+                    # 上一步 forward 是 latent step, last_logits[i] 是其 logits
+                    s.latent_entropies.append(self._entropy(last_logits[i]))
 
-                # 退出 latent: 用段末位 logits 作为下一步显式采样的 last_logits
-                last_logits = cur_logits
-                # last_hidden 用段末位主模型 hidden (供下一个 latent 段做 h_in, 也供
-                # 后续显式步 forward 不依赖, 因为显式步会自己算新 hidden)
-                last_hidden = out.hidden_states[-1][:, -1, :]
+                    if self._should_exit_latent(s):
+                        # 退出: 段元数据收尾, sample explicit token from last_logits
+                        s.latent_segments_meta[-1].update({
+                            "steps": s.latent_steps_done,
+                            "exit_entropy": s.latent_entropies[-1],
+                        })
+                        s.mode = _EXPLICIT
+                        s.tokens_since_exit = 0
+                        token = self._sample(last_logits[i], temperature)
+                        s.generated_tokens.append(token)
+                        s.explicit_count += 1
+                        s.entropy_history.append(self._entropy(last_logits[i]))
+                        s.tokens_since_exit += 1
+                        if token == eos_id:
+                            s.hit_eos = True
+                            s.mode = _DONE
+                            input_emb_list.append(
+                                self.embed_layer(
+                                    torch.tensor([pad_id], device=device, dtype=torch.long)
+                                )
+                            )
+                            continue
+                        tok_t = torch.tensor([token], device=device, dtype=torch.long)
+                        input_emb_list.append(self.embed_layer(tok_t))
+                    else:
+                        # 继续 latent
+                        s.latent_steps_done += 1
+                        s.latent_step_count += 1
+                        layer_h, s.lr_past = self.latent_reasoner(
+                            s.enter_hidden, k=1, past_kv=s.lr_past,
+                        )
+                        inj = self.latent_reasoner.up_proj(layer_h[-1])
+                        input_emb_list.append(inj.squeeze(0))
 
-                latent_segments.append({
-                    "enter_explicit_idx": enter_at,
-                    "steps": steps_done,
-                    "exit_entropy": latent_ents[-1] if latent_ents else None,
-                })
-                tokens_since_exit = 0
-                # 不立即采样, 回 while 头, 跳过 should_enter (cooldown 重置), 直接显式
-                continue
-
-            # ── 显式模式: 采样下一个 token ──
-            next_id = self._sample(last_logits, temperature)
-            generated_tokens.append(next_id)
-            explicit_count += 1
-            tokens_since_exit += 1
-            entropy_history.append(self._entropy(last_logits))
-
-            if next_id == eos_id:
-                hit_eos = True
+            # 再次检查是否全 DONE (sample EOS 可能在本 iter 触发)
+            if all(s.mode == _DONE for s in states):
                 break
 
-            # forward 下一步
-            next_tensor = torch.tensor([[next_id]], device=self.device)
+            # Phase B: stack + batched forward
+            stacked = torch.stack(input_emb_list, dim=0)   # [B, 1, H]
+            stacked = stacked.to(self.model_dtype)
+
+            # attention_mask 扩展 1 列 (新的位置, 全部 valid)
+            new_col = torch.ones(B, 1, device=device, dtype=attention_mask.dtype)
+            attention_mask = torch.cat([attention_mask, new_col], dim=1)
+
             out = self.model(
-                input_ids=next_tensor,
+                inputs_embeds=stacked,
+                attention_mask=attention_mask,
                 past_key_values=main_past,
                 use_cache=True,
                 output_hidden_states=True,
@@ -290,19 +395,31 @@ class HLRInferenceEngine:
             last_logits = out.logits[:, -1, :]
             last_hidden = out.hidden_states[-1][:, -1, :]
 
-        text_out = self.tokenizer.decode(generated_tokens, skip_special_tokens=False)
+        # ── 收集结果 ──
+        total_wall = time.perf_counter() - start
+        # 按样本均分 wall (粗略, 用于 hlr_summary 累加;
+        # 真正 per-sample 时间在 batched 推理里没法精确分)
+        per_sample_wall = total_wall / B
+        results: list[tuple[str, dict]] = []
+        for s in states:
+            text = self.tokenizer.decode(s.generated_tokens, skip_special_tokens=False)
+            info = {
+                "explicit_tokens":        s.explicit_count,
+                "latent_steps":           s.latent_step_count,
+                "latent_steps_as_tokens": s.latent_step_count * self.compression_ratio,
+                "total_equivalent_tokens": s.explicit_count + s.latent_step_count * self.compression_ratio,
+                "latent_segments":        s.latent_segments_meta,
+                "entropy_history":        s.entropy_history,
+                "wall_time_sec":          per_sample_wall,
+                "truncated":              s.truncated,
+                "hit_eos":                s.hit_eos,
+            }
+            results.append((text, info))
+        return results
 
-        return text_out, {
-            "explicit_tokens": explicit_count,
-            "latent_steps": latent_step_count,
-            "latent_steps_as_tokens": latent_step_count * self.compression_ratio,
-            "total_equivalent_tokens": explicit_count + latent_step_count * self.compression_ratio,
-            "latent_segments": latent_segments,
-            "entropy_history": entropy_history,
-            "wall_time_sec": time.perf_counter() - start,
-            "truncated": truncated,
-            "hit_eos": hit_eos,
-        }
+    def generate(self, prompt, max_new_tokens: int = 4096, temperature: float = 0.0):
+        """单条 wrapper, 返回 (text, info)."""
+        return self.generate_batch([prompt], max_new_tokens, temperature)[0]
 
 
 def main():

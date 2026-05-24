@@ -995,8 +995,6 @@ def main():
         parser.error("backend=api 时必须通过 --gcp_credentials 指定服务账号密钥文件")
     if args.backend == "hlr" and not args.hlr_checkpoint:
         parser.error("backend=hlr 时必须通过 --hlr_checkpoint 指定 HLR checkpoint 目录")
-    if args.backend == "hlr" and args.batch_size != 1:
-        parser.error(f"backend=hlr 推理强制 batch_size=1 (Phase 1 限制), 当前 batch_size={args.batch_size}")
     if args.backend == "hlr" and args.num_samples != 1:
         parser.error(f"backend=hlr 当前只支持 num_samples=1, 当前 num_samples={args.num_samples}")
     if args.num_samples > 1 and args.temperature <= 0:
@@ -1058,20 +1056,22 @@ def main():
         )
 
         def generate_fn(prompts, num_samples, temperature, max_length, batch_size):
-            # HLR engine 内部 bs=1, num_samples=1; 逐条 generate, 包装为标准格式
+            # HLR engine 支持 batched generate. num_samples=1 强制 (上游已校验).
+            # batch_size 控制 chunk 大小, 与 baseline (local) batch_size 参数语义一致.
             all_out: list[list[tuple]] = []
-            for prompt in prompts:
-                text, info = hlr_engine.generate(
-                    prompt,
+            for start in range(0, len(prompts), batch_size):
+                chunk = prompts[start:start + batch_size]
+                batch_results = hlr_engine.generate_batch(
+                    chunk,
                     max_new_tokens=max_length,
                     temperature=temperature,
                 )
-                # extra info 加 compression_ratio, 供 hlr_summary 算节省比例
-                info["compression_ratio"] = hlr_engine.compression_ratio
-                # num_tokens 用 total_equivalent_tokens, 让 avg_completion_tokens 与
-                # baseline (local) 公平对比
-                num_tokens = info["total_equivalent_tokens"]
-                all_out.append([(text, info["truncated"], num_tokens, info)])
+                for text, info in batch_results:
+                    info["compression_ratio"] = hlr_engine.compression_ratio
+                    # num_tokens 用 total_equivalent_tokens, 让 avg_completion_tokens
+                    # 与 baseline (local) 公平对比
+                    num_tokens = info["total_equivalent_tokens"]
+                    all_out.append([(text, info["truncated"], num_tokens, info)])
             return all_out
 
         backend_info = (f"hlr | ckpt={args.hlr_checkpoint} "

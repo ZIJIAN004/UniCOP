@@ -98,8 +98,8 @@ def main():
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--prompt_mode", type=str, default="think")
     parser.add_argument("--model_type", type=str, default="reasoning")
-    parser.add_argument("--baseline_batch_size", type=int, default=4,
-                        help="baseline (local) batch_size; HLR 强制 1")
+    parser.add_argument("--batch_size", type=int, default=4,
+                        help="batch_size, 两轮共用以确保 wall-clock 对比公平 (HLR 已支持 batched)")
 
     parser.add_argument("--out_dir", type=str, default=None,
                         help="对比输出目录, 默认 {hlr_checkpoint}/compare_eval/")
@@ -152,7 +152,7 @@ def main():
             "--num_samples", "1",
             "--temperature", str(args.temperature),
             "--max_completion_length", str(args.max_completion_length),
-            "--batch_size", str(args.baseline_batch_size),
+            "--batch_size", str(args.batch_size),
             "--prompt_mode", args.prompt_mode,
             "--model_type", args.model_type,
             "--save_dir", str(out_dir),
@@ -174,7 +174,7 @@ def main():
             "--num_samples", "1",
             "--temperature", str(args.temperature),
             "--max_completion_length", str(args.max_completion_length),
-            "--batch_size", "1",
+            "--batch_size", str(args.batch_size),
             "--prompt_mode", args.prompt_mode,
             "--model_type", args.model_type,
             "--save_dir", str(out_dir),
