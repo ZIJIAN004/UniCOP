@@ -114,7 +114,7 @@ echo "      R1-7B:    28 main layers → 7 LR layers, hidden 3584/4=896"
 echo ""
 
 accelerate launch --num_processes 4 --main_process_port 29700 \
-    Latent-SFT/train.py --hlr \
+    Latent-SFT/train.py \
     --model "$MODEL_PATH" \
     $EXTRA_DATA_FLAG \
     --zero_stage 3 \
@@ -160,6 +160,5 @@ if [ "$LR_SIZE" -lt 10485760 ]; then  # < 10 MB
 fi
 
 echo ""
-echo "  下一步: 推理 sanity check"
-echo "    python Latent-SFT/inference.py --model $FINAL_DIR --prompt ..."
+echo "  下一步: 推理 sanity check (HLR 推理脚本待补)"
 echo "============================================================"

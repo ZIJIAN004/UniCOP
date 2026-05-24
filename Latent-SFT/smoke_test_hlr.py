@@ -1,21 +1,20 @@
 """
 HLR Smoke Test —— 严格检查 Hierarchical Latent Reasoner 各模块。
 
-分 7 个 stage，独立检测，任一失败立即报告 + traceback。
+分 6 个 stage, 独立检测, 任一失败立即报告 + traceback。
 
   [1] HLRConfig 字段 / 默认值 / 一致性
   [2] 小组件 (RoPE / GQA / SwiGLU / RMSNorm)
   [3] LatentReasoner forward + KV cache 一致性 (incremental == initial)
   [4] HLRDataset 加载 + collate_hlr
   [5] compute_hlr_loss forward + backward + 梯度覆盖
-  [6] HLRInferenceEngine.generate
-  [7] LatentReasoner state_dict 保存 / 重新加载
+  [6] LatentReasoner state_dict 保存 / 重新加载
 
 运行 (cwd = UniCOP 根目录):
   # 完整 (需要主模型 + profiled jsonl)
   python Latent-SFT/smoke_test_hlr.py --model "$BASE_MODEL" --data Latent-SFT/data/profiled_cvrp20.jsonl
 
-  # 跳过需要主模型的阶段 (4-6)
+  # 跳过需要主模型的阶段 (4-5)
   python Latent-SFT/smoke_test_hlr.py --no_main_model
 
 退出码 0 = 所有 stage PASS; 非 0 = 至少一个 FAIL。
@@ -394,78 +393,6 @@ def stage_5_loss(args, data_result):
     return (model, latent_reasoner, tokenizer)
 
 
-def stage_6_inference(args, loss_result):
-    if loss_result is None:
-        print(f"    ⚠ SKIP: stage 5 没产出模型")
-        return
-
-    # 在 DeepSpeed ZeRO-3 / 分布式环境下跳过, 推理不需要 ZeRO-3, 而且
-    # HLRInferenceEngine 用 device_map='auto' 加载主模型, 与 ZeRO-3 互斥.
-    # 训练 smoke 通过后, 用户单独跑 inference.py 验证生成.
-    try:
-        import torch.distributed as dist
-        if dist.is_initialized():
-            try:
-                rank = dist.get_rank()
-            except Exception:
-                rank = 0
-            if rank == 0:
-                print(f"    ⚠ SKIP: 检测到 ZeRO-3 / distributed env, stage 6 不在此跑")
-                print(f"       推理验证请单独运行 (zhuoyi 上):")
-                print(f"         srun --gpus=1 python Latent-SFT/inference.py \\")
-                print(f"           --model {args.model} \\")
-                print(f"           --prompt '...'")
-            dist.barrier()
-            return
-    except Exception:
-        pass
-
-    import torch
-    from inference import HLRInferenceEngine
-    from config import HLRConfig
-
-    model, latent_reasoner, tokenizer = loss_result
-
-    # 临时保存 latent_reasoner.pt 给 inference engine 加载
-    tmp_dir = Path("./smoke_test_tmp")
-    tmp_dir.mkdir(exist_ok=True)
-    lr_path = tmp_dir / "latent_reasoner.pt"
-    torch.save(latent_reasoner.state_dict(), lr_path)
-    print(f"    临时保存 latent_reasoner.pt 到 {lr_path}")
-
-    cfg = HLRConfig()
-    print(f"    初始化 HLRInferenceEngine (会重新加载主模型) ...")
-    engine = HLRInferenceEngine(
-        model_path=args.model,
-        latent_reasoner_path=str(lr_path),
-        cfg=cfg,
-        entropy_window=3,
-        max_latent_steps=8,
-    )
-
-    prompt = tokenizer.apply_chat_template(
-        [{"role": "system", "content": "You are a helpful assistant."},
-         {"role": "user", "content": "Briefly say hello."}],
-        tokenize=False, add_generation_prompt=True,
-    )
-
-    out_text, info = engine.generate(prompt, max_new_tokens=32, temperature=0.0)
-    assert isinstance(out_text, str)
-    assert info["num_tokens"] > 0
-    print(f"    generate: {info['num_tokens']} tokens, "
-          f"{info['latent_steps']} latent steps, "
-          f"entropy_history len={len(info['entropy_history'])}")
-    print(f"    输出 (前 80 字符): {out_text[:80]!r}")
-
-    # 同步其他 rank
-    try:
-        import torch.distributed as dist
-        if dist.is_initialized():
-            dist.barrier()
-    except Exception:
-        pass
-
-
 def stage_7_checkpoint():
     import torch
     from model import LatentReasoner
@@ -550,14 +477,11 @@ def main():
     )
     results["[5] compute_hlr_loss"] = status
 
-    # Stage 6 (依赖 stage 5)
-    _, results["[6] HLRInferenceEngine"] = _run(
-        "[6] HLRInferenceEngine.generate", lambda: stage_6_inference(args, loss_result)
-    )
+    # 推理 stage 跳过: HLR 专属推理脚本尚未实现, 训练通过后再补
 
     # Stage 7
-    _, results["[7] checkpoint"] = _run(
-        "[7] LatentReasoner state_dict 保存/加载", stage_7_checkpoint
+    _, results["[6] checkpoint"] = _run(
+        "[6] LatentReasoner state_dict 保存/加载", stage_7_checkpoint
     )
 
     # 汇总

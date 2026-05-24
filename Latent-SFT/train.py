@@ -1,14 +1,13 @@
 """
-Latent-SFT 训练脚本：CODI 式隐式推理训练。
+HLR 训练脚本 (Hierarchical Latent Reasoner).
 
-使用 accelerate 做分布式，自定义训练循环处理 teacher/student 双 forward。
+使用 accelerate 做分布式, 自定义训练循环处理 teacher/student 双 forward + LR 段对齐.
 
 单卡运行 (cwd = UniCOP 根目录):
-    python Latent-SFT/train.py
-    python Latent-SFT/train.py --model "$BASE_MODEL" --data UniCOP-Distill/data/chains_template_cvrp20.jsonl
+    python Latent-SFT/train.py --model "$BASE_MODEL" --data Latent-SFT/data/profiled_cvrp20.jsonl
 
 多卡运行 (cwd = UniCOP 根目录):
-    accelerate launch --num_processes 4 Latent-SFT/train.py --zero_stage 2 --gradient_checkpointing
+    accelerate launch --num_processes 4 Latent-SFT/train.py --zero_stage 3 --gradient_checkpointing
 """
 
 import argparse
@@ -24,20 +23,9 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
-from config import HLRConfig, LatentSFTConfig
-from data_utils import (
-    CODIDataset,
-    HLRDataset,
-    add_special_tokens,
-    collate_codi,
-    collate_hlr,
-)
-from model import (
-    LatentEmbeddings,
-    build_latent_reasoner_from_main,
-    compute_codi_loss,
-    compute_hlr_loss,
-)
+from config import HLRConfig
+from data_utils import HLRDataset, collate_hlr
+from model import build_latent_reasoner_from_main, compute_hlr_loss
 
 
 def make_deepspeed_config(zero_stage: int) -> dict | None:
@@ -73,226 +61,6 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
     return base
 
 
-def train(cfg: LatentSFTConfig):
-    ds_config = make_deepspeed_config(cfg.zero_stage)
-    ds_plugin = None
-    if ds_config is not None:
-        ds_plugin = DeepSpeedPlugin(hf_ds_config=ds_config)
-    accelerator = Accelerator(
-        gradient_accumulation_steps=cfg.gradient_accumulation_steps,
-        mixed_precision="bf16",
-        deepspeed_plugin=ds_plugin,
-    )
-
-    set_seed(cfg.seed)
-
-    if accelerator.is_main_process:
-        print(f"{'=' * 60}")
-        print(f"  Latent-SFT (CODI) 训练")
-        print(f"  模型:          {cfg.model_name}")
-        print(f"  数据:          {cfg.data_path}")
-        print(f"  压缩比:        {cfg.latent_compression_ratio}:1")
-        print(f"  Loss 权重:     α={cfg.alpha} β={cfg.beta} γ={cfg.gamma}")
-        print(f"  ZeRO:          {cfg.zero_stage}")
-        print(f"{'=' * 60}\n")
-
-    # ── Tokenizer ──
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, trust_remote_code=True)
-
-    if getattr(tokenizer, "add_bos_token", False):
-        tokenizer.add_bos_token = False
-
-    # pad_token 处理（与 Distill 保持一致）
-    if tokenizer.pad_token_id is None or tokenizer.pad_token_id == tokenizer.eos_token_id:
-        _pad_candidates = ["<｜▁pad▁｜>", "<|▁pad▁|>", "<|PAD_TOKEN|>"]
-        _pad_set = False
-        for cand in _pad_candidates:
-            tid = tokenizer.convert_tokens_to_ids(cand)
-            if isinstance(tid, int) and tid >= 0 and tid != tokenizer.eos_token_id:
-                tokenizer.pad_token = cand
-                _pad_set = True
-                break
-        if not _pad_set:
-            tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
-
-    tokenizer.padding_side = "right"
-
-    num_added, latent_id = add_special_tokens(tokenizer)
-
-    # ── 模型 ──
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_name,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-    )
-
-    if len(tokenizer) > model.get_input_embeddings().num_embeddings:
-        model.resize_token_embeddings(len(tokenizer))
-
-    if cfg.gradient_checkpointing:
-        # use_reentrant=True 是 ZeRO-3 + LoRA + GC 三件套的实战 workaround
-        # (见 LLM训练踩坑.md 坑 #14, trl#2514). HF/PEFT 文档推荐 False,
-        # 但 ZeRO-3 下 non-reentrant checkpoint 和参数 partition 在 recompute
-        # 阶段会产生 shape [0] 反传错, 必须用 True.
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
-        if hasattr(model, "enable_input_require_grads"):
-            model.enable_input_require_grads()
-
-    # LoRA
-    if cfg.use_lora:
-        peft_config = LoraConfig(
-            r=cfg.lora_rank,
-            lora_alpha=cfg.lora_alpha,
-            target_modules=["q_proj", "v_proj", "k_proj", "o_proj",
-                            "gate_proj", "up_proj", "down_proj"],
-            lora_dropout=cfg.lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
-        model = get_peft_model(model, peft_config)
-        if accelerator.is_main_process:
-            model.print_trainable_parameters()
-
-    # ── Latent embeddings ──
-    hidden_size = model.config.hidden_size if hasattr(model.config, "hidden_size") else model.config.to_dict().get("hidden_size", 3584)
-    latent_emb = LatentEmbeddings(hidden_size, cfg.latent_init_std)
-
-    # ── 数据 ──
-    dataset = CODIDataset(
-        cfg.data_path, tokenizer,
-        max_length=cfg.max_length,
-        latent_compression_ratio=cfg.latent_compression_ratio,
-        filter_problems=cfg.filter_problems,
-        filter_sizes=cfg.filter_sizes,
-    )
-
-    collate_fn = partial(collate_codi, pad_token_id=tokenizer.pad_token_id)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=cfg.per_device_batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        num_workers=2,
-        pin_memory=True,
-    )
-
-    # ── Optimizer: 模型参数走 DeepSpeed，latent embeddings 单独管理 ──
-    optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    latent_optimizer = AdamW(latent_emb.parameters(), lr=cfg.latent_lr, weight_decay=0.0)
-
-    # ── Accelerate prepare（先 prepare，再用 sharded dataloader 长度算 scheduler）──
-    model, optimizer, dataloader = accelerator.prepare(
-        model, optimizer, dataloader
-    )
-    latent_emb = latent_emb.to(accelerator.device)
-
-    num_training_steps = math.ceil(
-        len(dataloader) / cfg.gradient_accumulation_steps
-    ) * cfg.num_epochs
-    num_warmup_steps = int(num_training_steps * cfg.warmup_ratio)
-
-    scheduler = get_cosine_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=num_warmup_steps,
-        num_training_steps=num_training_steps,
-    )
-    scheduler = accelerator.prepare(scheduler)
-
-    # ── 训练循环 ──
-    global_step = 0
-    for epoch in range(cfg.num_epochs):
-        model.train()
-        epoch_loss = 0.0
-
-        for step, batch in enumerate(dataloader):
-            with accelerator.accumulate(model):
-                total_loss, t_loss, s_loss, a_loss = compute_codi_loss(
-                    model=model,
-                    latent_emb=latent_emb,
-                    teacher_input_ids=batch["teacher_input_ids"],
-                    teacher_attention_mask=batch["teacher_attention_mask"],
-                    teacher_labels=batch["teacher_labels"],
-                    student_input_ids=batch["student_input_ids"],
-                    student_attention_mask=batch["student_attention_mask"],
-                    student_labels=batch["student_labels"],
-                    latent_positions=batch["latent_positions"],
-                    align_pairs=batch["align_pairs"],
-                    alpha=cfg.alpha,
-                    beta=cfg.beta,
-                    gamma=cfg.gamma,
-                )
-
-                accelerator.backward(total_loss)
-
-                if accelerator.sync_gradients:
-                    if accelerator.num_processes > 1 and latent_emb.embedding.grad is not None:
-                        torch.distributed.all_reduce(latent_emb.embedding.grad, op=torch.distributed.ReduceOp.AVG)
-
-                    accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
-                    torch.nn.utils.clip_grad_norm_(latent_emb.parameters(), cfg.max_grad_norm)
-
-                    latent_optimizer.step()
-                    latent_optimizer.zero_grad()
-
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-
-            epoch_loss += total_loss.item()
-
-            if accelerator.sync_gradients:
-                global_step += 1
-
-                if global_step % cfg.logging_steps == 0 and accelerator.is_main_process:
-                    avg_loss = epoch_loss / (step + 1)
-                    lr_current = scheduler.get_last_lr()[0]
-                    print(
-                        f"  [epoch {epoch+1}/{cfg.num_epochs}] "
-                        f"step {global_step} | "
-                        f"loss={avg_loss:.4f} "
-                        f"(teacher={t_loss:.4f} student={s_loss:.4f} align={a_loss:.4f}) | "
-                        f"lr={lr_current:.2e}"
-                    )
-
-                if global_step % cfg.save_steps == 0:
-                    _save_checkpoint(accelerator, model, latent_emb, tokenizer, cfg, global_step)
-
-    # ── 最终保存 ──
-    _save_checkpoint(accelerator, model, latent_emb, tokenizer, cfg, "final")
-
-    if accelerator.is_main_process:
-        print(f"\n训练完成！模型保存到: {cfg.output_dir}")
-
-
-def _save_checkpoint(accelerator, model, latent_emb, tokenizer, cfg, tag):
-    accelerator.wait_for_everyone()
-    save_path = os.path.join(cfg.output_dir, f"checkpoint-{tag}")
-    unwrapped = accelerator.unwrap_model(model)
-    # ZeRO-3: all ranks must participate in weight gather
-    state_dict = accelerator.get_state_dict(model)
-    if accelerator.is_main_process:
-        os.makedirs(save_path, exist_ok=True)
-        unwrapped.save_pretrained(save_path, state_dict=state_dict)
-        tokenizer.save_pretrained(save_path)
-        torch.save(latent_emb.state_dict(), os.path.join(save_path, "latent_embeddings.pt"))
-        print(f"  ✓ checkpoint 保存到: {save_path}")
-    accelerator.wait_for_everyone()
-
-
-# ====================================================================
-# HLR 训练路径 (Hierarchical Latent Reasoner)
-# ====================================================================
-#
-# 与 CODI 训练路径的差异:
-#   - 数据用 HLRDataset (分段表示) + collate_hlr (强制 batch_size=1)
-#   - 不需要 <latent> special token (HLRDataset 用分段构造, 不在 token id 层面占位)
-#   - LatentReasoner 单独管理 (不进 accelerator.prepare):
-#       沿用 CODI 里 latent_emb 的处理方式, 手动 DDP 梯度同步
-#       理由: LR 才 ~108M, ZeRO sharding 节省的显存有限 (~1.7GB/卡), 但要求统一
-#             grade engine 处理多 model 在 DeepSpeed 下复杂, Phase 1 不引入这个复杂度
-#   - loss 调用 compute_hlr_loss, 而非 compute_codi_loss
-
-
 def train_hlr(cfg: HLRConfig):
     ds_config = make_deepspeed_config(cfg.zero_stage)
     ds_plugin = None
@@ -319,7 +87,7 @@ def train_hlr(cfg: HLRConfig):
         print(f"  ZeRO:           {cfg.zero_stage}")
         print(f"{'=' * 60}\n")
 
-    # ── Tokenizer (与 CODI 相同的 pad/bos 处理) ──
+    # ── Tokenizer ──
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name, trust_remote_code=True)
 
     if getattr(tokenizer, "add_bos_token", False):
@@ -338,8 +106,6 @@ def train_hlr(cfg: HLRConfig):
             tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
 
     tokenizer.padding_side = "right"
-
-    # HLR 不引入 <latent> special token (HLRDataset 分段构造, 不占 token id)
 
     # ── 主模型 ──
     model = AutoModelForCausalLM.from_pretrained(
@@ -491,7 +257,7 @@ def train_hlr(cfg: HLRConfig):
                 accelerator.backward(total_loss)
 
                 if accelerator.sync_gradients:
-                    # 多卡 LatentReasoner 梯度手动 all-reduce (沿用 CODI latent_emb 处理方式)
+                    # 多卡 LatentReasoner 梯度手动 all-reduce (LR 没进 DeepSpeed sharding)
                     if accelerator.num_processes > 1:
                         for p in latent_reasoner.parameters():
                             if p.grad is not None:
@@ -565,13 +331,8 @@ def _save_hlr_checkpoint(accelerator, model, latent_reasoner, tokenizer, cfg, ta
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Latent-SFT 训练 (CODI 或 HLR)")
+    parser = argparse.ArgumentParser(description="HLR 训练 (Hierarchical Latent Reasoner)")
 
-    # 训练路径选择
-    parser.add_argument("--hlr", action="store_true",
-                        help="使用 HLR 训练路径 (默认 CODI)")
-
-    # 通用参数
     parser.add_argument("--model", type=str, default=None)
     parser.add_argument("--data", type=str, default=None)
     parser.add_argument("--compression_ratio", type=int, default=None)
@@ -587,38 +348,29 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--save_steps", type=int, default=None)
 
-    # CODI 专属
-    parser.add_argument("--latent_lr", type=float, default=None,
-                        help="(CODI) latent embedding 的 lr")
-
-    # HLR 专属
     parser.add_argument("--latent_reasoner_lr", type=float, default=None,
-                        help="(HLR) LatentReasoner 的 lr")
+                        help="LatentReasoner 的 lr")
     parser.add_argument("--lr_num_layers", type=int, default=None,
-                        help="(HLR) LatentReasoner 层数")
+                        help="LatentReasoner 层数 (0 = auto 从主模型推断)")
     parser.add_argument("--lr_hidden_size", type=int, default=None,
-                        help="(HLR) LatentReasoner hidden 维度")
+                        help="LatentReasoner hidden 维度 (0 = auto)")
 
     args = parser.parse_args()
 
-    if args.hlr:
-        cfg = HLRConfig()
-        # HLR 专属覆盖
-        if args.latent_reasoner_lr is not None: cfg.latent_reasoner_lr = args.latent_reasoner_lr
-        if args.lr_num_layers is not None: cfg.lr_num_layers = args.lr_num_layers
-        if args.lr_hidden_size is not None: cfg.lr_hidden_size = args.lr_hidden_size
-        # 用户没显式传 --data → 强制从原始 chains 重新构造 profiled jsonl
-        # (避免用过时数据 / 跨基座数据)
-        if args.data is None:
-            cfg.auto_rebuild_data = True
-            print("⚠ 未指定 --data, 训练前会用 base model 重新跑 entropy profile")
-            print(f"   原始 chains: {cfg.raw_chains_path}")
-            print(f"   输出 profiled: {cfg.data_path}")
-    else:
-        cfg = LatentSFTConfig()
-        if args.latent_lr is not None: cfg.latent_lr = args.latent_lr
+    cfg = HLRConfig()
 
-    # 通用覆盖 (CODI 和 HLR 都用)
+    if args.latent_reasoner_lr is not None: cfg.latent_reasoner_lr = args.latent_reasoner_lr
+    if args.lr_num_layers is not None: cfg.lr_num_layers = args.lr_num_layers
+    if args.lr_hidden_size is not None: cfg.lr_hidden_size = args.lr_hidden_size
+
+    # 用户没显式传 --data → 用当前 --model 重跑 entropy profile, 覆盖 data_path,
+    # 确保 profiled jsonl 和本次训练基座的 tokenizer/概率分布严格一致
+    if args.data is None:
+        cfg.auto_rebuild_data = True
+        print("⚠ 未指定 --data, 训练前会用 --model 重新跑 entropy profile")
+        print(f"   原始 chains: {cfg.raw_chains_path}")
+        print(f"   输出 profiled: {cfg.data_path}")
+
     if args.model is not None: cfg.model_name = args.model
     if args.data is not None: cfg.data_path = args.data
     if args.compression_ratio is not None: cfg.latent_compression_ratio = args.compression_ratio
@@ -634,10 +386,7 @@ def main():
     if args.output_dir is not None: cfg.output_dir = args.output_dir
     if args.save_steps is not None: cfg.save_steps = args.save_steps
 
-    if args.hlr:
-        train_hlr(cfg)
-    else:
-        train(cfg)
+    train_hlr(cfg)
 
 
 if __name__ == "__main__":

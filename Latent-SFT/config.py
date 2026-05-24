@@ -1,78 +1,25 @@
 """
-Latent-SFT 配置：CODI 式隐式推理训练。
+Latent-SFT 配置 (HLR 路径).
 
-Pipeline 定位：
+Pipeline 定位:
   ① UniCOP-Distill (SFT) → ② GRPO (显式 CoT) → ③ Latent-SFT (本阶段) → ④ Latent-GRPO (待定)
 
-本阶段目标：让模型学会用 latent token 替代 CoT 中高熵段，
-           保留低熵段的显式推理，通过多点 hidden state 对齐保证等价信息编码。
+本阶段目标: 用独立小 transformer (LatentReasoner) 在 CoT 的低熵确定性段做隐式推理,
+           保留高熵段的显式推理, 通过多层 hidden state 对齐保证等价信息编码.
 """
 
 from dataclasses import dataclass, field
 
 
 @dataclass
-class LatentSFTConfig:
-    # ── 模型 ──
-    model_name: str = "./output_grpo/final_model"
-    use_lora: bool = True
-    lora_rank: int = 64
-    lora_alpha: int = 128
-    lora_dropout: float = 0.05
-
-    # ── 数据 ──
-    # 路径相对 UniCOP/ 根目录 (sbatch / accelerate launch 在 UniCOP/ 下跑)
-    # 实际用 chains_template (Distill 模板生成); chains_self 是 rationalize 流程产物, 本项目未用
-    data_path: str = "UniCOP-Distill/data/chains_template_cvrp20.jsonl"
-    filter_problems: list[str] = field(default_factory=lambda: ["cvrp"])
-    filter_sizes: list[int] = field(default_factory=lambda: [20])
-    max_length: int = 8192
-
-    # ── Latent 配置 ──
-    latent_compression_ratio: int = 4
-    min_latent_segment: int = 8
-    latent_init_std: float = 0.02
-
-    # ── CODI Loss 权重 ──
-    alpha: float = 1.0   # student CE (答案预测)
-    beta: float = 1.0    # hidden state 对齐
-    gamma: float = 1.0   # teacher CE (保持显式推理能力)
-
-    # ── 训练 ──
-    seed: int = 42
-    num_epochs: int = 3
-    lr: float = 2e-5
-    latent_lr: float = 1e-3
-    per_device_batch_size: int = 1
-    gradient_accumulation_steps: int = 8
-    warmup_ratio: float = 0.05
-    max_grad_norm: float = 1.0
-    weight_decay: float = 0.01
-
-    # ── 多卡 ──
-    zero_stage: int = 0
-    gradient_checkpointing: bool = False
-
-    # ── 输出 ──
-    output_dir: str = "./output_latent_sft"
-    logging_steps: int = 10
-    save_steps: int = 200
-    save_total_limit: int = 3
-
-    # ── 推理（inference.py 用）──
-    entropy_window: int = 3
-    max_latent_steps: int = 48
-
-
-@dataclass
 class HLRConfig:
     """
-    Hierarchical Latent Reasoner 配置（最终设计）。
+    Hierarchical Latent Reasoner 配置 (最终设计).
 
     LatentReasoner 架构 (B2 + hidden sharing 1:4):
       - 7 层独立 SwiGLU + GQA + RoPE block (无 weight sharing)
       - down_proj 把主模型 hidden (3584) 降到 LR hidden (896)
-      - up_proj  把 LR hidden 升回主模型 hidden (共享，所有主模型层公用)
+      - up_proj  把 LR hidden 升回主模型 hidden (共享, 所有主模型层公用)
       - layer_emb (28 × 896): 调制同一 LR hidden 被注入不同主模型层时的语义
       - hidden sharing: 1 个 LR 层 hidden 喂主模型 4 层 K_proj / V_proj
 
@@ -142,7 +89,7 @@ class HLRConfig:
     save_total_limit: int = 3
 
     # ── Latent 进出 trigger (新方向: 压缩低熵确定性段以省算力) ──
-    # 训练侧 entropy_profile.py 和推理侧 inference.py 共享这些参数, 必须完全一致
+    # 训练侧 entropy_profile.py 和未来推理侧需共享这些参数, 必须完全一致
     entropy_window: int = 3                   # 趋势窗口 (连续 K 步)
     entropy_quantile: float = 0.5             # 50 分位数 = 中位数, 作为"低熵"阈值
     min_latent_steps: int = 3                 # 进入 latent 后至少走的 step 数 (≈12 显式 token)

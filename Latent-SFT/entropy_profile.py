@@ -449,7 +449,7 @@ def profile_dataset(args):
 def main():
     parser = argparse.ArgumentParser(
         description="Entropy profiling for HLR training "
-                    "(标注低熵确定性段, 训练侧规则与 inference.py 镜像一致)"
+                    "(标注低熵确定性段, 训练侧规则与未来推理侧需镜像一致)"
     )
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--data", type=str, required=True)

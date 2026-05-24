@@ -1,130 +1,20 @@
 """
-CODI 模型封装：teacher/student 双路 forward + 多点 hidden state 对齐。
+Hierarchical Latent Reasoner (HLR) 模型封装.
 
-核心机制：
-  - 同一模型跑两次 forward（共享参数）
-  - Teacher: 标准输入（完整 CoT）
-  - Student: latent 段的 embedding 被替换为单一可学习连续向量
-  - 对齐: 每个 latent→explicit 边界 + solution 边界，逐层 L1 对齐
-         Teacher 端 stop-gradient，梯度只流向 Student
+设计:
+  - 主模型 (Qwen 7B / Qwen3 4B + LoRA) 负责 prompt / 显式段 / solution 的处理
+  - 独立小 transformer (LatentReasoner) 负责 latent 段的内部自回归 (hidden chain)
+  - 监督只在每个 latent 段末位 hidden 与 teacher 同位 hidden 对齐
+
+Phase 1 限制:
+  - LatentReasoner KV cache 由内部 attention 处理 (训练侧整段单次 forward, 无需接力)
+  - 不带 cross-attention 到主模型 K/V (Phase 2 升级方向)
+  - LR 顶层 hidden 经 up_proj 注入主模型 inputs_embeds (A'' 风, Phase 2 改严格 KV inject)
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-class LatentEmbeddings(nn.Module):
-    """单一可学习 latent embedding，所有 latent 位置共享。"""
-
-    def __init__(self, hidden_size: int, init_std: float = 0.02):
-        super().__init__()
-        self.embedding = nn.Parameter(torch.randn(hidden_size) * init_std)
-
-    def forward(self):
-        return self.embedding
-
-
-def compute_codi_loss(
-    model,
-    latent_emb: LatentEmbeddings,
-    teacher_input_ids: torch.Tensor,
-    teacher_attention_mask: torch.Tensor,
-    teacher_labels: torch.Tensor,
-    student_input_ids: torch.Tensor,
-    student_attention_mask: torch.Tensor,
-    student_labels: torch.Tensor,
-    latent_positions: list[list[int]],
-    align_pairs: list[list[tuple[int, int]]],
-    alpha: float = 1.0,
-    beta: float = 1.0,
-    gamma: float = 1.0,
-):
-    """
-    CODI 单步训练：两次 forward + 多点对齐 loss。
-
-    Returns:
-        total_loss, teacher_loss, student_loss, align_loss
-    """
-    # ── Teacher forward ──
-    teacher_out = model(
-        input_ids=teacher_input_ids,
-        attention_mask=teacher_attention_mask,
-        labels=teacher_labels,
-        output_hidden_states=True,
-    )
-    teacher_loss = teacher_out.loss
-    teacher_hidden = teacher_out.hidden_states
-
-    # ── Student forward: 注入 latent embedding ──
-    if hasattr(model, "get_input_embeddings"):
-        embed_layer = model.get_input_embeddings()
-    else:
-        embed_layer = model.module.get_input_embeddings()
-    student_embeds = embed_layer(student_input_ids).clone()
-
-    latent_vec = latent_emb()
-    batch_size = student_embeds.size(0)
-    for b in range(batch_size):
-        for pos in latent_positions[b]:
-            student_embeds[b, pos, :] = latent_vec
-
-    student_out = model(
-        inputs_embeds=student_embeds,
-        attention_mask=student_attention_mask,
-        labels=student_labels,
-        output_hidden_states=True,
-    )
-    student_loss = student_out.loss
-    student_hidden = student_out.hidden_states
-
-    # ── 多点对齐 loss: 逐层 L1，teacher 端 stop-gradient ──
-    align_loss = torch.tensor(0.0, device=student_embeds.device)
-    num_align_layers = 0
-
-    for layer_idx in range(1, len(teacher_hidden)):
-        h_t_list, h_s_list = [], []
-        for b in range(batch_size):
-            for t_pos, s_pos in align_pairs[b]:
-                if t_pos < 0 or t_pos >= teacher_hidden[layer_idx].size(1):
-                    continue
-                if s_pos < 0 or s_pos >= student_hidden[layer_idx].size(1):
-                    continue
-                h_t_list.append(teacher_hidden[layer_idx][b, t_pos, :].detach())
-                h_s_list.append(student_hidden[layer_idx][b, s_pos, :])
-
-        if not h_t_list:
-            continue
-
-        h_t_batch = torch.stack(h_t_list)
-        h_s_batch = torch.stack(h_s_list)
-        std = h_t_batch.std(dim=-1).mean().clamp(min=0.1)
-        layer_loss = (h_t_batch - h_s_batch).abs().mean() / std
-
-        align_loss = align_loss + layer_loss
-        num_align_layers += 1
-
-    if num_align_layers > 0:
-        align_loss = align_loss / num_align_layers
-
-    total_loss = alpha * student_loss + beta * align_loss + gamma * teacher_loss
-
-    return total_loss, teacher_loss.detach(), student_loss.detach(), align_loss.detach()
-
-
-# ====================================================================
-# Hierarchical Latent Reasoner (HLR) — Phase 1 框架
-# ====================================================================
-#
-# 设计:
-#   - 主模型 (Qwen 7B + LoRA) 负责 prompt / 显式段 / solution 的处理
-#   - 独立小 transformer 负责 latent 段的内部自回归 (hidden chain)
-#   - 监督只在每个 latent 段末位 hidden 与 teacher 同位 hidden 对齐
-#
-# Phase 1 限制:
-#   - 小 transformer 不带 KV cache (O(k^2) 复杂度，k 较小时可接受)
-#   - 不引入位置编码 (依赖 hidden chain 本身的位置信息)
-#   - 不带 cross-attention 到主模型 K/V (TODO_3 attend_scope = "internal")
 
 
 class SimpleRMSNorm(nn.Module):
@@ -611,7 +501,7 @@ def compute_hlr_loss(
            一次 model(inputs_embeds=..., labels=...) → student_loss
            GC 兼容, 不依赖 KV cache, 跨段语义靠 self-attention 自然连接.
         4. Align: 每个 latent 段末位 LR 输出 vs teacher 段末位 hidden (每主模型层 1 个对齐点).
-           teacher hidden 端 detach (CODI 风, 不污染主模型 teacher 路径).
+           teacher hidden 端 detach, 不污染主模型 teacher 路径.
            LR input 也用 detach 的 teacher hidden, align 梯度不回传主模型.
 
     梯度路径:
@@ -685,7 +575,7 @@ def compute_hlr_loss(
 
             elif seg.type == "latent":
                 k = seg.k
-                # LR 输入: teacher 段起始前 token 最后一层 hidden (双向 detach, CODI 风)
+                # LR 输入: teacher 段起始前 token 最后一层 hidden (双向 detach)
                 in_pos = seg.teacher_input_pos
                 in_pos = min(max(in_pos, 0), T_teacher - 1)
                 h_input = teacher_hidden_states[-1][:, in_pos, :].detach()  # [1, H]
