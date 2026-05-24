@@ -629,6 +629,17 @@ def compute_hlr_loss(
     _loss_stamp("AFTER segments loop (exited gather_ctx)")
     student_embeds = torch.cat(student_embeds_parts, dim=1)        # [1, T_student, H_main]
     student_labels = torch.cat(student_labels_parts, dim=0).unsqueeze(0)  # [1, T_student]
+
+    # ── 防御: 强制 rank 同步到 student forward 入口 ──
+    # 不同样本 segments 数异质 (rank 0:42 latent vs rank 1:48 latent), 导致
+    # rank 0/3 先到 student forward 触发 ZeRO-3 all_gather collective,
+    # rank 1/2 还在 segments loop 跑 LR forward 没到, all_gather 死锁.
+    # barrier 让 4 rank 同时进 model.forward, ZeRO-3 collective 顺序对齐.
+    if torch.distributed.is_initialized():
+        _loss_stamp(f"BEFORE barrier (rank-sync before student forward)")
+        torch.distributed.barrier()
+        _loss_stamp(f"AFTER barrier (all ranks aligned)")
+
     _loss_stamp(f"BEFORE student forward (student_len={student_embeds.size(1)})")
 
     # ── (3) Student forward 一次 (GC 友好, 不需 use_cache) ──
