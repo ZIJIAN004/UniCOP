@@ -43,6 +43,8 @@ export PYTHONFAULTHANDLER=1
 export TORCH_NCCL_TRACE_BUFFER_SIZE=20480
 export TORCH_NCCL_DUMP_ON_TIMEOUT=1
 export NCCL_DEBUG=WARN
+# smoke 默认开详细 stamp (train.py/model.py 的 _stamp/_loss_stamp)
+export HLR_DEBUG=1
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"

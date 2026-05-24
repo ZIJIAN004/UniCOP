@@ -35,9 +35,14 @@ from model import build_latent_reasoner_from_main, compute_hlr_loss
 # 每条打点强制 flush, 让日志立刻可见即使后续 hang.
 _HLR_T0 = time.time()
 _HLR_RANK = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
+# 默认关 (生产干净), export HLR_DEBUG=1 开启全部 rank-level 诊断 stamp.
+# 再遇 ZeRO-3 hang 时直接 HLR_DEBUG=1 重跑即可定位.
+_HLR_DEBUG = os.environ.get("HLR_DEBUG", "0") == "1"
 
 
 def _stamp(msg: str) -> None:
+    if not _HLR_DEBUG:
+        return
     elapsed = time.time() - _HLR_T0
     print(f"[STAMP rank={_HLR_RANK} +{elapsed:6.1f}s] {msg}", flush=True)
 
@@ -206,7 +211,11 @@ def train_hlr(cfg: HLRConfig):
         batch_size=cfg.per_device_batch_size,   # Phase 1 强制 1
         shuffle=True,
         collate_fn=collate_fn,
-        num_workers=2,
+        # num_workers=0: batch_size=1 collate 极轻量, worker 并行无收益;
+        # num_workers=2 在 NFS (TMPDIR=/homes/zhuoyi/tmp) 上退出时 pymp 临时目录
+        # 被 fd 占用 rmtree 失败, 刷一屏 OSError [Errno 16] Device busy (无害,
+        # 在 checkpoint 保存之后, 但很吵). num_workers=0 根治.
+        num_workers=0,
         pin_memory=True,
     )
 

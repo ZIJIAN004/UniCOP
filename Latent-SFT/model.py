@@ -26,10 +26,12 @@ _HLR_LOSS_T0 = time.time()
 _HLR_LOSS_RANK = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
 _HLR_LOSS_CALL_COUNT = 0
 _HLR_LOSS_MAX_DIAG_CALLS = 1
+# 默认关, export HLR_DEBUG=1 开 (跟 train.py 同开关). 只在前 1 次 call 打全 stamp.
+_HLR_DEBUG = os.environ.get("HLR_DEBUG", "0") == "1"
 
 
 def _loss_stamp(msg: str) -> None:
-    if _HLR_LOSS_CALL_COUNT > _HLR_LOSS_MAX_DIAG_CALLS:
+    if not _HLR_DEBUG or _HLR_LOSS_CALL_COUNT > _HLR_LOSS_MAX_DIAG_CALLS:
         return
     elapsed = time.time() - _HLR_LOSS_T0
     print(f"[LSTAMP rank={_HLR_LOSS_RANK} +{elapsed:6.1f}s call={_HLR_LOSS_CALL_COUNT}] {msg}",
