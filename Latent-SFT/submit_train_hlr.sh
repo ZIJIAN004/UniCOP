@@ -95,14 +95,15 @@ if [ -n "$_min_free" ] && [ "$_min_free" -lt 20000 ]; then
     exit 0
 fi
 
-# ── Step 0: entropy_profile (单 GPU, 与 ZeRO-3 init 隔离) ──
+# ── Step 0: entropy_profile (4 卡并行, 与 ZeRO-3 init 隔离) ──
 # 不能在 train.py 内 inline 跑: ZeRO-3 init 把 embedding.weight partition 成 1D,
-# 后续 forward 会 'weight' must be 2-D 报错. 单独单 GPU 跑.
+# 后续 forward 会 'weight' must be 2-D 报错.
+# 4 卡并行: 50000 条 / 4 = 12500 条/卡, ~20-30 min.
 RAW_DATA="UniCOP-Distill/data/chains_template_cvrp20.jsonl"
 PROFILED_DATA="${HLR_DATA:-Latent-SFT/data/profiled_${BASE_MODEL_TYPE}_cvrp20.jsonl}"
 
 echo ""
-echo ">>> Step 0: entropy_profile ($(date))"
+echo ">>> Step 0: entropy_profile (4 卡并行) ($(date))"
 echo "    raw:      $RAW_DATA"
 echo "    output:   $PROFILED_DATA"
 
@@ -114,13 +115,35 @@ else
         echo "❌ 原始 chains 不存在: $RAW_DATA"; exit 1
     fi
     mkdir -p "$(dirname "$PROFILED_DATA")"
-    CUDA_VISIBLE_DEVICES=0 python Latent-SFT/entropy_profile.py \
-        --model "$MODEL_PATH" --data "$RAW_DATA" --output "$PROFILED_DATA"
-    _ep_exit=$?
-    if [ $_ep_exit -ne 0 ] || [ ! -f "$PROFILED_DATA" ]; then
-        echo "❌ entropy_profile 失败 (exit $_ep_exit)"; exit 1
+
+    PROFILE_TMP=$(mktemp -d -p "${TMPDIR:-/tmp}" entropy_profile.XXXXXX)
+    echo "    临时 shard 目录: $PROFILE_TMP"
+    for i in 0 1 2 3; do
+        CUDA_VISIBLE_DEVICES=$i python Latent-SFT/entropy_profile.py \
+            --model "$MODEL_PATH" --data "$RAW_DATA" \
+            --output "$PROFILE_TMP/shard_${i}.jsonl" \
+            --num_shards 4 --shard_rank $i \
+            > "$PROFILE_TMP/log_${i}.log" 2>&1 &
+    done
+    wait
+
+    profile_failed=0
+    for i in 0 1 2 3; do
+        if [ ! -s "$PROFILE_TMP/shard_${i}.jsonl" ]; then
+            echo "❌ shard $i 失败, log:"
+            cat "$PROFILE_TMP/log_${i}.log" | sed 's/^/      /'
+            profile_failed=1
+        else
+            echo "    ✓ shard $i: $(wc -l < "$PROFILE_TMP/shard_${i}.jsonl") 行"
+        fi
+    done
+    if [ $profile_failed -ne 0 ]; then
+        echo "❌ entropy_profile 失败, 保留 $PROFILE_TMP"; exit 1
     fi
-    echo "    ✓ profile 完成: $(wc -l < "$PROFILED_DATA") 行"
+
+    cat "$PROFILE_TMP/shard_"*.jsonl > "$PROFILED_DATA"
+    rm -rf "$PROFILE_TMP"
+    echo "    ✓ 合并完成: $(wc -l < "$PROFILED_DATA") 行 → $PROFILED_DATA"
 fi
 
 # ── 训练参数 (sbatch 默认尊重 hlr_config.py, 仅个别字段允许 env 覆盖) ──

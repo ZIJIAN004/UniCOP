@@ -361,6 +361,16 @@ def profile_dataset(args):
         print(f"[limit] 只处理前 {args.limit} 条 (smoke 模式)")
         records = records[: args.limit]
 
+    # ── 分片支持 (4 卡并行用): 各 rank 只处理自己那一份 ──
+    if getattr(args, "num_shards", 1) > 1:
+        n_total = len(records)
+        per = (n_total + args.num_shards - 1) // args.num_shards
+        s = args.shard_rank * per
+        e = min(s + per, n_total)
+        records = records[s:e]
+        print(f"[shard] rank {args.shard_rank}/{args.num_shards}: "
+              f"处理 {len(records)} 条 [{s}, {e}) of {n_total}")
+
     results = []
     skipped = 0
 
@@ -458,6 +468,10 @@ def main():
     parser.add_argument("--save_entropies", action="store_true")
     parser.add_argument("--limit", type=int, default=0,
                         help="只处理前 N 条样本 (0 = 全量); smoke 模式用 200 条快速验证")
+    parser.add_argument("--num_shards", type=int, default=1,
+                        help="数据分片总数 (>1 时并行多 GPU 用, 配合 --shard_rank)")
+    parser.add_argument("--shard_rank", type=int, default=0,
+                        help="本进程负责哪个 shard (0..num_shards-1); 各 rank 独立 output 文件由调用方拼名")
 
     # Latent 进出 trigger (与 HLRConfig 默认值对齐)
     parser.add_argument("--entropy_window", type=int, default=3,

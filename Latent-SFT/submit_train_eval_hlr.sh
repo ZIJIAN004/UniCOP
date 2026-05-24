@@ -130,16 +130,17 @@ fi
 echo "============================================================"
 
 # ══════════════════════════════════════════════════════════════════
-# Step 0: entropy_profile (单 GPU, ~1-2 hr; 必须先于训练, 与 ZeRO-3 init 隔离)
+# Step 0: entropy_profile (4 卡并行, ~20-30 min; 必须先于训练, 与 ZeRO-3 init 隔离)
 # ══════════════════════════════════════════════════════════════════
 # 为何独立? train.py 内部 inline 跑会触发 ZeRO-3 init 后 model.forward
 # 报 'weight' must be 2-D (embedding.weight 已被 partition 成 1D 切片).
-# 改为 sbatch 这里单 GPU 不带 DeepSpeed 跑, 训练时传 --data 跳过.
+# 改为 sbatch 这里 4 卡并行不带 DeepSpeed 跑, 训练时传 --data 跳过.
+# 每条样本独立 forward, embarrassingly parallel.
 RAW_DATA="UniCOP-Distill/data/chains_template_cvrp20.jsonl"
 PROFILED_DATA="${HLR_DATA:-Latent-SFT/data/profiled_${BASE_MODEL_TYPE}_cvrp20.jsonl}"
 
 echo ""
-echo ">>> Step 0: entropy_profile ($(date))"
+echo ">>> Step 0: entropy_profile (4 卡并行) ($(date))"
 echo "    raw:      $RAW_DATA"
 echo "    output:   $PROFILED_DATA"
 
@@ -153,17 +154,45 @@ else
         exit 1
     fi
     mkdir -p "$(dirname "$PROFILED_DATA")"
-    CUDA_VISIBLE_DEVICES=0 python Latent-SFT/entropy_profile.py \
-        --model "$MODEL_PATH" \
-        --data "$RAW_DATA" \
-        --output "$PROFILED_DATA"
-    _ep_exit=$?
-    if [ $_ep_exit -ne 0 ] || [ ! -f "$PROFILED_DATA" ]; then
-        echo "❌ entropy_profile 失败 (exit $_ep_exit)"
-        notify "❌ HLR entropy_profile 失败 (exit $_ep_exit)"
+
+    # 4 卡并行: 启 4 个 python 进程, 各绑一卡, 各处理 1/4 数据.
+    # 各自输出到临时 shard 文件, 全部成功后 cat 合并到主 PROFILED_DATA.
+    PROFILE_TMP=$(mktemp -d -p "${TMPDIR:-/tmp}" entropy_profile.XXXXXX)
+    echo "    临时 shard 目录: $PROFILE_TMP"
+
+    SHARDS=4
+    for i in 0 1 2 3; do
+        CUDA_VISIBLE_DEVICES=$i python Latent-SFT/entropy_profile.py \
+            --model "$MODEL_PATH" \
+            --data "$RAW_DATA" \
+            --output "$PROFILE_TMP/shard_${i}.jsonl" \
+            --num_shards $SHARDS \
+            --shard_rank $i \
+            > "$PROFILE_TMP/log_${i}.log" 2>&1 &
+    done
+    wait
+
+    # 检查 4 个进程都成功
+    profile_failed=0
+    for i in 0 1 2 3; do
+        if [ ! -s "$PROFILE_TMP/shard_${i}.jsonl" ]; then
+            echo "❌ shard $i 失败 / 空输出, log:"
+            cat "$PROFILE_TMP/log_${i}.log" | sed 's/^/      /'
+            profile_failed=1
+        else
+            echo "    ✓ shard $i: $(wc -l < "$PROFILE_TMP/shard_${i}.jsonl") 行"
+        fi
+    done
+    if [ $profile_failed -ne 0 ]; then
+        echo "❌ entropy_profile 4 卡并行失败, 保留临时目录 $PROFILE_TMP 供调试"
+        notify "❌ HLR entropy_profile 失败"
         exit 1
     fi
-    echo "    ✓ profile 完成: $(wc -l < "$PROFILED_DATA") 行"
+
+    # 合并
+    cat "$PROFILE_TMP/shard_"*.jsonl > "$PROFILED_DATA"
+    rm -rf "$PROFILE_TMP"
+    echo "    ✓ 合并完成: $(wc -l < "$PROFILED_DATA") 行 → $PROFILED_DATA"
 fi
 
 # ══════════════════════════════════════════════════════════════════
