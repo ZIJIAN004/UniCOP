@@ -693,19 +693,23 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
 
     # 评估每个实例的所有 completion
     total_truncated = 0
+    hlr_extras: list[dict] = []   # backend=hlr 时, 收集每条 sample 的 extra info
     for i in range(num_test):
         instance = instances[i]
         instance_best = None
 
         for item in all_completions[i]:
-            # 兼容三种格式：
-            #   (completion, is_truncated, num_tokens)  — local 后端
-            #   (completion, is_truncated)              — 旧格式兼容
-            #   纯 str                                  — API 后端
+            # 兼容四种格式:
+            #   (completion, is_truncated, num_tokens, extra_info)  — hlr 后端 (4 元组)
+            #   (completion, is_truncated, num_tokens)              — local / vllm 后端
+            #   (completion, is_truncated)                          — 旧格式兼容
+            #   纯 str                                              — API 后端
             if isinstance(item, tuple):
                 completion = item[0]
                 is_truncated = item[1]
                 num_tokens = item[2] if len(item) > 2 else None
+                if len(item) > 3 and item[3] is not None:
+                    hlr_extras.append(item[3])
             else:
                 completion, is_truncated, num_tokens = item, False, None
 
@@ -889,6 +893,28 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
         "feasible_instances":   instance_has_feas,
         "examples":             example_records,
     }
+
+    # HLR backend 汇总 (per-sample extras → per-combo summary)
+    if hlr_extras:
+        sum_explicit = sum(e.get("explicit_tokens", 0) for e in hlr_extras)
+        sum_latent = sum(e.get("latent_steps", 0) for e in hlr_extras)
+        sum_segs = sum(len(e.get("latent_segments", [])) for e in hlr_extras)
+        sum_wall = sum(e.get("wall_time_sec", 0.0) for e in hlr_extras)
+        n = len(hlr_extras)
+        results["hlr_summary"] = {
+            "samples":                  n,
+            "avg_explicit_tokens":      round(sum_explicit / n, 2),
+            "avg_latent_steps":         round(sum_latent / n, 2),
+            "avg_latent_segments":      round(sum_segs / n, 2),
+            "avg_wall_time_sec":        round(sum_wall / n, 3),
+            "total_wall_time_sec":      round(sum_wall, 2),
+            # token 占比 (explicit_only_equivalent = avg_completion_tokens)
+            "latent_savings_token_pct": round(
+                100 * (sum_latent * hlr_extras[0].get("compression_ratio", 4) - sum_latent)
+                / max(sum_explicit + sum_latent * hlr_extras[0].get("compression_ratio", 4), 1),
+                2,
+            ),
+        }
     return results
 
 
@@ -897,12 +923,22 @@ def main():
 
     # ── 推理后端 ──────────────────────────────────────────────────────
     parser.add_argument("--backend",     type=str, default=config.eval_backend,
-                        choices=["local", "vllm", "api"],
-                        help="推理后端: local=HF本地模型 | vllm=vLLM加速 | api=API调用")
+                        choices=["local", "vllm", "api", "hlr"],
+                        help="推理后端: local=HF本地模型 | vllm=vLLM加速 | "
+                             "api=API调用 | hlr=Latent-SFT HLR 引擎")
 
     # ── 本地模型参数 ──────────────────────────────────────────────────
     parser.add_argument("--model_path",  type=str, default=None,
-                        help="本地模型路径（backend=local 时必填）")
+                        help="本地模型路径（backend=local/vllm 时必填）")
+
+    # ── HLR backend 参数 ─────────────────────────────────────────────
+    parser.add_argument("--hlr_checkpoint", type=str, default=None,
+                        help="HLR checkpoint 目录 (含 latent_reasoner.pt + adapter_config.json), "
+                             "backend=hlr 时必填")
+    parser.add_argument("--hlr_base_model", type=str, default=None,
+                        help="HLR base 模型路径 (不传则从 adapter_config.json 读)")
+    parser.add_argument("--hlr_merge_lora", action="store_true",
+                        help="HLR 加载时 merge LoRA, 推理稍快但显存稍多")
 
     # ── Vertex AI Gemini 参数 ─────────────────────────────────────────
     parser.add_argument("--gcp_project", type=str, default=config.gcp_project,
@@ -961,6 +997,12 @@ def main():
         parser.error("backend=api 时必须通过 --api_model 指定模型名称")
     if args.backend == "api" and not args.gcp_credentials:
         parser.error("backend=api 时必须通过 --gcp_credentials 指定服务账号密钥文件")
+    if args.backend == "hlr" and not args.hlr_checkpoint:
+        parser.error("backend=hlr 时必须通过 --hlr_checkpoint 指定 HLR checkpoint 目录")
+    if args.backend == "hlr" and args.batch_size != 1:
+        parser.error(f"backend=hlr 推理强制 batch_size=1 (Phase 1 限制), 当前 batch_size={args.batch_size}")
+    if args.backend == "hlr" and args.num_samples != 1:
+        parser.error(f"backend=hlr 当前只支持 num_samples=1, 当前 num_samples={args.num_samples}")
     if args.num_samples > 1 and args.temperature <= 0:
         parser.error(f"num_samples={args.num_samples}>1 但 temperature={args.temperature}<=0；"
                      "贪心解码多次结果完全相同，请设 --temperature 0.6 或类似值")
@@ -1001,6 +1043,41 @@ def main():
             )
 
         backend_info = f"vllm | {args.model_path} (tp={args.tp_size})"
+    elif args.backend == "hlr":
+        # Lazy import: Latent-SFT 不在 UniCOP-Reason 的默认 sys.path
+        import sys
+        from pathlib import Path
+        _repo_root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(_repo_root / "Latent-SFT"))
+        from inference import HLRInferenceEngine
+        from config import HLRConfig
+
+        hlr_engine = HLRInferenceEngine(
+            checkpoint_dir=args.hlr_checkpoint,
+            base_model_path=args.hlr_base_model,
+            cfg=HLRConfig(),
+            merge_lora=args.hlr_merge_lora,
+        )
+
+        def generate_fn(prompts, num_samples, temperature, max_length, batch_size):
+            # HLR engine 内部 bs=1, num_samples=1; 逐条 generate, 包装为标准格式
+            all_out: list[list[tuple]] = []
+            for prompt in prompts:
+                text, info = hlr_engine.generate(
+                    prompt,
+                    max_new_tokens=max_length,
+                    temperature=temperature,
+                )
+                # extra info 加 compression_ratio, 供 hlr_summary 算节省比例
+                info["compression_ratio"] = hlr_engine.compression_ratio
+                # num_tokens 用 total_equivalent_tokens, 让 avg_completion_tokens 与
+                # baseline (local) 公平对比
+                num_tokens = info["total_equivalent_tokens"]
+                all_out.append([(text, info["truncated"], num_tokens, info)])
+            return all_out
+
+        backend_info = (f"hlr | ckpt={args.hlr_checkpoint} "
+                        f"(base={args.hlr_base_model or 'auto'}, merge={args.hlr_merge_lora})")
     else:
         client = _create_gemini_client(
             args.gcp_credentials, args.gcp_project, args.gcp_location,
@@ -1027,6 +1104,8 @@ def main():
     # 确定模型名（用于文件命名和记录）
     if args.backend in ("local", "vllm"):
         model_label = os.path.basename(args.model_path.rstrip("/\\"))
+    elif args.backend == "hlr":
+        model_label = "hlr_" + os.path.basename(args.hlr_checkpoint.rstrip("/\\"))
     else:
         model_label = args.api_model
 
@@ -1045,8 +1124,12 @@ def main():
         "temperature":          args.temperature,
         "batch_size":           args.batch_size,
     }
-    if args.backend == "local":
+    if args.backend in ("local", "vllm"):
         hyperparams["model_path"] = args.model_path
+    elif args.backend == "hlr":
+        hyperparams["hlr_checkpoint"] = args.hlr_checkpoint
+        hyperparams["hlr_base_model"] = args.hlr_base_model
+        hyperparams["hlr_merge_lora"] = args.hlr_merge_lora
     else:
         hyperparams["gcp_project"]        = args.gcp_project
         hyperparams["gcp_location"]       = args.gcp_location
@@ -1089,6 +1172,8 @@ def main():
         out_dir = args.save_dir
     elif args.backend == "local":
         out_dir = args.model_path
+    elif args.backend == "hlr":
+        out_dir = args.hlr_checkpoint
     else:
         out_dir = "./eval_results"
     os.makedirs(out_dir, exist_ok=True)
