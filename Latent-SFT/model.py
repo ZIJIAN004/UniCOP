@@ -597,12 +597,13 @@ def compute_hlr_loss(
 
         _seg_explicit = 0
         _seg_latent = 0
+        _N_SEG = len(segments)
         for seg_idx, seg in enumerate(segments):
-            # 每 10 个 segment 打一次 stamp + latent 段也打
-            _hit_stamp = (seg_idx % 10 == 0)
+            # 每 5 个 + 最后 15 个全打 (精确定位 hang 在第几个)
+            _hit_stamp = (seg_idx % 5 == 0) or (seg_idx >= _N_SEG - 15)
             if seg.type in ("explicit", "solution"):
                 if _hit_stamp:
-                    _loss_stamp(f"seg {seg_idx}/{len(segments)} type={seg.type} (e={_seg_explicit}, l={_seg_latent})")
+                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type} BEFORE embed")
                 seg_ids = seg.ids.to(device)
                 seg_labels = seg.labels.to(device)
                 # clone() 让 embed 在 context 退出后仍有效
@@ -610,11 +611,13 @@ def compute_hlr_loss(
                 student_embeds_parts.append(seg_embeds)
                 student_labels_parts.append(seg_labels)
                 _seg_explicit += 1
+                if _hit_stamp:
+                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type} AFTER embed (len={seg_ids.size(0)})")
 
             elif seg.type == "latent":
                 k = seg.k
                 if _hit_stamp:
-                    _loss_stamp(f"seg {seg_idx}/{len(segments)} type=latent k={k} BEFORE LR forward")
+                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type=latent k={k} BEFORE LR forward")
                 # LR 输入: teacher 段起始前 token 最后一层 hidden (双向 detach)
                 in_pos = seg.teacher_input_pos
                 in_pos = min(max(in_pos, 0), T_teacher - 1)
@@ -634,10 +637,15 @@ def compute_hlr_loss(
                 align_records.append((layer_hiddens, seg.teacher_align_pos))
                 _seg_latent += 1
                 if _hit_stamp:
-                    _loss_stamp(f"seg {seg_idx}/{len(segments)} type=latent k={k} AFTER LR forward")
+                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type=latent k={k} AFTER LR forward")
 
             else:
                 raise ValueError(f"未知 segment 类型: {seg.type}")
+
+        # 退出 gather_ctx 前打 stamp (gather_ctx 退出是 ZeRO-3 partition collective,
+        # 4 rank 必须同时退出. 如果 rank 1/2 到这里但 rank 0/3 已经退出 → 矛盾说明
+        # GatheredParameters 退出不是阻塞 collective, 或者是 async pending 后续 hang)
+        _loss_stamp(f"END of segments loop, BEFORE exit gather_ctx")
 
     _loss_stamp("AFTER segments loop (exited gather_ctx)")
     student_embeds = torch.cat(student_embeds_parts, dim=1)        # [1, T_student, H_main]
