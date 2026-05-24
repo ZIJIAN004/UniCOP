@@ -23,7 +23,7 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
-from config import HLRConfig
+from hlr_config import HLRConfig
 from data_utils import HLRDataset, collate_hlr
 from model import build_latent_reasoner_from_main, compute_hlr_loss
 
@@ -212,7 +212,10 @@ def train_hlr(cfg: HLRConfig):
     model, main_optimizer, dataloader = accelerator.prepare(
         model, main_optimizer, dataloader
     )
-    latent_reasoner = latent_reasoner.to(accelerator.device)
+    # LR 必须显式转 bf16: 主模型走 DeepSpeed bf16, hidden 是 bf16;
+    # LR 没进 accelerator.prepare, 默认 fp32 → 与 bf16 hidden 做 Linear 会 dtype mismatch.
+    # smoke_test_hlr.py:332 已经这么做, train.py 之前漏了 (回归 bug).
+    latent_reasoner = latent_reasoner.to(accelerator.device).to(torch.bfloat16)
 
     num_training_steps = math.ceil(
         len(dataloader) / cfg.gradient_accumulation_steps

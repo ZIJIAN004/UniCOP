@@ -41,7 +41,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from config import HLRConfig
+from hlr_config import HLRConfig
 from model import build_latent_reasoner_from_main
 
 
@@ -180,6 +180,10 @@ class HLRInferenceEngine:
             )
         else:
             text = prompt
+        # 与 HLRDataset 训练侧防御一致: 如果 chat_template 没自动加 <think>
+        # (R1-Distill 不加, Qwen3-Thinking 加), 手动补上避免推理时分布 OOD
+        if not text.rstrip().endswith("<think>"):
+            text += "<think>\n"
         input_ids = self.tokenizer(text, return_tensors="pt").input_ids.to(self.device)
 
         # ── prefill ──

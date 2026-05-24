@@ -33,7 +33,7 @@ from pathlib import Path
 
 
 def stage_1_config():
-    from config import HLRConfig
+    from hlr_config import HLRConfig
 
     cfg = HLRConfig()
     # 默认 lr_* 全 0 (auto-infer from main config, 自适应 R1-7B / Qwen3-4B / ...)
@@ -246,7 +246,7 @@ def stage_5_loss(args, data_result):
     from transformers import AutoModelForCausalLM
     from peft import LoraConfig, get_peft_model
     from model import build_latent_reasoner_from_main, compute_hlr_loss
-    from config import HLRConfig
+    from hlr_config import HLRConfig
 
     tokenizer, dataset, sample, batch = data_result
     cfg = HLRConfig()

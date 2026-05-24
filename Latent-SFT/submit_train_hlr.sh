@@ -95,7 +95,7 @@ if [ -n "$_min_free" ] && [ "$_min_free" -lt 20000 ]; then
     exit 0
 fi
 
-# ── 训练参数 (sbatch 不显式覆盖 HLRConfig 默认, 让 config.py 单点管理) ──
+# ── 训练参数 (sbatch 不显式覆盖 HLRConfig 默认, 让 hlr_config.py 单点管理) ──
 EXTRA_DATA_FLAG=""
 if [ -n "${HLR_DATA:-}" ]; then
     EXTRA_DATA_FLAG="--data $HLR_DATA"

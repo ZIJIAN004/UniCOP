@@ -894,7 +894,9 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
         "examples":             example_records,
     }
 
-    # HLR backend 汇总 (per-sample extras → per-combo summary)
+    # HLR backend 汇总 (per-sample extras → per-combo summary).
+    # 注: 真正的"节省"指标要跟 baseline 比, 见 Latent-SFT/eval_hlr_compare.py;
+    # 这里只汇报 HLR 本身的计数, 不算"节省比例"避免自比误导.
     if hlr_extras:
         sum_explicit = sum(e.get("explicit_tokens", 0) for e in hlr_extras)
         sum_latent = sum(e.get("latent_steps", 0) for e in hlr_extras)
@@ -908,12 +910,6 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             "avg_latent_segments":      round(sum_segs / n, 2),
             "avg_wall_time_sec":        round(sum_wall / n, 3),
             "total_wall_time_sec":      round(sum_wall, 2),
-            # token 占比 (explicit_only_equivalent = avg_completion_tokens)
-            "latent_savings_token_pct": round(
-                100 * (sum_latent * hlr_extras[0].get("compression_ratio", 4) - sum_latent)
-                / max(sum_explicit + sum_latent * hlr_extras[0].get("compression_ratio", 4), 1),
-                2,
-            ),
         }
     return results
 
@@ -1044,13 +1040,15 @@ def main():
 
         backend_info = f"vllm | {args.model_path} (tp={args.tp_size})"
     elif args.backend == "hlr":
-        # Lazy import: Latent-SFT 不在 UniCOP-Reason 的默认 sys.path
+        # Lazy import: Latent-SFT 不在 UniCOP-Reason 的默认 sys.path.
+        # 注意 module 名: 用 hlr_config (不是 config), 避免与 UniCOP-Reason/config
+        # 的 sys.modules cache 冲突 (UniCOP-Reason/evaluate.py 顶部已 import config).
         import sys
         from pathlib import Path
         _repo_root = Path(__file__).resolve().parent.parent
         sys.path.insert(0, str(_repo_root / "Latent-SFT"))
         from inference import HLRInferenceEngine
-        from config import HLRConfig
+        from hlr_config import HLRConfig
 
         hlr_engine = HLRInferenceEngine(
             checkpoint_dir=args.hlr_checkpoint,
