@@ -45,6 +45,206 @@ from tqdm import tqdm
 from config import config
 from problems import get_problem, SUPPORTED_PROBLEMS
 from terminal_reward import compute_terminal_components
+from utils.parse import parse_multi_route, parse_single_route
+
+
+# ── Retry-until-feasible helpers ────────────────────────────────────────────
+# 与 UniCOP-Reason-Mask/evaluate.py 同设计 (统一框架).
+# 目的: 第一轮回答缺/重 customer 时, 把缺/重信息回灌给模型再生成一轮,
+# 循环到 cov=1+无重复 或达 max_retry_rounds. 只针对 missing+duplicate
+# (cap/TW/DL 违例 retry 救不了, 早停).
+
+def _diagnose_routes(completion: str, instance: dict, prob) -> dict:
+    """解析 completion 返回 cov 诊断 + strict feasibility."""
+    n = instance["n"]
+    if prob.multi_route:
+        routes = parse_multi_route(completion, n)
+    else:
+        single = parse_single_route(completion, n)
+        routes = [single] if single is not None else None
+
+    if routes is None:
+        return dict(parse_ok=False, missing=list(range(1, n + 1)),
+                    duplicates=[], feasible_strict=False)
+
+    seen = {}
+    for r in routes:
+        for v in r:
+            if v == 0:
+                continue
+            seen[v] = seen.get(v, 0) + 1
+    expected = set(range(1, n + 1))
+    missing = sorted(expected - set(seen))
+    duplicates = sorted(c for c, k in seen.items() if k > 1)
+    feasible = prob.is_feasible(completion, instance)
+    return dict(parse_ok=True, missing=missing, duplicates=duplicates,
+                feasible_strict=feasible)
+
+
+_OTHER_CONSTRAINT_BULLET = {
+    "tsp":    None,
+    "tsptw":  "All customer time windows [earliest, latest] must be respected.",
+    "tspdl":  "All customer draft limits must be respected "
+              "(vehicle load at arrival ≤ node draft limit).",
+    "cvrp":   "Vehicle capacity must be respected "
+              "(total demand per route ≤ capacity).",
+    "vrptw":  "Vehicle capacity AND all customer time windows must be respected.",
+    "cvrptw": "Vehicle capacity AND all customer time windows must be respected.",
+}
+
+
+def _build_retry_feedback(diag: dict, multi_route: bool, n: int,
+                          problem_type: str) -> str:
+    """
+    统一框架 retry feedback (适用于 TSP/TSPTW/TSPDL/CVRP/VRPTW/CVRPTW).
+
+    结构 (固定 4 段):
+      [1] 第一句直陈: missed [...] / repeated [...] / both / parse fail
+      [2] "Re-plan ... so that:" 引言
+      [3] 固定 4 类 bullet: cov / depot 规则 / 其它约束 / 最小化距离
+      [4] 输出格式 (multi/single 不同)
+    """
+    if not diag["parse_ok"]:
+        problem_stmt = (
+            "Your previous answer could not be parsed as routes."
+            if multi_route else
+            "Your previous answer could not be parsed as a route."
+        )
+    else:
+        missed_part = (f"missed customers {diag['missing']}"
+                       if diag["missing"] else None)
+        dup_part = (f"visited customers {diag['duplicates']} more than once"
+                    if diag["duplicates"] else None)
+        if missed_part and dup_part:
+            problem_stmt = f"You {missed_part} and {dup_part} in your previous answer."
+        elif missed_part:
+            problem_stmt = f"You {missed_part} in your previous answer."
+        elif dup_part:
+            problem_stmt = f"You {dup_part} in your previous answer."
+        else:
+            problem_stmt = "Your previous answer needs revision."
+
+    if multi_route:
+        depot_bullet = (
+            "The depot 0 must be the first and last node of every route "
+            "(and must not appear in the middle)."
+        )
+        fmt_hint = "Route 1: 0 -> ... -> 0\nRoute 2: 0 -> ... -> 0\n..."
+        re_plan_verb = "Re-plan the routes"
+    else:
+        depot_bullet = (
+            "The depot 0 must appear exactly twice: once at the start and once "
+            "at the end (it must not appear in the middle of the route)."
+        )
+        fmt_hint = "Route: 0 -> ... -> 0"
+        re_plan_verb = "Re-plan the route"
+
+    bullets = [
+        f"- Every customer in 1..{n} must be visited exactly once.",
+        f"- {depot_bullet}",
+    ]
+    other_constraint = _OTHER_CONSTRAINT_BULLET.get(problem_type)
+    if other_constraint:
+        bullets.append(f"- {other_constraint}")
+    bullets.append("- Total travel distance must be minimized.")
+
+    return "\n".join([
+        problem_stmt,
+        "",
+        f"{re_plan_verb} so that ALL of the following hold:",
+        *bullets,
+        "",
+        "Output:",
+        fmt_hint,
+    ])
+
+
+def _unpack_completion_item(item):
+    """generate_fn 返回项归一化成 (text, truncated, num_tokens)."""
+    if isinstance(item, tuple):
+        text = item[0]
+        truncated = item[1] if len(item) > 1 else False
+        num_tokens = item[2] if len(item) > 2 else None
+        return text, truncated, num_tokens
+    return item, False, None
+
+
+def _strip_think_for_history(text: str) -> str:
+    """
+    剥 <think>...</think>, 只留最终答案. 用于多轮 retry 拼 chat history.
+    Qwen3-Thinking 的 chat_template 有 rolling checkpoint, 主动剥让所有 backend 一致.
+    truncated 没出 </think> 时给占位避免空 message.
+    """
+    idx = text.rfind("</think>")
+    if idx == -1:
+        return "[Previous answer was truncated and did not produce a final route.]"
+    tail = text[idx + len("</think>"):].lstrip("\n")
+    if not tail.strip():
+        return "[Previous answer reached </think> but produced no final route.]"
+    return tail
+
+
+def _retry_loop_one(
+    generate_fn, prompt, instance, prob, problem_type: str,
+    initial_item, max_completion_length, temperature,
+    max_rounds: int,
+):
+    """单 sample retry loop. 详见 UniCOP-Reason-Mask/evaluate.py 同名函数."""
+    cur_item = initial_item
+    cur_text, cur_truncated, cur_tokens = _unpack_completion_item(cur_item)
+    cur_prompt = list(prompt)
+    rounds_used = 0
+    cumulative_tokens = cur_tokens or 0
+
+    last_diag = _diagnose_routes(cur_text, instance, prob)
+    converged = last_diag["feasible_strict"]
+    stopped_reason = "feasible" if converged else None
+
+    for r in range(max_rounds):
+        if last_diag["feasible_strict"]:
+            stopped_reason = "feasible"
+            converged = True
+            break
+        if (last_diag["parse_ok"]
+                and not last_diag["missing"]
+                and not last_diag["duplicates"]):
+            stopped_reason = "cov_ok_other_violation"
+            break
+
+        feedback = _build_retry_feedback(
+            last_diag, prob.multi_route,
+            n=instance["n"], problem_type=problem_type,
+        )
+        prev_answer = _strip_think_for_history(cur_text)
+        cur_prompt = cur_prompt + [
+            {"role": "assistant", "content": prev_answer},
+            {"role": "user",      "content": feedback},
+        ]
+        new_outs = generate_fn(
+            [cur_prompt], 1, temperature, max_completion_length, 1,
+        )
+        cur_item = new_outs[0][0]
+        cur_text, cur_truncated, cur_tokens = _unpack_completion_item(cur_item)
+        cumulative_tokens += (cur_tokens or 0)
+        rounds_used = r + 1
+        last_diag = _diagnose_routes(cur_text, instance, prob)
+
+    if last_diag["feasible_strict"]:
+        converged = True
+        stopped_reason = "feasible"
+    elif stopped_reason is None:
+        stopped_reason = "max_rounds"
+
+    retry_info = {
+        "rounds_used":      rounds_used,
+        "converged":        converged,
+        "stopped_reason":   stopped_reason,
+        "cumulative_tokens": cumulative_tokens,
+        "final_missing":    last_diag["missing"],
+        "final_duplicates": last_diag["duplicates"],
+        "final_parse_ok":   last_diag["parse_ok"],
+    }
+    return cur_item, retry_info
 
 
 def _strip_think_instructions(system: str) -> str:
@@ -638,7 +838,9 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                     max_completion_length: int, batch_size: int = 1,
                     save_dir: str | None = None,
                     prompt_mode: str = "think",
-                    model_type: str = "reasoning"):
+                    model_type: str = "reasoning",
+                    retry_until_feasible: bool = False,
+                    max_retry_rounds: int = 3):
     """
     评估单个 (problem_type, problem_size) 组合。
 
@@ -694,11 +896,23 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     # 评估每个实例的所有 completion
     total_truncated = 0
     hlr_extras: list[dict] = []   # backend=hlr 时, 收集每条 sample 的 extra info
+    retry_records: list[dict] = []   # retry_until_feasible 时收集
     for i in range(num_test):
         instance = instances[i]
         instance_best = None
 
-        for item in all_completions[i]:
+        for s_idx, item in enumerate(all_completions[i]):
+            # ── Retry loop: 第一轮诊断, 缺/重时回灌 missing/dup 再生 ──
+            if retry_until_feasible:
+                item, retry_info = _retry_loop_one(
+                    generate_fn, prompts[i], instance, prob, problem_type,
+                    initial_item=item,
+                    max_completion_length=max_completion_length,
+                    temperature=temperature,
+                    max_rounds=max_retry_rounds,
+                )
+                retry_records.append(retry_info)
+
             # 兼容四种格式:
             #   (completion, is_truncated, num_tokens, extra_info)  — hlr 后端 (4 元组)
             #   (completion, is_truncated, num_tokens)              — local / vllm 后端
@@ -911,6 +1125,42 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             "avg_wall_time_sec":        round(sum_wall / n, 3),
             "total_wall_time_sec":      round(sum_wall, 2),
         }
+
+    # ── Retry-until-feasible 汇总 ─────────────────────────────────────
+    if retry_until_feasible and retry_records:
+        rounds_arr = [r["rounds_used"] for r in retry_records]
+        converged = sum(1 for r in retry_records if r["converged"])
+        n_r = len(retry_records)
+        rounds_dist = {k: rounds_arr.count(k) for k in sorted(set(rounds_arr))}
+        cumulative_tokens = [r["cumulative_tokens"] for r in retry_records]
+        avg_cum = sum(cumulative_tokens) / n_r if n_r else 0.0
+        reasons = {}
+        for r in retry_records:
+            reasons[r["stopped_reason"]] = reasons.get(r["stopped_reason"], 0) + 1
+
+        results["retry_summary"] = {
+            "enabled":              True,
+            "max_retry_rounds":     max_retry_rounds,
+            "samples":              n_r,
+            "converged":            converged,
+            "converged_rate":       round(converged / n_r, 4) if n_r else 0.0,
+            "avg_rounds_used":      round(sum(rounds_arr) / n_r, 3) if n_r else 0.0,
+            "max_rounds_used":      max(rounds_arr) if rounds_arr else 0,
+            "rounds_distribution":  rounds_dist,
+            "stopped_reasons":      reasons,
+            "avg_cumulative_tokens": round(avg_cum, 1),
+        }
+        print(f"\n  {'─'*55}")
+        print(f"  Retry-until-feasible 汇总 (max_rounds={max_retry_rounds}):")
+        print(f"    收敛比例:       {converged}/{n_r} = {100*converged/n_r:.2f}%")
+        print(f"    平均 retry 轮:  {sum(rounds_arr)/n_r:.2f} (max={max(rounds_arr)})")
+        print(f"    轮数分布:       {rounds_dist}")
+        print(f"    终止原因分布:   {reasons}")
+        print(f"    平均累计 token: {avg_cum:.0f}")
+        print(f"  {'─'*55}")
+    elif retry_until_feasible:
+        results["retry_summary"] = {"enabled": True, "samples": 0}
+
     return results
 
 
@@ -984,6 +1234,14 @@ def main():
                              "0=关闭；推荐 5-7；全局生效（含 Route 输出），不需要 exempt 列表。")
     parser.add_argument("--save_dir", type=str, default=None,
                         help="结果保存目录，不填则保存在 model_path 目录下（local）或当前目录（api）")
+    # ── Retry-until-feasible ──────────────────────────────────────────
+    parser.add_argument("--retry_until_feasible", action="store_true",
+                        help="第一轮回答缺/重 customer 时, 把缺/重信息回灌给模型重新生成, "
+                             "循环到 cov=1+无重复 或达 --max_retry_rounds. 只对 missing/dup 起效, "
+                             "不修 cap/TW/DL 违例 (retry 救不了).")
+    parser.add_argument("--max_retry_rounds", type=int, default=3,
+                        help="--retry_until_feasible 时最多 retry 几轮 (第一轮不算 retry). 默认 3, "
+                             "总轮数 = 1 + max_retry_rounds.")
     args = parser.parse_args()
 
     # ── 参数校验 ──────────────────────────────────────────────────────
@@ -1121,6 +1379,8 @@ def main():
         "num_samples":          args.num_samples,
         "temperature":          args.temperature,
         "batch_size":           args.batch_size,
+        "retry_until_feasible": args.retry_until_feasible,
+        "max_retry_rounds":     args.max_retry_rounds if args.retry_until_feasible else None,
     }
     if args.backend in ("local", "vllm"):
         hyperparams["model_path"] = args.model_path
@@ -1142,6 +1402,8 @@ def main():
             problem_size, args.num_samples, args.temperature,
             max_completion_length, args.batch_size, args.save_dir,
             prompt_mode, args.model_type,
+            retry_until_feasible=args.retry_until_feasible,
+            max_retry_rounds=args.max_retry_rounds,
         )
         results["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         all_results.append(results)

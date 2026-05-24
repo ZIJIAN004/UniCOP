@@ -61,6 +61,11 @@ EVAL_NUM_TEST=100
 EVAL_MAX_COMPLETION=10000
 EVAL_BATCH_SIZE=4
 EVAL_SAVE_DIR="$DISTILL_DIR/eval_results_template"
+# Retry-until-feasible: env 控制透传给 evaluate.py
+#   EVAL_RETRY=1 sbatch submit_merge_eval_rl.sh   → 开 retry, 默认 3 轮
+#   EVAL_RETRY=1 EVAL_RETRY_ROUNDS=5 sbatch ...   → 开 retry, 5 轮上限
+EVAL_RETRY="${EVAL_RETRY:-0}"
+EVAL_RETRY_ROUNDS="${EVAL_RETRY_ROUNDS:-3}"
 
 # Server 酱
 SCKEY="SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp"
@@ -116,6 +121,12 @@ mkdir -p "$EVAL_SAVE_DIR"
 
 cd "$REASON_DIR"
 
+RETRY_FLAGS=""
+if [ "$EVAL_RETRY" = "1" ]; then
+    RETRY_FLAGS="--retry_until_feasible --max_retry_rounds $EVAL_RETRY_ROUNDS"
+    echo "  Retry:   ENABLED (max_rounds=$EVAL_RETRY_ROUNDS)"
+fi
+
 python evaluate.py \
     --backend local \
     --model_path "$MERGED_MODEL" \
@@ -127,7 +138,8 @@ python evaluate.py \
     --num_samples 1 \
     --batch_size $EVAL_BATCH_SIZE \
     --prompt_mode think \
-    --save_dir "$EVAL_SAVE_DIR"
+    --save_dir "$EVAL_SAVE_DIR" \
+    $RETRY_FLAGS
 
 notify "✅ Template CVRP20 Merge+Eval 完成" "结果在 $EVAL_SAVE_DIR"
 

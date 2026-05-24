@@ -89,57 +89,100 @@ def _diagnose_routes(completion: str, instance: dict, prob) -> dict:
                 feasible_strict=feasible)
 
 
-def _build_retry_feedback(diag: dict, multi_route: bool, n: int) -> str:
-    """
-    给模型的 retry feedback. 不说"infeasible", 直接陈述访问规则 + 列具体缺/重.
+# Problem-specific "other constraint" 行 (None = 该问题只有 coverage).
+# 加进统一的 bullet list, 跟 cov/depot/distance 并列, 让模型把所有约束当
+# 一个完整清单一次满足.
+_OTHER_CONSTRAINT_BULLET = {
+    "tsp":    None,
+    "tsptw":  "All customer time windows [earliest, latest] must be respected.",
+    "tspdl":  "All customer draft limits must be respected "
+              "(vehicle load at arrival ≤ node draft limit).",
+    "cvrp":   "Vehicle capacity must be respected "
+              "(total demand per route ≤ capacity).",
+    "vrptw":  "Vehicle capacity AND all customer time windows must be respected.",
+    "cvrptw": "Vehicle capacity AND all customer time windows must be respected.",
+}
 
-    规则差异:
-      - 多路线 (CVRP/VRPTW): customer 1..n 在所有 routes 里合计恰好一次,
-        depot 0 在每条 route 首尾各一次
-      - 单路线 (TSP/TSPTW/TSPDL): customer 1..n 在 route 里恰好一次,
-        depot 0 仅首尾各一次, 不能内部出现
-    """
-    if multi_route:
-        rule_lines = [
-            f"- Each customer node in 1..{n} must appear exactly once across all routes.",
-            "- The depot 0 must be the first and last node of every route (no other position).",
-        ]
-        fmt_hint = "Route 1: 0 -> ... -> 0\nRoute 2: 0 -> ... -> 0\n..."
-    else:
-        rule_lines = [
-            f"- Each customer node in 1..{n} must appear exactly once in the route.",
-            "- The depot 0 must appear exactly twice: once at the start and once at the end "
-            "(it must NOT appear in the middle of the route).",
-        ]
-        fmt_hint = "Route: 0 -> ... -> 0"
 
+def _build_retry_feedback(diag: dict, multi_route: bool, n: int,
+                          problem_type: str) -> str:
+    """
+    统一框架 retry feedback (适用于 TSP / TSPTW / TSPDL / CVRP / VRPTW / CVRPTW).
+
+    结构 (固定 4 段):
+      [1] 第一句: 直接陈述上轮的具体覆盖问题
+          - parse 失败 → "could not be parsed"
+          - 仅缺  → "You missed customers [...]"
+          - 仅重  → "You visited customers [...] more than once"
+          - 既缺又重 → 两者用 "and" 连接
+      [2] "Re-plan ... so that:" 引言
+      [3] Bullet 清单 (固定 4 类, 按 problem_type 动态填):
+            - coverage:        每个 customer 1..n 恰好一次
+            - depot 规则:      multi/single 不同
+            - other 约束:      按 problem_type 加 (cap/TW/DL), TSP 跳过
+            - 目标:            minimize total travel distance
+      [4] 输出格式 (multi/single 不同)
+
+    设计动机:
+      用户要求一个跨问题统一框架, 上来就点明覆盖问题 (缺 / 重 / 都有),
+      同时要求模型保持其它约束并实现优化目标. 不再用"infeasible"等模糊词.
+    """
+    # ── [1] 第一句: 直接点明具体问题 ──
     if not diag["parse_ok"]:
-        parts = [
-            "Your previous answer could not be parsed into routes following these rules:",
-            *rule_lines,
-            "",
-            "Please re-output in the exact format:",
-            fmt_hint,
-        ]
-        return "\n".join(parts)
+        problem_stmt = (
+            "Your previous answer could not be parsed as routes."
+            if multi_route else
+            "Your previous answer could not be parsed as a route."
+        )
+    else:
+        missed_part = (f"missed customers {diag['missing']}"
+                       if diag["missing"] else None)
+        dup_part = (f"visited customers {diag['duplicates']} more than once"
+                    if diag["duplicates"] else None)
+        if missed_part and dup_part:
+            problem_stmt = f"You {missed_part} and {dup_part} in your previous answer."
+        elif missed_part:
+            problem_stmt = f"You {missed_part} in your previous answer."
+        elif dup_part:
+            problem_stmt = f"You {dup_part} in your previous answer."
+        else:
+            # 理论上不会到这里 (无 cov 问题就不该触发 retry), 兜底
+            problem_stmt = "Your previous answer needs revision."
 
-    parts = [
-        "Your previous answer does not satisfy the visiting rule:",
-        *rule_lines,
-        "",
+    # ── [3] Bullet 清单 (depot 规则 + 输出格式按 multi_route 切) ──
+    if multi_route:
+        depot_bullet = (
+            "The depot 0 must be the first and last node of every route "
+            "(and must not appear in the middle)."
+        )
+        fmt_hint = "Route 1: 0 -> ... -> 0\nRoute 2: 0 -> ... -> 0\n..."
+        re_plan_verb = "Re-plan the routes"
+    else:
+        depot_bullet = (
+            "The depot 0 must appear exactly twice: once at the start and once "
+            "at the end (it must not appear in the middle of the route)."
+        )
+        fmt_hint = "Route: 0 -> ... -> 0"
+        re_plan_verb = "Re-plan the route"
+
+    bullets = [
+        f"- Every customer in 1..{n} must be visited exactly once.",
+        f"- {depot_bullet}",
     ]
-    if diag["missing"]:
-        parts.append(
-            f"Currently missing nodes (never visited): {diag['missing']}"
-        )
-    if diag["duplicates"]:
-        parts.append(
-            f"Currently duplicated nodes (visited more than once): {diag['duplicates']}"
-        )
-    parts.append("")
-    parts.append("Please regenerate following the rules above, then output:")
-    parts.append(fmt_hint)
-    return "\n".join(parts)
+    other_constraint = _OTHER_CONSTRAINT_BULLET.get(problem_type)
+    if other_constraint:
+        bullets.append(f"- {other_constraint}")
+    bullets.append("- Total travel distance must be minimized.")
+
+    return "\n".join([
+        problem_stmt,
+        "",
+        f"{re_plan_verb} so that ALL of the following hold:",
+        *bullets,
+        "",
+        "Output:",
+        fmt_hint,
+    ])
 
 
 def _unpack_completion_item(item):
@@ -176,7 +219,7 @@ def _strip_think_for_history(text: str) -> str:
 
 
 def _retry_loop_one(
-    generate_fn, prompt, instance, prob,
+    generate_fn, prompt, instance, prob, problem_type: str,
     initial_item, max_completion_length, temperature,
     max_rounds: int,
 ):
@@ -219,7 +262,10 @@ def _retry_loop_one(
         # 1) Qwen3 chat_template 的 rolling checkpoint 反正也会剥, 不依赖它行为
         # 2) truncated 没出 </think> 时占位提示, 避免空 message + 模型懂上轮没收尾
         # 3) 累积历史 token 少, 给后续 retry 留更多 max_completion_length 余量
-        feedback = _build_retry_feedback(last_diag, prob.multi_route, n=instance["n"])
+        feedback = _build_retry_feedback(
+            last_diag, prob.multi_route,
+            n=instance["n"], problem_type=problem_type,
+        )
         prev_answer = _strip_think_for_history(cur_text)
         cur_prompt = cur_prompt + [
             {"role": "assistant", "content": prev_answer},
@@ -898,7 +944,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             # ── Retry loop: 第一轮诊断, 不可行就回灌 missing/dup 再生 ──
             if retry_until_feasible:
                 item, retry_info = _retry_loop_one(
-                    generate_fn, prompts[i], instance, prob,
+                    generate_fn, prompts[i], instance, prob, problem_type,
                     initial_item=item,
                     max_completion_length=max_completion_length,
                     temperature=temperature,
