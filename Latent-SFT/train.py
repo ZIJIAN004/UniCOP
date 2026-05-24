@@ -196,6 +196,12 @@ def train_hlr(cfg: HLRConfig):
     )
     _stamp(f"after HLRDataset()  n={len(dataset)}")
 
+    # Smoke 模式: 截断 dataset 让训练快速跑完 (完整训练路径不动)
+    _limit = getattr(cfg, "dataset_limit", 0)
+    if _limit > 0 and len(dataset.samples) > _limit:
+        dataset.samples = dataset.samples[:_limit]
+        _stamp(f"[SMOKE] dataset truncated to first {_limit} samples")
+
     collate_fn = partial(collate_hlr, pad_token_id=tokenizer.pad_token_id)
     dataloader = DataLoader(
         dataset,
@@ -258,9 +264,15 @@ def train_hlr(cfg: HLRConfig):
         epoch_loss = 0.0
 
         for step, batch in enumerate(dataloader):
-            if step == 0:
-                _stamp("first batch fetched from dataloader, entering compute_hlr_loss")
+            # 前 3 步打细 stamp (定位 hang 用)
+            _DBG = step < 3
+            if _DBG:
+                _stamp(f"step {step}: batch fetched "
+                       f"(teacher_len={batch['teacher_input_ids'].size(1)})")
             with accelerator.accumulate(model):
+                if _DBG:
+                    _stamp(f"step {step}: inside accumulate, BEFORE compute_hlr_loss "
+                           f"(sync_grad={accelerator.sync_gradients})")
                 total_loss, t_loss, s_loss, a_loss = compute_hlr_loss(
                     model=model,
                     latent_reasoner=latent_reasoner,
@@ -273,8 +285,15 @@ def train_hlr(cfg: HLRConfig):
                     beta=cfg.beta,
                     gamma=cfg.gamma,
                 )
+                if _DBG:
+                    _stamp(f"step {step}: AFTER compute_hlr_loss "
+                           f"(t={t_loss.item():.3f} s={s_loss.item():.3f} "
+                           f"a={a_loss.item():.3f})")
 
                 accelerator.backward(total_loss)
+                if _DBG:
+                    _stamp(f"step {step}: AFTER accelerator.backward "
+                           f"(sync_grad={accelerator.sync_gradients})")
 
                 if accelerator.sync_gradients:
                     # 多卡 LatentReasoner 梯度手动 all-reduce (LR 没进 DeepSpeed sharding)
@@ -375,6 +394,12 @@ def main():
                         help="LatentReasoner 层数 (0 = auto 从主模型推断)")
     parser.add_argument("--lr_hidden_size", type=int, default=None,
                         help="LatentReasoner hidden 维度 (0 = auto)")
+    # Smoke 用: 限制 dataset 大小让训练 5 min 内跑完几步, 完整复现 train.py 所有
+    # 训练路径 (scheduler/lr_optimizer/all_reduce/GA/accumulate context/ZeRO-3),
+    # 唯一区别是 dataset 截断到前 N 条. 复现 hang 用 --limit 32 (GA=8 × 4 GPU
+    # = effective batch 32, 触发一次 sync_gradients 路径).
+    parser.add_argument("--limit", type=int, default=0,
+                        help="只用 dataset 前 N 条 (0 = 全量). smoke 复现 hang 用 32.")
 
     args = parser.parse_args()
 
@@ -405,6 +430,8 @@ def main():
     if args.output_dir is not None: cfg.output_dir = args.output_dir
     if args.save_steps is not None: cfg.save_steps = args.save_steps
     if args.logging_steps is not None: cfg.logging_steps = args.logging_steps
+    # 把 --limit 透传到 cfg, train_hlr 内部截断 dataset
+    cfg.dataset_limit = args.limit if args.limit > 0 else 0
 
     train_hlr(cfg)
 
