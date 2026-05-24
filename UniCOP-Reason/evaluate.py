@@ -333,14 +333,23 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
             truncation=True,
         ).to(model.device)
 
+        # temperature > 0 → 采样模式；temperature == 0 → 贪心
+        # num_samples > 1 必须采样（贪心多次结果完全相同），上游 main() 已校验
+        do_sample = temperature > 0
         gen_kwargs = dict(
             max_new_tokens=max_completion_length,
-            do_sample=(num_samples > 1),
-            temperature=temperature if num_samples > 1 else 1.0,
+            do_sample=do_sample,
             num_return_sequences=num_samples,
             pad_token_id=tokenizer.pad_token_id,
             repetition_penalty=repetition_penalty,
         )
+        if do_sample:
+            gen_kwargs["temperature"] = temperature
+        else:
+            # 贪心时显式置空 generation_config 自带的采样字段，抑制 HF "may be ignored" 警告
+            gen_kwargs["temperature"] = None
+            gen_kwargs["top_p"] = None
+            gen_kwargs["top_k"] = None
         if no_repeat_ngram_size and no_repeat_ngram_size > 0:
             gen_kwargs["no_repeat_ngram_size"] = no_repeat_ngram_size
 
@@ -470,9 +479,10 @@ def _generate_vllm(model, tokenizer, prompts: list[list[dict]],
         )
         chat_texts.append(chat_text)
 
+    # temperature > 0 → 采样；temperature == 0 → 贪心（vLLM 原生语义）
     sampling_params = SamplingParams(
         max_tokens=max_completion_length,
-        temperature=temperature if num_samples > 1 else 0,
+        temperature=temperature,
         n=num_samples,
     )
 
@@ -918,9 +928,11 @@ def main():
     parser.add_argument("--num_test",     type=int,   default=config.num_test,
                         help="每个 (problem, size) 组合的测试实例数")
     parser.add_argument("--num_samples",  type=int,   default=1,
-                        help="每个实例的采样次数，>1 时启用随机采样")
-    parser.add_argument("--temperature",  type=float, default=1.0,
-                        help="采样温度，仅 num_samples>1 时生效")
+                        help="每个实例的采样次数；>1 时必须配合 temperature>0")
+    parser.add_argument("--temperature",  type=float, default=0.0,
+                        help="采样温度。>0 → 采样（推荐 reasoning 模型用 0.6）；"
+                             "=0 → 贪心解码（deterministic）。"
+                             "num_samples>1 时必须 >0。")
     parser.add_argument("--model_type",   type=str,   default="reasoning",
                         choices=["reasoning", "instruct"],
                         help="reasoning=推理模型(10000 tokens)，instruct=指令模型(512 tokens)")
@@ -949,6 +961,9 @@ def main():
         parser.error("backend=api 时必须通过 --api_model 指定模型名称")
     if args.backend == "api" and not args.gcp_credentials:
         parser.error("backend=api 时必须通过 --gcp_credentials 指定服务账号密钥文件")
+    if args.num_samples > 1 and args.temperature <= 0:
+        parser.error(f"num_samples={args.num_samples}>1 但 temperature={args.temperature}<=0；"
+                     "贪心解码多次结果完全相同，请设 --temperature 0.6 或类似值")
 
     # 确定 max_completion_length
     if args.max_completion_length is not None:
