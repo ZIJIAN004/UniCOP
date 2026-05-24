@@ -40,9 +40,9 @@ class HLRConfig:
     # data_path:       本阶段 entropy_profile 后的派生数据, 放 Latent-SFT/data/ 下
     data_path: str = "Latent-SFT/data/profiled_cvrp20.jsonl"
     raw_chains_path: str = "UniCOP-Distill/data/chains_template_cvrp20.jsonl"
-    auto_rebuild_data: bool = False        # train.py main() 检测到 args.data is None 时置 True,
-                                            # train_hlr 启动时用 base model 跑 entropy profile
-                                            # 覆盖 data_path, 确保数据与本次训练用的基座一致
+    # entropy profile 必须在 sbatch 脚本 Step 0 用单 GPU 独立跑, 不能在 train.py
+    # 内 inline (ZeRO-3 init 后 embedding.weight 被 partition 成 1D, forward 报错).
+    # 见 submit_train_eval_hlr.sh / submit_train_hlr.sh 的 Step 0.
     filter_problems: list[str] = field(default_factory=lambda: ["cvrp"])
     filter_sizes: list[int] = field(default_factory=lambda: [20])
     max_length: int = 8192

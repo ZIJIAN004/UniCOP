@@ -61,7 +61,7 @@ echo "  OUTPUT_DIR        = $OUTPUT_DIR"
 if [ -n "${HLR_DATA:-}" ]; then
     echo "  DATA (explicit)   = $HLR_DATA"
 else
-    echo "  DATA              = auto-rebuild from chains_template_cvrp20.jsonl (~1-2 hr profile)"
+    echo "  DATA              = (Step 0 自动跑 entropy_profile, ~1-2 hr)"
 fi
 echo "  GPUs              = 4 (ZeRO-3 + gradient_checkpointing + use_reentrant=True)"
 echo "  采样参数 (推理参考) = T=$GEN_TEMPERATURE top_p=$GEN_TOP_P top_k=$GEN_TOP_K"
@@ -95,24 +95,48 @@ if [ -n "$_min_free" ] && [ "$_min_free" -lt 20000 ]; then
     exit 0
 fi
 
-# ── 训练参数 (sbatch 默认尊重 hlr_config.py, 仅个别字段允许 env 覆盖) ──
-EXTRA_DATA_FLAG=""
-if [ -n "${HLR_DATA:-}" ]; then
-    EXTRA_DATA_FLAG="--data $HLR_DATA"
+# ── Step 0: entropy_profile (单 GPU, 与 ZeRO-3 init 隔离) ──
+# 不能在 train.py 内 inline 跑: ZeRO-3 init 把 embedding.weight partition 成 1D,
+# 后续 forward 会 'weight' must be 2-D 报错. 单独单 GPU 跑.
+RAW_DATA="UniCOP-Distill/data/chains_template_cvrp20.jsonl"
+PROFILED_DATA="${HLR_DATA:-Latent-SFT/data/profiled_${BASE_MODEL_TYPE}_cvrp20.jsonl}"
+
+echo ""
+echo ">>> Step 0: entropy_profile ($(date))"
+echo "    raw:      $RAW_DATA"
+echo "    output:   $PROFILED_DATA"
+
+if [ -f "$PROFILED_DATA" ] && [ -z "${FORCE_REPROFILE:-}" ]; then
+    _existing=$(wc -l < "$PROFILED_DATA")
+    echo "    ✓ profiled jsonl 已存在 ($_existing 行), 跳过 (FORCE_REPROFILE=1 强制重跑)"
+else
+    if [ ! -f "$RAW_DATA" ]; then
+        echo "❌ 原始 chains 不存在: $RAW_DATA"; exit 1
+    fi
+    mkdir -p "$(dirname "$PROFILED_DATA")"
+    CUDA_VISIBLE_DEVICES=0 python Latent-SFT/entropy_profile.py \
+        --model "$MODEL_PATH" --data "$RAW_DATA" --output "$PROFILED_DATA"
+    _ep_exit=$?
+    if [ $_ep_exit -ne 0 ] || [ ! -f "$PROFILED_DATA" ]; then
+        echo "❌ entropy_profile 失败 (exit $_ep_exit)"; exit 1
+    fi
+    echo "    ✓ profile 完成: $(wc -l < "$PROFILED_DATA") 行"
 fi
 
+# ── 训练参数 (sbatch 默认尊重 hlr_config.py, 仅个别字段允许 env 覆盖) ──
 EXTRA_EPOCHS_FLAG=""
 if [ -n "${HLR_EPOCHS:-}" ]; then
     EXTRA_EPOCHS_FLAG="--epochs $HLR_EPOCHS"
 fi
 
 echo ""
-echo ">>> HLR 训练 ($(date))"
+echo ">>> Step 1: HLR 训练 ($(date))"
 echo "    epochs=${HLR_EPOCHS:-3} (default 3)  batch=1 grad_accum=8 × 4 GPU = effective 32"
 echo "    main_lr=2e-5 (LoRA)  latent_reasoner_lr=5e-5 (随机初始化, lr 稍高)"
 echo "    LoRA r=64 alpha=128  scheduler=cosine warmup=0.05  wd=0.01"
 echo "    Loss: α=1.0 (student CE) β=1.0 (align L1) γ=1.0 (teacher CE)"
 echo "    Latent trigger: window=3 quantile=0.5 min=3 max=8 cooldown=24"
+echo "    profiled data: $PROFILED_DATA"
 echo "    LR 架构 (auto from main config):"
 echo "      Qwen3-4B: 36 main layers → 9 LR layers, hidden 2560/4=640"
 echo "      R1-7B:    28 main layers → 7 LR layers, hidden 3584/4=896"
@@ -121,7 +145,7 @@ echo ""
 accelerate launch --num_processes 4 --main_process_port 29700 \
     Latent-SFT/train.py \
     --model "$MODEL_PATH" \
-    $EXTRA_DATA_FLAG \
+    --data "$PROFILED_DATA" \
     $EXTRA_EPOCHS_FLAG \
     --zero_stage 3 \
     --gradient_checkpointing \

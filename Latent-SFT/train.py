@@ -117,36 +117,22 @@ def train_hlr(cfg: HLRConfig):
     if len(tokenizer) > model.get_input_embeddings().num_embeddings:
         model.resize_token_embeddings(len(tokenizer))
 
-    # ── Auto-rebuild profiled jsonl (用户没传 --data 时强制重新构造) ──
-    # 在 LoRA 包装 / gradient checkpointing 之前用 base model 跑 entropy profile.
-    # 这样保证训练数据跟当前用的基座模型的 chat_template / tokenizer 严格一致.
-    if cfg.auto_rebuild_data:
-        if accelerator.is_main_process:
-            from entropy_profile import auto_profile_inplace
-            print(f"\n[auto-rebuild] 重新构造 profiled jsonl ...")
-            print(f"  原始数据: {cfg.raw_chains_path}")
-            print(f"  输出:     {cfg.data_path}")
-            device = accelerator.device
-            model = model.to(device)
-            min_seg = cfg.min_latent_steps * cfg.latent_compression_ratio
-            max_seg = cfg.max_latent_steps * cfg.latent_compression_ratio
-            auto_profile_inplace(
-                model=model,
-                tokenizer=tokenizer,
-                raw_data_path=cfg.raw_chains_path,
-                output_path=cfg.data_path,
-                entropy_window=cfg.entropy_window,
-                entropy_quantile=cfg.entropy_quantile,
-                min_segment=min_seg,
-                max_segment=max_seg,
-                cooldown=cfg.latent_cooldown,
-                max_length=cfg.max_length,
-                filter_problems=cfg.filter_problems,
-                filter_sizes=cfg.filter_sizes,
-            )
-            # 移回 CPU, 让 accelerator.prepare 自己决定 device 放置
-            model = model.cpu()
-        accelerator.wait_for_everyone()
+    # ── 数据预处理要求 ──
+    # entropy profiling 必须在 sbatch 脚本里作为独立 Step 0 用单 GPU 跑
+    # (不能在这里 inline 做: ZeRO-3 init context 已经 partition embedding.weight 成
+    # 1D, model.forward 会 'weight' must be 2-D 报错).
+    # 见 submit_train_eval_hlr.sh / submit_smoke_hlr.sh 的 Step 0 模板.
+    import os
+    if not os.path.exists(cfg.data_path):
+        raise FileNotFoundError(
+            f"profiled jsonl 不存在: {cfg.data_path}\n"
+            f"请先用单 GPU 跑:\n"
+            f"  CUDA_VISIBLE_DEVICES=0 python Latent-SFT/entropy_profile.py \\\n"
+            f"    --model {cfg.model_name} \\\n"
+            f"    --data {cfg.raw_chains_path} \\\n"
+            f"    --output {cfg.data_path}\n"
+            f"(sbatch 脚本 submit_train_eval_hlr.sh 的 Step 0 已自动做这件事)"
+        )
 
     if cfg.gradient_checkpointing:
         # use_reentrant=True: ZeRO-3 + LoRA + GC 三件套 workaround (踩坑 #14)
@@ -367,13 +353,11 @@ def main():
     if args.lr_num_layers is not None: cfg.lr_num_layers = args.lr_num_layers
     if args.lr_hidden_size is not None: cfg.lr_hidden_size = args.lr_hidden_size
 
-    # 用户没显式传 --data → 用当前 --model 重跑 entropy profile, 覆盖 data_path,
-    # 确保 profiled jsonl 和本次训练基座的 tokenizer/概率分布严格一致
+    # entropy profile 必须事先用单 GPU 跑好 (ZeRO-3 init 与 model.forward 不兼容),
+    # 见 submit_train_eval_hlr.sh 的 Step 0. 这里只校验 profiled jsonl 是否存在.
     if args.data is None:
-        cfg.auto_rebuild_data = True
-        print("⚠ 未指定 --data, 训练前会用 --model 重新跑 entropy profile")
-        print(f"   原始 chains: {cfg.raw_chains_path}")
-        print(f"   输出 profiled: {cfg.data_path}")
+        print("⚠ 未指定 --data, 将使用 HLRConfig 默认: " + cfg.data_path)
+        print("  (如该文件不存在, train_hlr() 启动后会报错并给出 entropy_profile 命令)")
 
     if args.model is not None: cfg.model_name = args.model
     if args.data is not None: cfg.data_path = args.data

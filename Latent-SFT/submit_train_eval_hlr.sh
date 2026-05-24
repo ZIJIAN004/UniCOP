@@ -10,9 +10,10 @@
 #       全程 ~3-7 hr (1 epoch / 3 epoch 不同).
 #
 # 流程 (mirror submit_sft_qwen3_full.sh 的一体化设计):
-#   Step 1: 训练   (4 GPU ZeRO-3 + GC + accelerate launch train.py)
-#   Step 2: 产物校验 (adapter > 20MB, latent_reasoner.pt > 50MB)
-#   Step 3: 对比 eval (单 GPU 进程, 内部自动: merge → baseline → HLR → 对比表)
+#   Step 0: entropy_profile (单 GPU, 与 ZeRO-3 init 隔离, 有缓存就跳)
+#   Step 1: 训练            (4 GPU ZeRO-3 + GC + accelerate launch train.py)
+#   Step 2: 产物校验         (adapter > 20MB, latent_reasoner.pt > 50MB)
+#   Step 3: 对比 eval        (单 GPU 进程, 内部自动: merge → baseline → HLR → 对比表)
 #
 # 用法 (cwd 任意, 脚本内部 cd):
 #   HLR_MODEL=/path/to/sft_final_model \
@@ -28,7 +29,7 @@
 #   BASE_MODEL_TYPE    qwen3_thinking | r1_distill   (默认 qwen3_thinking)
 #   HLR_OUTPUT_DIR     训练输出目录                   (默认 output_hlr_${BASE_MODEL_TYPE})
 #   HLR_EPOCHS         训练 epoch 数                  (默认 3, 推荐 1 减量)
-#   HLR_DATA           profiled jsonl (跳 entropy_profile auto-rebuild)
+#   HLR_DATA           profiled jsonl 路径 (跳过 Step 0 重跑)
 #   EVAL_NUM_TEST      eval 实例数                    (默认 100)
 #   EVAL_PROBLEM       eval 问题                      (默认 cvrp)
 #   EVAL_PROBLEM_SIZE  eval 规模                      (默认 20)
@@ -94,7 +95,7 @@ echo "  HLR_EPOCHS        = ${HLR_EPOCHS:-3 (default)}"
 if [ -n "${HLR_DATA:-}" ]; then
     echo "  DATA (explicit)   = $HLR_DATA"
 else
-    echo "  DATA              = auto-rebuild (~1-2 hr profile)"
+    echo "  DATA              = (Step 0 自动跑 entropy_profile, ~1-2 hr)"
 fi
 echo "  EVAL              = $EVAL_PROBLEM-$EVAL_PROBLEM_SIZE n=$EVAL_NUM_TEST "
 echo "                       max_len=$EVAL_MAX_LEN  bs=$EVAL_BATCH_SIZE  T=$EVAL_TEMPERATURE"
@@ -129,6 +130,43 @@ fi
 echo "============================================================"
 
 # ══════════════════════════════════════════════════════════════════
+# Step 0: entropy_profile (单 GPU, ~1-2 hr; 必须先于训练, 与 ZeRO-3 init 隔离)
+# ══════════════════════════════════════════════════════════════════
+# 为何独立? train.py 内部 inline 跑会触发 ZeRO-3 init 后 model.forward
+# 报 'weight' must be 2-D (embedding.weight 已被 partition 成 1D 切片).
+# 改为 sbatch 这里单 GPU 不带 DeepSpeed 跑, 训练时传 --data 跳过.
+RAW_DATA="UniCOP-Distill/data/chains_template_cvrp20.jsonl"
+PROFILED_DATA="${HLR_DATA:-Latent-SFT/data/profiled_${BASE_MODEL_TYPE}_cvrp20.jsonl}"
+
+echo ""
+echo ">>> Step 0: entropy_profile ($(date))"
+echo "    raw:      $RAW_DATA"
+echo "    output:   $PROFILED_DATA"
+
+if [ -f "$PROFILED_DATA" ] && [ -z "${FORCE_REPROFILE:-}" ]; then
+    _existing=$(wc -l < "$PROFILED_DATA")
+    echo "    ✓ profiled jsonl 已存在 ($_existing 行), 跳过 (FORCE_REPROFILE=1 强制重跑)"
+else
+    if [ ! -f "$RAW_DATA" ]; then
+        echo "❌ 原始 chains 不存在: $RAW_DATA"
+        notify "❌ HLR profile 失败: 原始数据缺失"
+        exit 1
+    fi
+    mkdir -p "$(dirname "$PROFILED_DATA")"
+    CUDA_VISIBLE_DEVICES=0 python Latent-SFT/entropy_profile.py \
+        --model "$MODEL_PATH" \
+        --data "$RAW_DATA" \
+        --output "$PROFILED_DATA"
+    _ep_exit=$?
+    if [ $_ep_exit -ne 0 ] || [ ! -f "$PROFILED_DATA" ]; then
+        echo "❌ entropy_profile 失败 (exit $_ep_exit)"
+        notify "❌ HLR entropy_profile 失败 (exit $_ep_exit)"
+        exit 1
+    fi
+    echo "    ✓ profile 完成: $(wc -l < "$PROFILED_DATA") 行"
+fi
+
+# ══════════════════════════════════════════════════════════════════
 # Step 1: HLR 训练 (4 GPU ZeRO-3 + GC + LoRA)
 # ══════════════════════════════════════════════════════════════════
 echo ""
@@ -138,12 +176,9 @@ echo "    main_lr=2e-5 (LoRA)  latent_reasoner_lr=5e-5"
 echo "    LoRA r=64 alpha=128  scheduler=cosine warmup=0.05 wd=0.01"
 echo "    Loss: α=1.0 (student CE) β=1.0 (align L1) γ=1.0 (teacher CE)"
 echo "    Latent trigger: window=3 quantile=0.5 min=3 max=8 cooldown=24"
+echo "    profiled data: $PROFILED_DATA"
 echo ""
 
-EXTRA_DATA_FLAG=""
-if [ -n "${HLR_DATA:-}" ]; then
-    EXTRA_DATA_FLAG="--data $HLR_DATA"
-fi
 EXTRA_EPOCHS_FLAG=""
 if [ -n "${HLR_EPOCHS:-}" ]; then
     EXTRA_EPOCHS_FLAG="--epochs $HLR_EPOCHS"
@@ -152,7 +187,7 @@ fi
 accelerate launch --num_processes 4 --main_process_port 29700 \
     Latent-SFT/train.py \
     --model "$MODEL_PATH" \
-    $EXTRA_DATA_FLAG \
+    --data "$PROFILED_DATA" \
     $EXTRA_EPOCHS_FLAG \
     --zero_stage 3 \
     --gradient_checkpointing \
