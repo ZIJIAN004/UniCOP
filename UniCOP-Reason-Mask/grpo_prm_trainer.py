@@ -1139,6 +1139,10 @@ class GRPOPRMTrainer(GRPOTrainer):
         R_step_saturated = 0
         R_step_total = 0
         seg_token_count = 0
+        # 真正注入 advantage 的 per-token 量级累计 (诊断 mean 模式 seg_len 反相关问题):
+        # inject_per_tok = proc_alpha * a_proc / seg_len, 段越短单 token 注入越大.
+        prm_inject_tok_sum = 0.0     # Σ_token 注入值 (= Σ_seg proc_alpha*a_proc), token 加权
+        inject_per_tok_max = 0.0     # 最强单 token 注入 (seg_len 小尖峰)
 
         # PRM 只对 fully_feasible trajectory 算 (v5 用户决定 2026-05-18):
         # 减少 PRM 偏置 (0.37 → 0.115) + 增强 fully_feas 推力 (差距 ×3.5)
@@ -1183,7 +1187,11 @@ class GRPOPRMTrainer(GRPOTrainer):
                     tok_e = min(tok_e, T)
                     seg_len = max(tok_e - tok_s, 1)
                     seg_token_count += seg_len
-                    advantages[i, tok_s:tok_e] += proc_alpha * a_proc / seg_len
+                    inject_per_tok = proc_alpha * a_proc / seg_len
+                    advantages[i, tok_s:tok_e] += inject_per_tok
+                    prm_inject_tok_sum += inject_per_tok * seg_len   # = proc_alpha*a_proc
+                    if inject_per_tok > inject_per_tok_max:
+                        inject_per_tok_max = inject_per_tok
 
         # 错误类型统计
         from terminal_reward import route_stats
@@ -1221,6 +1229,11 @@ class GRPOPRMTrainer(GRPOTrainer):
         feas_dominance = a_feas_abs / max(a_feas_abs + a_outcome_abs, 1e-8)
         valid_dist = [d for d in distances_local if not (d != d)]
         distance_mean_local = float(np.mean(valid_dist)) if valid_dist else 0.0
+
+        # 真正注入 advantage 的 per-token PRM 量级 + 与 A_out 的相对大小 (量级诊断)
+        prm_inject_per_tok_mean = prm_inject_tok_sum / max(seg_token_count, 1)
+        aout_per_tok_abs = float(a_out.abs().mean().item())
+        inject_vs_aout = prm_inject_per_tok_mean / (aout_per_tok_abs + 1e-8)
 
         log_dict = {
             "reward_v5/parse_rate":         self._gather_mean(
@@ -1262,6 +1275,14 @@ class GRPOPRMTrainer(GRPOTrainer):
             "prm_v5/a_proc_mean":           self._gather_mean(float(a_proc_mean)),
             "prm_v5/a_proc_min":            self._gather_mean(
                 float(a_proc_min) if a_proc_min < float("inf") else 0.0),
+            # ── 量级诊断: PRM 段广播真正注入 advantage 的 per-token 大小 ──
+            # inject_per_tok = proc_alpha * a_proc / seg_len, 强依赖 seg_len.
+            # inject_vs_aout > 1 → 段内 PRM 注入压倒 A_out (z-score ~1), 量级失衡;
+            # inject_per_tok_max 远大于 mean → 短段尖峰, 信号不均.
+            "prm_v5/inject_per_tok_mean":   self._gather_mean(float(prm_inject_per_tok_mean)),
+            "prm_v5/inject_per_tok_max":    self._gather_mean(float(inject_per_tok_max)),
+            "prm_v5/aout_per_tok_abs":      self._gather_mean(float(aout_per_tok_abs)),
+            "prm_v5/inject_vs_aout":        self._gather_mean(float(inject_vs_aout)),
             "prm_v5/R_step_raw_abs_mean":   self._gather_mean(R_step_raw_abs_mean),
             "prm_v5/R_step_raw_abs_max":    self._gather_mean(R_step_raw_abs_max),
             "prm_v5/R_step_saturation_rate": self._gather_mean(R_step_saturation_rate),
