@@ -12,9 +12,28 @@ Phase 1 限制:
   - LR 顶层 hidden 经 up_proj 注入主模型 inputs_embeds (A'' 风, Phase 2 改严格 KV inject)
 """
 
+import os
+import time
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+# ── Step-0-only diag stamp (定位 compute_hlr_loss 内部 hang) ───────────
+# 只在前 N 次调用打印, 避免训练循环每步都打日志.
+_HLR_LOSS_T0 = time.time()
+_HLR_LOSS_RANK = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
+_HLR_LOSS_CALL_COUNT = 0
+_HLR_LOSS_MAX_DIAG_CALLS = 1   # 只在第 1 次 compute_hlr_loss 打全 stamp
+
+
+def _loss_stamp(msg: str) -> None:
+    if _HLR_LOSS_CALL_COUNT > _HLR_LOSS_MAX_DIAG_CALLS:
+        return
+    elapsed = time.time() - _HLR_LOSS_T0
+    print(f"[LSTAMP rank={_HLR_LOSS_RANK} +{elapsed:6.1f}s call={_HLR_LOSS_CALL_COUNT}] {msg}",
+          flush=True)
 
 
 class SimpleRMSNorm(nn.Module):
@@ -516,20 +535,27 @@ def compute_hlr_loss(
 
     Returns: (total_loss, teacher_loss[d], student_loss[d], align_loss[d])
     """
+    global _HLR_LOSS_CALL_COUNT
+    _HLR_LOSS_CALL_COUNT += 1
+    _loss_stamp(f"ENTER compute_hlr_loss (teacher_len={teacher_input_ids.size(-1)})")
+
     device = next(model.parameters()).device
     teacher_input_ids = teacher_input_ids.to(device)
     teacher_attention_mask = teacher_attention_mask.to(device)
     teacher_labels = teacher_labels.to(device)
     prompt_ids_dev = prompt_ids.to(device)
     T_teacher = teacher_input_ids.size(1)
+    _loss_stamp(f"after .to(device) / read T_teacher={T_teacher}")
 
     # ── (1) Teacher forward 一次 ──
+    _loss_stamp("BEFORE teacher model.forward (ZeRO-3 first all_gather here)")
     teacher_out = model(
         input_ids=teacher_input_ids,
         attention_mask=teacher_attention_mask,
         labels=teacher_labels,
         output_hidden_states=True,
     )
+    _loss_stamp("AFTER teacher model.forward")
     teacher_loss = teacher_out.loss
     teacher_hidden_states = teacher_out.hidden_states  # tuple of (L+1) × [1, T, H]
     # hidden_states[0] = embedding, hidden_states[i] = main layer (i-1) 输出 (0-indexed main)
@@ -556,7 +582,11 @@ def compute_hlr_loss(
     student_labels_parts: list[torch.Tensor] = []
     align_records: list = []  # [(layer_hiddens, teacher_align_pos)]
 
+    n_segs = len(segments)
+    n_lat = sum(1 for s in segments if s.type == "latent")
+    _loss_stamp(f"BEFORE gather_ctx (n_segs={n_segs} n_latent={n_lat})")
     with gather_ctx:
+        _loss_stamp("inside gather_ctx, before prompt embed")
         # prompt embeds
         prompt_embeds = embed_module(prompt_ids_dev).unsqueeze(0).clone()  # [1, P, H]
         student_embeds_parts.append(prompt_embeds)
@@ -596,8 +626,10 @@ def compute_hlr_loss(
             else:
                 raise ValueError(f"未知 segment 类型: {seg.type}")
 
+    _loss_stamp("AFTER segments loop (exited gather_ctx)")
     student_embeds = torch.cat(student_embeds_parts, dim=1)        # [1, T_student, H_main]
     student_labels = torch.cat(student_labels_parts, dim=0).unsqueeze(0)  # [1, T_student]
+    _loss_stamp(f"BEFORE student forward (student_len={student_embeds.size(1)})")
 
     # ── (3) Student forward 一次 (GC 友好, 不需 use_cache) ──
     student_out = model(
@@ -605,6 +637,7 @@ def compute_hlr_loss(
         labels=student_labels,
         # 不开 output_hidden_states (Phase 1 不用 student hidden), 省显存
     )
+    _loss_stamp("AFTER student forward")
     student_loss = student_out.loss
     if student_loss is None:
         # 全 -100 边界情况 (理论上不会发生, 至少有 solution segment)

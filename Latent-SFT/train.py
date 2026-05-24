@@ -186,21 +186,18 @@ def train_hlr(cfg: HLRConfig):
         print(f"  LatentReasoner 参数量: {n_params/1e6:.2f}M")
 
     # ── 数据 ──
-    _stamp("before HLRDataset()")
+    # Smoke: limit > 0 时 HLRDataset 读到 N 条就停, 16min → 30sec 大幅缩短诊断 cycle
+    _limit = getattr(cfg, "dataset_limit", 0)
+    _stamp(f"before HLRDataset() (limit={_limit if _limit else 'full'})")
     dataset = HLRDataset(
         cfg.data_path, tokenizer,
         max_length=cfg.max_length,
         latent_compression_ratio=cfg.latent_compression_ratio,
         filter_problems=cfg.filter_problems,
         filter_sizes=cfg.filter_sizes,
+        limit=_limit,
     )
     _stamp(f"after HLRDataset()  n={len(dataset)}")
-
-    # Smoke 模式: 截断 dataset 让训练快速跑完 (完整训练路径不动)
-    _limit = getattr(cfg, "dataset_limit", 0)
-    if _limit > 0 and len(dataset.samples) > _limit:
-        dataset.samples = dataset.samples[:_limit]
-        _stamp(f"[SMOKE] dataset truncated to first {_limit} samples")
 
     collate_fn = partial(collate_hlr, pad_token_id=tokenizer.pad_token_id)
     dataloader = DataLoader(

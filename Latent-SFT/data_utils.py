@@ -67,7 +67,14 @@ class HLRDataset(Dataset):
     def __init__(self, data_path: str, tokenizer,
                  max_length: int = 8192,
                  latent_compression_ratio: int = 4,
-                 filter_problems=None, filter_sizes=None):
+                 filter_problems=None, filter_sizes=None,
+                 limit: int = 0):
+        """
+        Args:
+            limit: 只读前 N 条 record (0=全量, smoke 用 50-100 加速 cycle)
+                   注意是"接受 N 条"而非"读 N 行" — limit 满了立刻停, 避免
+                   读完 50000 行再丢弃, 是 50000 行 tokenize ×4 rank = 16 min 的根因。
+        """
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.compression_ratio = latent_compression_ratio
@@ -81,6 +88,9 @@ class HLRDataset(Dataset):
         record_total_len_before_filter = 0  # 用于截断率分母
         with open(data_path, "r", encoding="utf-8") as f:
             for line in f:
+                # smoke: 累积够 limit 条立刻停, 跳过剩余 jsonl 行
+                if limit > 0 and len(self.samples) >= limit:
+                    break
                 line = line.strip()
                 if not line:
                     continue
