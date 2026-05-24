@@ -23,9 +23,11 @@
 set -euo pipefail
 
 _SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-# BASE_MODEL_TYPE: r1_distill (默认, 7B DeepSeek) 或 qwen3_thinking (4B Qwen3-Thinking)
-# paths.sh 据此设 BASE_MODEL + 采样参数 GEN_TEMPERATURE/TOP_P/TOP_K, trainer 自动读 env
-export BASE_MODEL_TYPE="${BASE_MODEL_TYPE:-r1_distill}"
+# BASE_MODEL_TYPE: 选哪条 SFT 产物作为 RL 起点 (不是加载原始基座!):
+#   qwen3_thinking (默认) → output_sft_qwen3_template_cvrp20/final_model (Qwen3-4B SFT)
+#   r1_distill            → output_sft_hybrid_cvrp20/final_model        (DeepSeek-R1-7B SFT)
+# paths.sh 据此设采样参数 GEN_TEMPERATURE/TOP_P/TOP_K, trainer 自动读 env
+export BASE_MODEL_TYPE="${BASE_MODEL_TYPE:-qwen3_thinking}"
 source "$(dirname "$_SELF_DIR")/paths.sh"
 
 WORK_DIR="$MASK_DIR"
@@ -56,7 +58,8 @@ if [ ! -d "$MODEL_BASE" ]; then
     echo "❌ 基座模型不存在: $MODEL_BASE"
     exit 1
 fi
-echo "[MODEL_BASE] $MODEL_BASE"
+echo "[RL 起点] SFT 产物 (非原始基座): $MODEL_BASE"
+echo "[BASE_MODEL_TYPE=$BASE_MODEL_TYPE] qwen3_thinking→Qwen3-4B SFT | r1_distill→R1-7B SFT"
 
 TOTAL_GPUS=7
 VLLM_GPU=6
@@ -154,7 +157,7 @@ echo ""
 echo "============================================================"
 echo "  GRPO + POMO PRM · CVRP n=$SIZE · 7 卡 · reward_scheme=v5"
 echo "  BASE_MODEL_TYPE: $BASE_MODEL_TYPE  (T=$GEN_TEMPERATURE top_p=$GEN_TOP_P top_k=$GEN_TOP_K)"
-echo "  基座模型:  $MODEL_BASE"
+echo "  RL 起点:   $MODEL_BASE (SFT 产物, 非原始基座)"
 echo "  GPU:       1 vLLM (GPU $VLLM_GPU) + $TRAIN_PROC 训练 (GPU $TRAIN_GPUS_CSV)"
 echo "  ZeRO:      stage $ZERO_STAGE | gradient_checkpointing on"
 echo "  Reward:    v5 (v4 + hardgate distance + cov/cons 加权)"
