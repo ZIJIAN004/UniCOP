@@ -350,6 +350,7 @@ def main():
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--save_steps", type=int, default=None)
+    parser.add_argument("--logging_steps", type=int, default=None)
 
     parser.add_argument("--latent_reasoner_lr", type=float, default=None,
                         help="LatentReasoner 的 lr")
@@ -388,6 +389,7 @@ def main():
     if args.gradient_checkpointing: cfg.gradient_checkpointing = True
     if args.output_dir is not None: cfg.output_dir = args.output_dir
     if args.save_steps is not None: cfg.save_steps = args.save_steps
+    if args.logging_steps is not None: cfg.logging_steps = args.logging_steps
 
     train_hlr(cfg)
 
