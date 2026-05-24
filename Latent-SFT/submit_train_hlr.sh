@@ -95,15 +95,20 @@ if [ -n "$_min_free" ] && [ "$_min_free" -lt 20000 ]; then
     exit 0
 fi
 
-# ── 训练参数 (sbatch 不显式覆盖 HLRConfig 默认, 让 hlr_config.py 单点管理) ──
+# ── 训练参数 (sbatch 默认尊重 hlr_config.py, 仅个别字段允许 env 覆盖) ──
 EXTRA_DATA_FLAG=""
 if [ -n "${HLR_DATA:-}" ]; then
     EXTRA_DATA_FLAG="--data $HLR_DATA"
 fi
 
+EXTRA_EPOCHS_FLAG=""
+if [ -n "${HLR_EPOCHS:-}" ]; then
+    EXTRA_EPOCHS_FLAG="--epochs $HLR_EPOCHS"
+fi
+
 echo ""
 echo ">>> HLR 训练 ($(date))"
-echo "    epochs=3  batch=1 grad_accum=8 × 4 GPU = effective 32"
+echo "    epochs=${HLR_EPOCHS:-3} (default 3)  batch=1 grad_accum=8 × 4 GPU = effective 32"
 echo "    main_lr=2e-5 (LoRA)  latent_reasoner_lr=5e-5 (随机初始化, lr 稍高)"
 echo "    LoRA r=64 alpha=128  scheduler=cosine warmup=0.05  wd=0.01"
 echo "    Loss: α=1.0 (student CE) β=1.0 (align L1) γ=1.0 (teacher CE)"
@@ -117,6 +122,7 @@ accelerate launch --num_processes 4 --main_process_port 29700 \
     Latent-SFT/train.py \
     --model "$MODEL_PATH" \
     $EXTRA_DATA_FLAG \
+    $EXTRA_EPOCHS_FLAG \
     --zero_stage 3 \
     --gradient_checkpointing \
     --output_dir "$OUTPUT_DIR" \
