@@ -593,18 +593,28 @@ def compute_hlr_loss(
         student_labels_parts.append(torch.full(
             (prompt_embeds.size(1),), -100, dtype=torch.long, device=device
         ))
+        _loss_stamp("after prompt embed, entering segments loop")
 
-        for seg in segments:
+        _seg_explicit = 0
+        _seg_latent = 0
+        for seg_idx, seg in enumerate(segments):
+            # 每 10 个 segment 打一次 stamp + latent 段也打
+            _hit_stamp = (seg_idx % 10 == 0)
             if seg.type in ("explicit", "solution"):
+                if _hit_stamp:
+                    _loss_stamp(f"seg {seg_idx}/{len(segments)} type={seg.type} (e={_seg_explicit}, l={_seg_latent})")
                 seg_ids = seg.ids.to(device)
                 seg_labels = seg.labels.to(device)
                 # clone() 让 embed 在 context 退出后仍有效
                 seg_embeds = embed_module(seg_ids).unsqueeze(0).clone()  # [1, T_seg, H]
                 student_embeds_parts.append(seg_embeds)
                 student_labels_parts.append(seg_labels)
+                _seg_explicit += 1
 
             elif seg.type == "latent":
                 k = seg.k
+                if _hit_stamp:
+                    _loss_stamp(f"seg {seg_idx}/{len(segments)} type=latent k={k} BEFORE LR forward")
                 # LR 输入: teacher 段起始前 token 最后一层 hidden (双向 detach)
                 in_pos = seg.teacher_input_pos
                 in_pos = min(max(in_pos, 0), T_teacher - 1)
@@ -622,6 +632,9 @@ def compute_hlr_loss(
                 ))
 
                 align_records.append((layer_hiddens, seg.teacher_align_pos))
+                _seg_latent += 1
+                if _hit_stamp:
+                    _loss_stamp(f"seg {seg_idx}/{len(segments)} type=latent k={k} AFTER LR forward")
 
             else:
                 raise ValueError(f"未知 segment 类型: {seg.type}")
