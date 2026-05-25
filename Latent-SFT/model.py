@@ -715,9 +715,10 @@ def compute_hlr_loss(
             in_pos = seg.teacher_input_pos
             in_pos = min(max(in_pos, 0), T_teacher - 1)
             h_input = teacher_hidden_states[-1][:, in_pos, :].detach()
-            # LR forward 是 pure local (LR 不在 ZeRO-3 wrap, 修复后), 不触发 collective
-            with hlr_timer("lr_fwd"):
-                layer_hiddens, _ = latent_reasoner(h_input, k=k)
+            # LR forward 是 pure local (LR 不在 ZeRO-3 wrap, 修复后), 不触发 collective.
+            # 不包 hlr_timer: 此处在 latent 段循环内, 逐段 cuda.synchronize 会放大观察者效应;
+            # LR 很小, 其耗时归入相邻段即可.
+            layer_hiddens, _ = latent_reasoner(h_input, k=k)
             top_hidden = layer_hiddens[-1]
             latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)
             student_embeds_parts.append(latent_inputs_embeds)

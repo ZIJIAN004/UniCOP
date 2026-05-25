@@ -55,14 +55,15 @@ export NCCL_DEBUG=WARN
 # ── 诊断模式 (一行开启, 不必手改脚本) ──────────────────────────────────
 #   HLR_DIAG=1 ... sbatch Latent-SFT/submit_train_hlr.sh
 # 开启后:
-#   - HLR_TIMING=1     : 每 micro-step 分段 wall-clock (teacher/student fwd / barrier / align / backward / optim)
-#   - HLR_DS_PROFILE=1 : DeepSpeed comms_logger
-#                        (all_gather=参数聚合 / reduce_scatter=梯度规约 的 调用数/数据量/总耗时)
+#   - HLR_TIMING=1 : 每 micro-step 分段 wall-clock (teacher/student fwd / barrier / align / backward / optim)
 #   - 训练侧 --limit HLR_DIAG_LIMIT (默认 128) + --logging_steps HLR_DIAG_LOGGING (默认 2)
-#     → 只跑少量样本高频打点, ~30min 出剖分, 不必等完整训练.
+#     → 只跑少量样本高频打点, 几分钟出分段数据, 不必等完整训练.
+# ⚠ comms_logger(逐 collective 通信计时) 默认不开: 它强制同步每个 collective, 打断 ZeRO-3
+#   的 overlap_comm, 无 NVLink socket 下把通信全序列化 → 实测 ~18min/step 近乎卡死 (观察者效应).
+#   确需逐 collective 通信数据时再显式传 HLR_DS_PROFILE=1, 且只跑 1-2 步即可.
 if [ "${HLR_DIAG:-0}" = "1" ]; then
     export HLR_TIMING=1
-    export HLR_DS_PROFILE=1
+    export HLR_DS_PROFILE="${HLR_DS_PROFILE:-0}"
 fi
 
 source /homes/zhuoyi/.bashrc
