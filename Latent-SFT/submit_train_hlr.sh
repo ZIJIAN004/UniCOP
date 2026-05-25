@@ -56,8 +56,9 @@ export NCCL_DEBUG=WARN
 #   HLR_DIAG=1 ... sbatch Latent-SFT/submit_train_hlr.sh
 # 开启后:
 #   - HLR_TIMING=1 : 每 micro-step 分段 wall-clock (teacher/student fwd / barrier / align / backward / optim)
-#   - 训练侧 --limit HLR_DIAG_LIMIT (默认 128) + --logging_steps HLR_DIAG_LOGGING (默认 2)
-#     → 只跑少量样本高频打点, 几分钟出分段数据, 不必等完整训练.
+#   - 训练侧 --logging_steps HLR_DIAG_LOGGING (默认 2); 默认全量训练不限样本数
+#     (--limit 会改变分片/各 rank batch 数, 可能触发 barrier 死锁, 故默认不加),
+#     看够 [TIMING] 后自己 scancel; 确需少量快速复现再显式传 HLR_DIAG_LIMIT=128.
 # ⚠ comms_logger(逐 collective 通信计时) 默认不开: 它强制同步每个 collective, 打断 ZeRO-3
 #   的 overlap_comm, 无 NVLink socket 下把通信全序列化 → 实测 ~18min/step 近乎卡死 (观察者效应).
 #   确需逐 collective 通信数据时再显式传 HLR_DS_PROFILE=1, 且只跑 1-2 步即可.
@@ -195,9 +196,12 @@ echo ""
 DIAG_FLAGS=""
 LOGGING_STEPS=10
 if [ "${HLR_DIAG:-0}" = "1" ]; then
-    DIAG_FLAGS="--limit ${HLR_DIAG_LIMIT:-128}"
     LOGGING_STEPS="${HLR_DIAG_LOGGING:-2}"
-    echo "  ⚡ HLR_DIAG=1 诊断模式: $DIAG_FLAGS  --logging_steps $LOGGING_STEPS  (HLR_TIMING=$HLR_TIMING HLR_DS_PROFILE=$HLR_DS_PROFILE)"
+    # 默认全量 (不加 --limit); 仅当显式设 HLR_DIAG_LIMIT 时才限样本
+    if [ -n "${HLR_DIAG_LIMIT:-}" ]; then
+        DIAG_FLAGS="--limit ${HLR_DIAG_LIMIT}"
+    fi
+    echo "  ⚡ HLR_DIAG=1 诊断模式: logging_steps=$LOGGING_STEPS  limit=${HLR_DIAG_LIMIT:-无(全量)}  (HLR_TIMING=$HLR_TIMING HLR_DS_PROFILE=$HLR_DS_PROFILE)"
 fi
 
 accelerate launch --num_processes 4 --main_process_port 29700 \
