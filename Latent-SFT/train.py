@@ -85,6 +85,23 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "gather_16bit_weights_on_model_save": True,
         }
 
+    # ── ZeRO 通信 vs 计算剖分 (export HLR_DS_PROFILE=1 开启) ──
+    # wall_clock_breakdown: DeepSpeed 每 steps_per_print 自动打印
+    #   fwd / bwd / bwd_inner(计算, 含 GC 重算) / bwd_allreduce(ZeRO 下=reduce_scatter 梯度规约) / step.
+    # comms_logger(prof_all): 在 comm wrapper 层记录每类 collective 的 调用数/数据量/总耗时,
+    #   走 socket(无 NVLink) 也能正确计时 (不依赖 GPU kernel, 故不会漏掉 socket 等待).
+    #   all_gather = ZeRO-3 参数按层聚合 (fwd 各层 + bwd GC 重算各层); reduce_scatter = 梯度规约.
+    #   训练循环里定期调 deepspeed.comm.log_summary() 打印汇总 (见 train_hlr 主循环).
+    if os.environ.get("HLR_DS_PROFILE", "0") == "1":
+        base["wall_clock_breakdown"] = True
+        base["steps_per_print"] = 2
+        base["comms_logger"] = {
+            "enabled": True,
+            "verbose": False,
+            "prof_all": True,
+            "debug": False,
+        }
+
     return base
 
 
@@ -376,6 +393,15 @@ def train_hlr(cfg: HLRConfig):
                 # 所有 rank 都报分段计时 (对比各 rank barrier_wait 看负载失衡)
                 if global_step % cfg.logging_steps == 0:
                     hlr_timing_report(accelerator.process_index, global_step)
+                    # ZeRO 通信汇总 (all_gather/reduce_scatter 的 调用数/数据量/总耗时).
+                    # 所有 rank 在同一 global_step 边界一起调, 避免 collective 不齐死锁.
+                    if os.environ.get("HLR_DS_PROFILE", "0") == "1":
+                        try:
+                            import deepspeed.comm as ds_comm
+                            ds_comm.log_summary()
+                        except Exception as _e:
+                            if accelerator.is_main_process:
+                                print(f"[DS_PROFILE] log_summary skipped: {_e}", flush=True)
 
                 if global_step % cfg.logging_steps == 0 and accelerator.is_main_process:
                     avg_loss = epoch_loss / (step + 1)
