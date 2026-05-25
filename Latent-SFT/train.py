@@ -22,6 +22,7 @@ from accelerate.utils import DeepSpeedPlugin, set_seed
 from peft import LoraConfig, get_peft_model
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
 from hlr_config import HLRConfig
@@ -272,6 +273,17 @@ def train_hlr(cfg: HLRConfig):
     # ── 训练循环 ──
     _stamp("before training loop (entering first epoch)")
     global_step = 0
+    # 进度条: total = 实际 optimizer-step 数 (每 epoch floor(len/ga) 次 sync boundary).
+    # 主进程独占 (4 卡 disable 其余, 否则 4 条 bar 互相刷屏);
+    # SLURM --output 非 tty, mininterval=10 限流, 避免每步一行 \r 撑爆日志.
+    steps_per_epoch = len(dataloader) // cfg.gradient_accumulation_steps
+    progress_bar = tqdm(
+        total=steps_per_epoch * cfg.num_epochs,
+        desc="HLR train",
+        disable=not accelerator.is_main_process,
+        dynamic_ncols=True,
+        mininterval=10.0,
+    )
     for epoch in range(cfg.num_epochs):
         model.train()
         latent_reasoner.train()
@@ -341,16 +353,19 @@ def train_hlr(cfg: HLRConfig):
             if _DBG and _is_sync:
                 _stamp(f"step {step}: AFTER optimizer.step (sync boundary)")
 
-            epoch_loss += total_loss.item()
+            _loss_val = total_loss.item()
+            epoch_loss += _loss_val
 
             if _is_sync:
                 global_step += 1
+                progress_bar.update(1)
+                progress_bar.set_postfix(loss=f"{_loss_val:.3f}")
 
                 if global_step % cfg.logging_steps == 0 and accelerator.is_main_process:
                     avg_loss = epoch_loss / (step + 1)
                     main_lr = main_scheduler.get_last_lr()[0]
                     lr_lr = lr_scheduler.get_last_lr()[0]
-                    print(
+                    tqdm.write(
                         f"  [epoch {epoch+1}/{cfg.num_epochs}] "
                         f"step {global_step} | "
                         f"loss={avg_loss:.4f} "
@@ -362,6 +377,8 @@ def train_hlr(cfg: HLRConfig):
                     _save_hlr_checkpoint(
                         accelerator, model, latent_reasoner, tokenizer, cfg, global_step
                     )
+
+    progress_bar.close()
 
     # ── 最终保存 ──
     _save_hlr_checkpoint(accelerator, model, latent_reasoner, tokenizer, cfg, "final")
