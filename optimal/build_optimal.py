@@ -27,11 +27,15 @@ from datetime import datetime
 
 import numpy as np
 
-# 允许 `python optimal/build_optimal.py` 与 `python -m optimal.build_optimal` 两种方式
-_HERE = os.path.dirname(os.path.abspath(__file__))
-_ROOT = os.path.dirname(_HERE)
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
+# optimal/ 位于 UniCOP 顶层；问题生成逻辑(problems/、utils/)在 UniCOP-Reason 下。
+# 同时把 UniCOP 根(供 `import optimal.*`)和 UniCOP-Reason(供 `import problems`)加到 path，
+# 兼容 `python -m optimal.build_optimal` 与 `python optimal/build_optimal.py` 两种调用。
+_HERE = os.path.dirname(os.path.abspath(__file__))          # .../UniCOP/optimal
+_UNICOP = os.path.dirname(_HERE)                            # .../UniCOP
+_REASON = os.path.join(_UNICOP, "UniCOP-Reason")           # problems/ utils/ 所在
+for _p in (_UNICOP, _REASON):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from problems import get_problem  # noqa: E402
 from optimal.solvers import solve_instance, SUPPORTED, LKH_BIN  # noqa: E402

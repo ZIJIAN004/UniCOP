@@ -4,6 +4,8 @@
 
 现有 `ref_solver.py` 只是启发式（NN+2opt，注释明确写了 "not meant to be optimal"），仅用于训练 reward 归一化；本模块才是评测用的近最优基线。
 
+> **位置**：本模块在 **UniCOP 仓库根目录**（`UniCOP/optimal/`，与 UniCOP-Reason / UniCOP-Distill 平级），复用 `UniCOP-Reason/problems` 的统一问题生成逻辑（脚本内已自动把 `UniCOP-Reason` 加入 `sys.path`）。
+
 ## 求解器分配
 
 | 问题 | 求解器 | 说明 |
@@ -28,7 +30,7 @@ LKH 二进制        # 可选，仅 TSP；export LKH_BIN=/path/to/LKH
 
 ## 用法
 
-在 `UniCOP-Reason/` 目录下：
+在 **`UniCOP/`（仓库根）目录下**：
 
 ```bash
 # 默认：4 类问题 × n=100 × 1000 实例，单实例 5s
@@ -52,9 +54,12 @@ LKH_BIN=/path/to/LKH python -m optimal.build_optimal --problem_types tsp --sizes
 
 ## 集成到 evaluate.py
 
-`evaluate.py` 目前只输出 `avg_best_dist`，无 gap。接入示意：
+`evaluate.py` 目前只输出 `avg_best_dist`，无 gap。`evaluate.py` 在 `UniCOP-Reason/`，而本模块在仓库根，需先把根目录加入 path。接入示意：
 
 ```python
+import sys, os
+# UniCOP 仓库根（UniCOP-Reason 的上一级），使 `import optimal` 可用
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from optimal.loader import load_costs, optimality_gap
 
 # evaluate_single 内，已有 best_dists（每个实例最优可行解距离；不可行实例补 None）
