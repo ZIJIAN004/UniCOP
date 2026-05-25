@@ -54,7 +54,7 @@ elif [ -d "/homes/zhuoyi/zijianliu" ]; then
     PIPD_CKPT_DIR=""  # TODO
     # ── 环境 ──
     CUDA_HOME="/homes/zhuoyi/miniforge3/envs/unicop"
-    LKH_BIN="/homes/zhuoyi/zijianliu/LKH-3.0.9/LKH"
+    LKH_BIN="/homes/zhuoyi/zijianliu/LKH-3.0.13/LKH"
     # ── 模型路径（两套候选） ──
     BASE_MODEL_R1="/homes/zhuoyi/zijianliu/models/DeepSeek-R1-Distill-Qwen-7B"
     BASE_MODEL_QWEN3="/homes/zhuoyi/zijianliu/models/Qwen3-4B-Thinking-2507"
