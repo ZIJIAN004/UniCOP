@@ -164,25 +164,23 @@ def train_hlr(cfg: HLRConfig):
 
     # ── 主模型 ──
     _stamp("before from_pretrained (main model)")
-    # attn_implementation: 优先 flash_attention_2 — 不 materialize O(T²) 注意力矩阵,
-    # 既提速又省显存. teacher+student 两次长序列 forward + GC 重算, 收益翻倍 (同时缓解
-    # cache-flush 抖动). flash-attn 未装则回退 sdpa (PyTorch 内置, 也比 eager 快/省).
-    _attn_impl = "flash_attention_2"
+    # attn_implementation=sdpa: PyTorch 内置高效注意力 (自动选 flash/mem-efficient kernel,
+    # 不 materialize O(T²) 注意力矩阵), 不依赖外部 flash-attn 包. 不支持则回退 HF 默认.
     try:
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_name,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
-            attn_implementation=_attn_impl,
+            attn_implementation="sdpa",
         )
-    except (ImportError, ValueError, RuntimeError):
         _attn_impl = "sdpa"
+    except (ValueError, RuntimeError):
         model = AutoModelForCausalLM.from_pretrained(
             cfg.model_name,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
-            attn_implementation=_attn_impl,
         )
+        _attn_impl = "default"
     if accelerator.is_main_process:
         print(f"  attn_implementation = {_attn_impl}")
     _stamp("after from_pretrained (main model)")
