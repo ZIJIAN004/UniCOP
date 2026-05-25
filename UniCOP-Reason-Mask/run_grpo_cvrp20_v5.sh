@@ -42,8 +42,8 @@ export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export NCCL_DEBUG=WARN
 export PYTHONFAULTHANDLER=1
-export NCCL_P2P_DISABLE=1
-export NCCL_SHM_DISABLE=1
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"   # zhuoyi 防 hang 默认禁；zhihan 单机可 export 0 走 P2P 省显存
+export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
 
 # ── 配置 ──────────────────────────────────────────────────────────────
 PROBLEM="cvrp"
@@ -71,7 +71,7 @@ NUM_TRAIN=4000
 OUTPUT_DIR_BASE="$WORK_DIR/output_v5"
 
 VLLM_PORT=8004
-VLLM_GPU_MEM_UTIL=0.85
+VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.85}"   # 可 env 覆盖；NCCL init OOM 调小、KV 不够调大
 VLLM_MAX_MODEL_LEN=8192
 VLLM_DTYPE=bfloat16
 VLLM_STARTUP_TIMEOUT=300
