@@ -28,6 +28,7 @@
 import argparse
 import json
 import math
+import random
 from datetime import datetime
 
 # 复用正向生成器：解析、逐步构建、验证、格式化 —— 保证格式逐字节一致
@@ -193,35 +194,51 @@ def main():
                         help="输入 solutions JSONL（与正向同源）")
     parser.add_argument("--output", required=True,
                         help="输出 reverse chains JSONL")
+    parser.add_argument("--sample", type=int, default=0,
+                        help="随机抽取多少条作为反向数据（0=不随机抽样），需配合 --seed")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="随机抽样种子（保证可复现）")
     parser.add_argument("--limit", type=int, default=0,
-                        help="最多处理多少条（0=全部），用于样例/消融")
+                        help="顺序取前 N 条（0=全部）；--sample>0 时忽略本项")
     args = parser.parse_args()
 
+    # 读取全部输入记录
+    records = []
+    for path in args.input:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(line)
+    print(f"读取 {len(records)} 条 solutions")
+
+    # 随机抽样：按种子打乱顺序后，依次处理直到凑够 sample 条成功输出（跳过的不计入）
+    if args.sample > 0:
+        rng = random.Random(args.seed)
+        rng.shuffle(records)
+        target = args.sample
+        print(f"随机抽样模式: 目标 {target} 条 (seed={args.seed})")
+    else:
+        target = args.limit if args.limit > 0 else None
+
     success, fail = 0, 0
-    done = False
     with open(args.output, "w", encoding="utf-8") as out_f:
-        for path in args.input:
-            if done:
+        for line in records:
+            rec = json.loads(line)
+            result = process_record_reverse(rec)
+            if result:
+                out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                success += 1
+            else:
+                fail += 1
+            if target is not None and success >= target:
                 break
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rec = json.loads(line)
-                    result = process_record_reverse(rec)
-                    if result:
-                        out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
-                        success += 1
-                    else:
-                        fail += 1
-                    if args.limit and success >= args.limit:
-                        done = True
-                        break
 
     print(f"完成: {success} 条 reverse chain")
     if fail:
         print(f"跳过/失败: {fail} 条（非 CVRP / 单路线 / 解析失败）")
+    if args.sample > 0 and success < args.sample:
+        print(f"⚠️ 有效记录不足，仅得 {success}/{args.sample} 条")
     print(f"输出: {args.output}")
 
 
