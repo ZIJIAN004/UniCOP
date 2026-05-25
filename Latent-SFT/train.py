@@ -27,7 +27,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedul
 
 from hlr_config import HLRConfig
 from data_utils import HLRDataset, collate_hlr
-from model import build_latent_reasoner_from_main, compute_hlr_loss
+from model import (
+    build_latent_reasoner_from_main,
+    compute_hlr_loss,
+    hlr_timer,
+    hlr_timing_add,
+    hlr_timing_report,
+    hlr_timing_tick_microstep,
+)
 
 
 # ── Rank-level 时间戳打点 (用于定位 ZeRO-3 hang 发生在哪一步) ──────────────
@@ -298,7 +305,10 @@ def train_hlr(cfg: HLRConfig):
         # main_optimizer/scheduler 走 DeepSpeed wrap, 始终调用即可;
         # lr_optimizer/scheduler 不在 DeepSpeed 内, 用 _is_sync 手动门控.
         _ga = cfg.gradient_accumulation_steps
+        _t_data_prev = time.perf_counter()
         for step, batch in enumerate(dataloader):
+            hlr_timing_add("data_fetch", time.perf_counter() - _t_data_prev)
+            hlr_timing_tick_microstep()
             _is_sync = ((step + 1) % _ga == 0)
             # 前 3 步打细 stamp (定位 hang 用)
             _DBG = step < 3
@@ -324,34 +334,36 @@ def train_hlr(cfg: HLRConfig):
                        f"(t={t_loss.item():.3f} s={s_loss.item():.3f} "
                        f"a={a_loss.item():.3f})")
 
-            accelerator.backward(total_loss)
+            with hlr_timer("backward"):
+                accelerator.backward(total_loss)
             if _DBG:
                 _stamp(f"step {step}: AFTER accelerator.backward")
 
-            if _is_sync:
-                # 多卡 LatentReasoner 梯度手动 all-reduce (LR 没进 DeepSpeed sharding)
-                if accelerator.num_processes > 1:
-                    for p in latent_reasoner.parameters():
-                        if p.grad is not None:
-                            torch.distributed.all_reduce(
-                                p.grad, op=torch.distributed.ReduceOp.AVG
-                            )
+            with hlr_timer("optim"):
+                if _is_sync:
+                    # 多卡 LatentReasoner 梯度手动 all-reduce (LR 没进 DeepSpeed sharding)
+                    if accelerator.num_processes > 1:
+                        for p in latent_reasoner.parameters():
+                            if p.grad is not None:
+                                torch.distributed.all_reduce(
+                                    p.grad, op=torch.distributed.ReduceOp.AVG
+                                )
 
-                accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
-                torch.nn.utils.clip_grad_norm_(
-                    latent_reasoner.parameters(), cfg.max_grad_norm
-                )
+                    accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(
+                        latent_reasoner.parameters(), cfg.max_grad_norm
+                    )
 
-                lr_optimizer.step()
-                lr_scheduler.step()
-                lr_optimizer.zero_grad()
+                    lr_optimizer.step()
+                    lr_scheduler.step()
+                    lr_optimizer.zero_grad()
 
-            # main_optimizer 走 DeepSpeed wrap, 内部按 GA boundary 自动跳过非 boundary
-            main_optimizer.step()
-            main_scheduler.step()
-            main_optimizer.zero_grad()
-            if _DBG and _is_sync:
-                _stamp(f"step {step}: AFTER optimizer.step (sync boundary)")
+                # main_optimizer 走 DeepSpeed wrap, 内部按 GA boundary 自动跳过非 boundary
+                main_optimizer.step()
+                main_scheduler.step()
+                main_optimizer.zero_grad()
+                if _DBG and _is_sync:
+                    _stamp(f"step {step}: AFTER optimizer.step (sync boundary)")
 
             _loss_val = total_loss.item()
             epoch_loss += _loss_val
@@ -360,6 +372,10 @@ def train_hlr(cfg: HLRConfig):
                 global_step += 1
                 progress_bar.update(1)
                 progress_bar.set_postfix(loss=f"{_loss_val:.3f}")
+
+                # 所有 rank 都报分段计时 (对比各 rank barrier_wait 看负载失衡)
+                if global_step % cfg.logging_steps == 0:
+                    hlr_timing_report(accelerator.process_index, global_step)
 
                 if global_step % cfg.logging_steps == 0 and accelerator.is_main_process:
                     avg_loss = epoch_loss / (step + 1)
@@ -377,6 +393,9 @@ def train_hlr(cfg: HLRConfig):
                     _save_hlr_checkpoint(
                         accelerator, model, latent_reasoner, tokenizer, cfg, global_step
                     )
+
+            # 本 micro-step 结束, 重置 data_fetch 计时锚点 (测下一步 dataloader 等待)
+            _t_data_prev = time.perf_counter()
 
     progress_bar.close()
 

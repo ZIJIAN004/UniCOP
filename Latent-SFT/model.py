@@ -38,6 +38,71 @@ def _loss_stamp(msg: str) -> None:
           flush=True)
 
 
+# ── wall-clock 分段计时 (export HLR_TIMING=1 开启) ───────────────────────
+# 目的: 把每个 micro-step 的真实 wall-clock 拆到各段, 定位慢点到底在哪.
+# CUDA 异步, 故每段边界 torch.cuda.synchronize() 后再读 perf_counter, 把 GPU
+# kernel 时间正确归到段内 (代价: 序列化, 绝对值略偏高, 但各段占比可信).
+# barrier 段: __enter__ 先 sync 自己的活, 再计 barrier() 耗时 = 纯等待最慢 rank.
+# 关闭时零开销 (只多一次 bool 判断).
+from collections import defaultdict as _defaultdict
+
+_HLR_TIMING = os.environ.get("HLR_TIMING", "0") == "1"
+_T_ACC = _defaultdict(float)   # label -> 窗口内累计秒
+_T_MICROSTEPS = 0              # 窗口内 micro-step 数
+
+
+def _t_sync() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+class hlr_timer:
+    """with hlr_timer('teacher_fwd'): ...  — 累计该段 wall-clock (含 GPU)。"""
+
+    __slots__ = ("label", "_t")
+
+    def __init__(self, label: str):
+        self.label = label
+
+    def __enter__(self):
+        if _HLR_TIMING:
+            _t_sync()
+            self._t = time.perf_counter()
+        return self
+
+    def __exit__(self, *exc):
+        if _HLR_TIMING:
+            _t_sync()
+            _T_ACC[self.label] += time.perf_counter() - self._t
+        return False
+
+
+def hlr_timing_add(label: str, seconds: float) -> None:
+    """手动累计一段 (用于 data_fetch 等纯 host 段, 不 sync)。"""
+    if _HLR_TIMING:
+        _T_ACC[label] += seconds
+
+
+def hlr_timing_tick_microstep() -> None:
+    global _T_MICROSTEPS
+    if _HLR_TIMING:
+        _T_MICROSTEPS += 1
+
+
+def hlr_timing_report(rank: int, global_step: int) -> None:
+    """每 logging_steps 调一次 (所有 rank 都调), 打印窗口分段均值+占比并清零。"""
+    global _T_MICROSTEPS
+    if not _HLR_TIMING or _T_MICROSTEPS == 0:
+        return
+    total = sum(_T_ACC.values()) or 1e-9
+    n = _T_MICROSTEPS
+    parts = sorted(_T_ACC.items(), key=lambda kv: -kv[1])
+    body = "  ".join(f"{k}={v / n * 1000:6.0f}ms/{v / total * 100:4.1f}%" for k, v in parts)
+    print(f"[TIMING r{rank} step{global_step} n={n} ~{total / n:.2f}s/micro] {body}", flush=True)
+    _T_ACC.clear()
+    _T_MICROSTEPS = 0
+
+
 class SimpleRMSNorm(nn.Module):
     """轻量 RMSNorm。bf16 训练下在 fp32 算 variance，避免数值问题。"""
 
@@ -551,12 +616,13 @@ def compute_hlr_loss(
 
     # ── (1) Teacher forward 一次 ──
     _loss_stamp("BEFORE teacher model.forward")
-    teacher_out = model(
-        input_ids=teacher_input_ids,
-        attention_mask=teacher_attention_mask,
-        labels=teacher_labels,
-        output_hidden_states=True,
-    )
+    with hlr_timer("teacher_fwd"):
+        teacher_out = model(
+            input_ids=teacher_input_ids,
+            attention_mask=teacher_attention_mask,
+            labels=teacher_labels,
+            output_hidden_states=True,
+        )
     _loss_stamp("AFTER teacher model.forward")
     teacher_loss = teacher_out.loss
     teacher_hidden_states = teacher_out.hidden_states  # tuple of (L+1) × [1, T, H]
@@ -610,8 +676,9 @@ def compute_hlr_loss(
 
     all_text_ids = torch.cat(text_seg_ids_to_concat, dim=0)  # [total_text_len]
     _loss_stamp(f"BEFORE single embed_module call (total_text_len={all_text_ids.size(0)})")
-    with gather_ctx:
-        all_text_embeds = embed_module(all_text_ids).clone()   # [total_text_len, H]
+    with hlr_timer("embed_gather"):
+        with gather_ctx:
+            all_text_embeds = embed_module(all_text_ids).clone()   # [total_text_len, H]
     _loss_stamp("AFTER single embed_module call (gather_ctx exited)")
 
     # split 回各段
@@ -649,7 +716,8 @@ def compute_hlr_loss(
             in_pos = min(max(in_pos, 0), T_teacher - 1)
             h_input = teacher_hidden_states[-1][:, in_pos, :].detach()
             # LR forward 是 pure local (LR 不在 ZeRO-3 wrap, 修复后), 不触发 collective
-            layer_hiddens, _ = latent_reasoner(h_input, k=k)
+            with hlr_timer("lr_fwd"):
+                layer_hiddens, _ = latent_reasoner(h_input, k=k)
             top_hidden = layer_hiddens[-1]
             latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)
             student_embeds_parts.append(latent_inputs_embeds)
@@ -675,50 +743,59 @@ def compute_hlr_loss(
     # collective 仍要求 4 rank 同步 entry.
     if torch.distributed.is_initialized():
         _loss_stamp("BEFORE barrier (sync 4 ranks to student forward entry)")
-        torch.distributed.barrier()
+        with hlr_timer("barrier_wait"):
+            torch.distributed.barrier()
         _loss_stamp("AFTER barrier (all 4 ranks aligned)")
 
     _loss_stamp(f"BEFORE student forward (student_len={student_embeds.size(1)})")
 
     # ── (3) Student forward 一次 (GC 友好, 不需 use_cache) ──
-    student_out = model(
-        inputs_embeds=student_embeds,
-        labels=student_labels,
-        # 不开 output_hidden_states (Phase 1 不用 student hidden), 省显存
-    )
+    with hlr_timer("student_fwd"):
+        student_out = model(
+            inputs_embeds=student_embeds,
+            labels=student_labels,
+            # 不开 output_hidden_states (Phase 1 不用 student hidden), 省显存
+        )
     _loss_stamp("AFTER student forward")
     student_loss = student_out.loss
     if student_loss is None:
         # 全 -100 边界情况 (理论上不会发生, 至少有 solution segment)
         student_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
-    # ── (4) Align loss: 每段末位 × 每主模型层 ──
-    align_loss_sum = torch.tensor(0.0, device=device)
-    align_seg_count = 0
-    num_main_layers = latent_reasoner.num_main_layers
+    # ── (4) Align loss: 每段末位 × 每主模型层 (向量化, 踩坑 #3 优化) ──
+    # 旧版: 每段内 36 层各调 1 次 project_for_main_layer (含 up_proj) + 每次
+    #       torch.tensor(L, device=) 一次 host→device 同步 → 288 次小 op + 同步/样本.
+    # 新版: main→LR 映射 + 全层 layer_emb 段间不变, 预计算一次; up_proj 只作用于
+    #       段末位 ([:, -1, :]), 36 层堆叠成一次 batched matmul. 数值完全等价 (B=1).
+    with hlr_timer("align"):
+        align_loss_sum = torch.tensor(0.0, device=device)
+        align_seg_count = 0
+        nm = latent_reasoner.num_main_layers
+        # main 层 → LR 层映射 (L // share_ratio, clamp 到末层) + 全层 layer_emb
+        main_to_lr = (torch.arange(nm, device=device) // latent_reasoner.share_ratio).clamp(
+            max=latent_reasoner.num_layers - 1
+        )                                                                # [nm]
+        layer_emb_all = latent_reasoner.layer_emb(torch.arange(nm, device=device))  # [nm, H_lr]
 
-    for layer_hiddens, teacher_align_pos in align_records:
-        teacher_align_pos = min(max(teacher_align_pos, 0), T_teacher - 1)
-        seg_align = torch.tensor(0.0, device=device)
-        for L_main in range(num_main_layers):
-            teacher_hs_idx = L_main + 1   # skip embedding [0]
-            h_lr_main = latent_reasoner.project_for_main_layer(
-                layer_hiddens, L_main
-            )[:, -1, :]   # [1, H_main]  段末位 LR 输出
-            h_teacher = teacher_hidden_states[teacher_hs_idx][
-                :, teacher_align_pos, :
-            ].detach()    # [1, H_main]  teacher 段末位 (stop-grad)
-            std = h_teacher.std(dim=-1).mean().clamp(min=0.1)
-            seg_align = seg_align + (h_lr_main - h_teacher).abs().mean() / std
+        for layer_hiddens, teacher_align_pos in align_records:
+            pos = min(max(teacher_align_pos, 0), T_teacher - 1)
+            # LR 各层段末位 hidden → 按 main_to_lr 展开到 nm 层, 一次 up_proj
+            last = torch.stack([lh[:, -1, :] for lh in layer_hiddens], dim=0)  # [nlr, B, H_lr]
+            h_mod = last[main_to_lr] + layer_emb_all.unsqueeze(1)             # [nm, B, H_lr]
+            h_lr_main = latent_reasoner.up_proj(h_mod)                        # [nm, B, H_main]
+            # teacher 各主模型层段末位 (skip embedding[0], stop-grad)
+            teacher_all = torch.stack(
+                [teacher_hidden_states[L + 1][:, pos, :] for L in range(nm)], dim=0
+            ).detach()                                                       # [nm, B, H_main]
+            std = teacher_all.std(dim=-1).clamp(min=0.1)                     # [nm, B]
+            seg_align = ((h_lr_main - teacher_all).abs().mean(dim=-1) / std).mean()
+            align_loss_sum = align_loss_sum + seg_align
+            align_seg_count += 1
 
-        seg_align = seg_align / num_main_layers
-        align_loss_sum = align_loss_sum + seg_align
-        align_seg_count += 1
-
-    if align_seg_count > 0:
-        align_loss = align_loss_sum / align_seg_count
-    else:
-        align_loss = torch.tensor(0.0, device=device)
+        if align_seg_count > 0:
+            align_loss = align_loss_sum / align_seg_count
+        else:
+            align_loss = torch.tensor(0.0, device=device)
 
     total_loss = alpha * student_loss + beta * align_loss + gamma * teacher_loss
 
