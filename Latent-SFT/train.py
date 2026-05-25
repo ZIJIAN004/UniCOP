@@ -82,7 +82,14 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "reduce_bucket_size": "auto",
             "stage3_prefetch_bucket_size": "auto",
             "stage3_param_persistence_threshold": "auto",
+            "stage3_max_live_parameters": 1e9,
+            "stage3_max_reuse_distance": 1e9,
             "gather_16bit_weights_on_model_save": True,
+            # 优化器状态 offload 到 CPU: 释放 GPU 显存, 缓解 HLR 双 forward +
+            # output_hidden_states 的显存压力 (cache flush 抖动). 与 UniCOP-Distill SFT 一致.
+            # 注: 只 offload DeepSpeed 管理的主(LoRA)优化器; LatentReasoner 的 lr_optimizer
+            #     在 DeepSpeed 外, 仍在 GPU (137M, 不大).
+            "offload_optimizer": {"device": "cpu", "pin_memory": True},
         }
 
     # ── ZeRO 通信剖分 (export HLR_DS_PROFILE=1 开启) ──
@@ -157,11 +164,27 @@ def train_hlr(cfg: HLRConfig):
 
     # ── 主模型 ──
     _stamp("before from_pretrained (main model)")
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_name,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-    )
+    # attn_implementation: 优先 flash_attention_2 — 不 materialize O(T²) 注意力矩阵,
+    # 既提速又省显存. teacher+student 两次长序列 forward + GC 重算, 收益翻倍 (同时缓解
+    # cache-flush 抖动). flash-attn 未装则回退 sdpa (PyTorch 内置, 也比 eager 快/省).
+    _attn_impl = "flash_attention_2"
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            cfg.model_name,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            attn_implementation=_attn_impl,
+        )
+    except (ImportError, ValueError, RuntimeError):
+        _attn_impl = "sdpa"
+        model = AutoModelForCausalLM.from_pretrained(
+            cfg.model_name,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            attn_implementation=_attn_impl,
+        )
+    if accelerator.is_main_process:
+        print(f"  attn_implementation = {_attn_impl}")
     _stamp("after from_pretrained (main model)")
 
     if len(tokenizer) > model.get_input_embeddings().num_embeddings:
@@ -359,13 +382,19 @@ def train_hlr(cfg: HLRConfig):
 
             with hlr_timer("optim"):
                 if _is_sync:
-                    # 多卡 LatentReasoner 梯度手动 all-reduce (LR 没进 DeepSpeed sharding)
+                    # 多卡 LatentReasoner 梯度手动 all-reduce (LR 没进 DeepSpeed sharding).
+                    # 展平成一个 buffer 做 *一次* all-reduce, 而非每个 param 张量一次:
+                    # LR 有几十个 param 张量, socket 每次 collective 延迟高, 合并 N→1 省时间.
                     if accelerator.num_processes > 1:
-                        for p in latent_reasoner.parameters():
-                            if p.grad is not None:
-                                torch.distributed.all_reduce(
-                                    p.grad, op=torch.distributed.ReduceOp.AVG
-                                )
+                        _lr_grads = [p.grad for p in latent_reasoner.parameters()
+                                     if p.grad is not None]
+                        if _lr_grads:
+                            _flat = torch._utils._flatten_dense_tensors(_lr_grads)
+                            torch.distributed.all_reduce(_flat, op=torch.distributed.ReduceOp.AVG)
+                            for _g, _synced in zip(
+                                _lr_grads, torch._utils._unflatten_dense_tensors(_flat, _lr_grads)
+                            ):
+                                _g.copy_(_synced)
 
                     accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
                     torch.nn.utils.clip_grad_norm_(
