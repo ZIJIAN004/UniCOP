@@ -4,14 +4,15 @@ optimal/build_optimal.py
 optimality gap 使用。本脚本【不再生成实例】，只读冻结文件——请先跑阶段一：
   python -m optimal.generate_testset
 
-求解器：TSP→LKH（未配 LKH_BIN 回退 PyVRP），CVRP/TSPTW/VRPTW→PyVRP/HGS。
+求解器：TSP→LKH（缺 LKH_BIN 直接报错，不回退），CVRP/TSPTW/VRPTW→PyVRP/HGS。
+求最优：LKH 调大 --lkh_runs；HGS 调大 --timeout。
 cost 与 evaluate.py 的 get_tour_distance 同口径（原始坐标欧氏边长）。
 
 缓存 costs[i] 与冻结实例第 i 个一一对应；前缀一致：用 --num_test K 只求前 K 个。
 
-用法（在 UniCOP 仓库根目录下）：
-  python -m optimal.build_optimal --sizes 20 50 100 --timeout 5 --workers 8
-  python -m optimal.build_optimal --problem_types tsp cvrp --sizes 50 --num_test 200
+用法（在 UniCOP 仓库根目录下，集群上 LKH_BIN 由 paths.sh 自动 export）：
+  python -m optimal.build_optimal --sizes 20 50 100 --timeout 30 --lkh_runs 10 --workers 8
+  python -m optimal.build_optimal --problem_types cvrp vrptw --sizes 50 --num_test 200
   LKH_BIN=/path/to/LKH python -m optimal.build_optimal --problem_types tsp   # TSP 用 LKH
 """
 
@@ -108,7 +109,7 @@ def build_one(problem_type: str, n: int, num_test, seed: int,
         "num_test": num,
         "solver": solver_used,
         "timeout": timeout,
-        "lkh_bin": lkh_bin or "(none, pyvrp fallback)",
+        "lkh_bin": lkh_bin or "(none)",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "elapsed_sec": round(elapsed, 1),
         "infeasible_count": len(infeasible),
