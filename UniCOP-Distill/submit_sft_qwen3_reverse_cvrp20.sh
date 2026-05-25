@@ -119,11 +119,55 @@ python UniCOP-Distill/stage1_solution/merge_adapter.py \
 if [ ! -f "$OUTPUT_DIR/final_model/config.json" ]; then
     echo "ERROR: merge 后未生成 config.json"; exit 1
 fi
-notify "Reverse SFT 全部完成" "模型: $OUTPUT_DIR/final_model"
+notify "Reverse SFT Step2 完成 (merge)" "模型: $OUTPUT_DIR/final_model"
+
+# ══════════════════════════════════════════════════════════════════════
+# Step 3: 评估 —— forward CVRP-20 上对比 baseline(forward 模型) vs reverse 训练后
+#   evaluate.py 测试实例用固定 seed=9999 → 两个模型评同一批 100 实例，可直接对比。
+#   看"提升了多少"：parse=format_match_rate, feas=global_feasibility_rate,
+#   dist=avg_best_dist(越低越好；只在可行实例上算)。
+# ══════════════════════════════════════════════════════════════════════
+trap - ERR   # eval 阶段失败不算训练失败（模型已保存），不再触发失败通知
+echo ""
+echo ">>> Step 3: 评估 forward CVRP-20 (baseline vs reverse) ($(date))"
+
+REASON_DIR=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason
+EVAL_DIR="$OUTPUT_DIR/eval_results"
+EVAL_TEMP=0.6   # 与 submit_sft_qwen3_full.sh 评估协议一致
+
+cd "$REASON_DIR"
+
+echo "  [eval] baseline = forward 模型 ($MODEL)"
+python evaluate.py --backend local \
+    --model_path "$MODEL" \
+    --problem cvrp --problem_size 20 --model_type reasoning \
+    --max_completion_length 4096 --num_test 100 --num_samples 1 \
+    --batch_size 4 --temperature $EVAL_TEMP \
+    --save_dir "$EVAL_DIR/baseline"
+
+echo "  [eval] after reverse SFT = $OUTPUT_DIR/final_model"
+python evaluate.py --backend local \
+    --model_path "$OUTPUT_DIR/final_model" \
+    --problem cvrp --problem_size 20 --model_type reasoning \
+    --max_completion_length 4096 --num_test 100 --num_samples 1 \
+    --batch_size 4 --temperature $EVAL_TEMP \
+    --save_dir "$EVAL_DIR/reverse"
+
+cd /homes/zhuoyi/zijianliu/UniCOP
+
+# ── 对比打印（同一批 100 实例）──
+_jqfmt='.results[0] | "parse=\(.format_match_rate)  feas=\(.global_feasibility_rate)  dist=\(.avg_best_dist)"'
+_b=$(jq -r "$_jqfmt" "$EVAL_DIR/baseline"/*.json 2>/dev/null | head -1)
+_r=$(jq -r "$_jqfmt" "$EVAL_DIR/reverse"/*.json  2>/dev/null | head -1)
 
 echo ""
 echo "============================================================"
-echo "  完成! $(date)"
+echo "  完成! $(date)  —— forward CVRP-20, 同一批 100 实例 (seed=9999)"
 echo "  合并模型: $OUTPUT_DIR/final_model"
-echo "  （如需评估: 用 UniCOP-Reason/evaluate.py，参考 submit_sft_qwen3_full.sh Step3）"
+echo "  ----------------------------------------------------------"
+echo "  before (forward baseline) : $_b"
+echo "  after  (reverse SFT)      : $_r"
+echo "  (dist 越低越好; parse/feas 越高越好)"
 echo "============================================================"
+
+notify "Reverse SFT + eval 全部完成" "baseline: $_b || reverse: $_r"
