@@ -52,6 +52,19 @@ export TORCH_NCCL_TRACE_BUFFER_SIZE=20480
 export TORCH_NCCL_DUMP_ON_TIMEOUT=1
 export NCCL_DEBUG=WARN
 
+# ── 诊断模式 (一行开启, 不必手改脚本) ──────────────────────────────────
+#   HLR_DIAG=1 ... sbatch Latent-SFT/submit_train_hlr.sh
+# 开启后:
+#   - HLR_TIMING=1     : 每 micro-step 分段 wall-clock (teacher/student fwd / barrier / align / backward / optim)
+#   - HLR_DS_PROFILE=1 : DeepSpeed wall_clock_breakdown + comms_logger
+#                        (all_gather=参数聚合 / reduce_scatter=梯度规约 的 调用数/数据量/总耗时)
+#   - 训练侧 --limit HLR_DIAG_LIMIT (默认 128) + --logging_steps HLR_DIAG_LOGGING (默认 2)
+#     → 只跑少量样本高频打点, ~30min 出剖分, 不必等完整训练.
+if [ "${HLR_DIAG:-0}" = "1" ]; then
+    export HLR_TIMING=1
+    export HLR_DS_PROFILE=1
+fi
+
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop
@@ -177,6 +190,15 @@ echo "      Qwen3-4B: 36 main layers → 9 LR layers, hidden 2560/4=640"
 echo "      R1-7B:    28 main layers → 7 LR layers, hidden 3584/4=896"
 echo ""
 
+# 诊断模式: 只跑前 N 条 + 高频打点; 正常模式: 全量 + logging_steps=10 (行为不变)
+DIAG_FLAGS=""
+LOGGING_STEPS=10
+if [ "${HLR_DIAG:-0}" = "1" ]; then
+    DIAG_FLAGS="--limit ${HLR_DIAG_LIMIT:-128}"
+    LOGGING_STEPS="${HLR_DIAG_LOGGING:-2}"
+    echo "  ⚡ HLR_DIAG=1 诊断模式: $DIAG_FLAGS  --logging_steps $LOGGING_STEPS  (HLR_TIMING=$HLR_TIMING HLR_DS_PROFILE=$HLR_DS_PROFILE)"
+fi
+
 accelerate launch --num_processes 4 --main_process_port 29700 \
     Latent-SFT/train.py \
     --model "$MODEL_PATH" \
@@ -185,7 +207,8 @@ accelerate launch --num_processes 4 --main_process_port 29700 \
     --zero_stage 3 \
     --gradient_checkpointing \
     --output_dir "$OUTPUT_DIR" \
-    --logging_steps 10 --save_steps 200
+    --logging_steps $LOGGING_STEPS --save_steps 200 \
+    $DIAG_FLAGS
 
 TRAIN_EXIT=$?
 
