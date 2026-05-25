@@ -85,16 +85,17 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "gather_16bit_weights_on_model_save": True,
         }
 
-    # ── ZeRO 通信 vs 计算剖分 (export HLR_DS_PROFILE=1 开启) ──
-    # wall_clock_breakdown: DeepSpeed 每 steps_per_print 自动打印
-    #   fwd / bwd / bwd_inner(计算, 含 GC 重算) / bwd_allreduce(ZeRO 下=reduce_scatter 梯度规约) / step.
+    # ── ZeRO 通信剖分 (export HLR_DS_PROFILE=1 开启) ──
     # comms_logger(prof_all): 在 comm wrapper 层记录每类 collective 的 调用数/数据量/总耗时,
     #   走 socket(无 NVLink) 也能正确计时 (不依赖 GPU kernel, 故不会漏掉 socket 等待).
     #   all_gather = ZeRO-3 参数按层聚合 (fwd 各层 + bwd GC 重算各层); reduce_scatter = 梯度规约.
     #   训练循环里定期调 deepspeed.comm.log_summary() 打印汇总 (见 train_hlr 主循环).
+    # ⚠ 不能开 wall_clock_breakdown: 它给 engine 装 fwd/bwd_microstep 计时器, 假设严格
+    #   1 forward : 1 backward. 本项目一次 backward 前跑两次 forward (teacher + student)
+    #   → 注册两个 backward-prologue 钩子 → bwd_microstep 被 start 两次 → AssertionError
+    #   "bwd_microstep timer has already been started" 崩溃 (DeepSpeed#617 自定义循环已知坑).
+    #   fwd/bwd 的 wall-clock 拆分改由 hlr_timer (teacher_fwd/student_fwd/backward) 提供.
     if os.environ.get("HLR_DS_PROFILE", "0") == "1":
-        base["wall_clock_breakdown"] = True
-        base["steps_per_print"] = 2
         base["comms_logger"] = {
             "enabled": True,
             "verbose": False,

@@ -56,7 +56,7 @@ export NCCL_DEBUG=WARN
 #   HLR_DIAG=1 ... sbatch Latent-SFT/submit_train_hlr.sh
 # 开启后:
 #   - HLR_TIMING=1     : 每 micro-step 分段 wall-clock (teacher/student fwd / barrier / align / backward / optim)
-#   - HLR_DS_PROFILE=1 : DeepSpeed wall_clock_breakdown + comms_logger
+#   - HLR_DS_PROFILE=1 : DeepSpeed comms_logger
 #                        (all_gather=参数聚合 / reduce_scatter=梯度规约 的 调用数/数据量/总耗时)
 #   - 训练侧 --limit HLR_DIAG_LIMIT (默认 128) + --logging_steps HLR_DIAG_LOGGING (默认 2)
 #     → 只跑少量样本高频打点, ~30min 出剖分, 不必等完整训练.
