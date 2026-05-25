@@ -1,6 +1,10 @@
 """
 optimal/loader.py
-读取 build_optimal.py 生成的基线缓存，计算 optimality gap。
+读取冻结实例(generate_testset)与基线缓存(build_optimal)，计算 optimality gap。
+
+  load_instances  读 optimal/instances/ 的冻结实例（求解、评测共用同一批）
+  load_costs      读 optimal/cache/ 的近最优 cost
+  optimality_gap  由模型距离与 cost 算 gap
 
 集成到 evaluate.py（示意）：
     from optimal.loader import load_costs, optimality_gap
@@ -17,6 +21,43 @@ import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_CACHE = os.path.join(_HERE, "cache")
+_DEFAULT_INSTANCES = os.path.join(_HERE, "instances")
+
+
+def _find_by_prefix(prefix: str, directory: str, min_n: int | None) -> str | None:
+    """在 directory 找形如 {prefix}{N}.json 的文件；min_n=None 取最大 N，否则取 >=min_n 的最小 N。"""
+    cands = []
+    if os.path.isdir(directory):
+        for fn in os.listdir(directory):
+            if fn.startswith(prefix) and fn.endswith(".json"):
+                big_n = int(fn[len(prefix):-len(".json")])
+                if min_n is None or big_n >= min_n:
+                    cands.append((big_n, os.path.join(directory, fn)))
+    if not cands:
+        return None
+    return (max(cands)[1] if min_n is None
+            else min(cands, key=lambda x: x[0])[1])
+
+
+def load_instances(problem_type: str, n: int, seed: int = 9999,
+                   num_test: int | None = None,
+                   inst_dir: str = _DEFAULT_INSTANCES) -> list[dict]:
+    """
+    读取冻结实例。num_test=None 返回全部；否则返回前 num_test 个（前缀一致）。
+    找不到精确 N 时回退到 N>=请求值的最小文件取前缀；num_test=None 时取最大文件。
+    """
+    prefix = f"{problem_type}_n{n}_seed{seed}_N"
+    path = _find_by_prefix(prefix, inst_dir, min_n=num_test)
+    if path is None:
+        raise FileNotFoundError(
+            f"找不到 {problem_type} n={n} seed={seed} 的冻结实例于 {inst_dir}。"
+            f"先运行: python -m optimal.generate_testset "
+            f"--problem_types {problem_type} --sizes {n} --seed {seed}"
+        )
+    with open(path, encoding="utf-8") as f:
+        payload = json.load(f)
+    insts = payload["instances"]
+    return insts[:num_test] if num_test is not None else insts
 
 
 def cache_path(problem_type: str, n: int, num_test: int, seed: int = 9999,

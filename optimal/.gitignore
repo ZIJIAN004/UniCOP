@@ -1,3 +1,6 @@
-# 基线缓存由 build_optimal.py 生成，不入库（可随时重算）
+# 冻结实例(generate_testset)与基线缓存(build_optimal)默认不入库：
+# seed 固定 + generate_instance 确定性 → 可随时一字不差重生成。
+# 若想把这批实例字节级永久固定，可 `git add -f instances/`。
+instances/
 cache/
 __pycache__/

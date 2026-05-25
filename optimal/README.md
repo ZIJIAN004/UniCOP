@@ -21,36 +21,53 @@
 ## 依赖（轻量，独立于训练栈）
 
 ```
-numpy
-pyvrp            # pip install pyvrp
+numpy            # 阶段一（生成实例）仅需 numpy
+pyvrp            # 阶段二（求解）需要，pip install pyvrp
 LKH 二进制        # 可选，仅 TSP；export LKH_BIN=/path/to/LKH
 ```
 
 不依赖 torch / vllm / deepspeed / datasets，可在任意机器单独跑。
 
-## 用法
+## 用法：两阶段（生成与求解解耦）
 
-在 **`UniCOP/`（仓库根）目录下**：
+均在 **`UniCOP/`（仓库根）目录下**运行。
+
+### 阶段一 — 冻结测试实例（只用 numpy，很快）
 
 ```bash
-# 默认：4 类问题 × n=100 × 1000 实例，单实例 5s
-python -m optimal.build_optimal --sizes 100 --num_test 1000 --timeout 5
+# 默认：4 类 × n∈{20,50,100} × 1000 实例，seed=9999
+python -m optimal.generate_testset
 
-# 指定类型/规模/并行
-python -m optimal.build_optimal --problem_types cvrp vrptw --sizes 50 100 --workers 8
+# 自定义
+python -m optimal.generate_testset --problem_types tsp cvrp --sizes 50 --num_instances 1000 --seed 9999
+```
 
-# TSP 用 LKH
+输出冻结实例：`optimal/instances/{type}_n{n}_seed{seed}_N{num}.json`
+（含 metadata + `instances` 列表；求解与评测都读这同一批。）
+
+### 阶段二 — 求 LKH/HGS 近最优（读冻结实例）
+
+```bash
+# 求全部冻结实例
+python -m optimal.build_optimal --sizes 20 50 100 --timeout 5 --workers 8
+
+# 只求前 N 个 / 指定类型 / TSP 用 LKH
+python -m optimal.build_optimal --problem_types cvrp --sizes 50 --num_test 200
 LKH_BIN=/path/to/LKH python -m optimal.build_optimal --problem_types tsp --sizes 100
 ```
 
-输出缓存：`optimal/cache/{type}_n{n}_seed{seed}_N{num_test}.json`
+输出缓存：`optimal/cache/{type}_n{n}_seed{seed}_N{num}.json`（`costs[i]` 对应冻结实例第 i 个）
+
+> 运行时间 ≈ `实例数 × timeout / workers`（PyVRP 的 `MaxRuntime` 会跑满 timeout），用 `--timeout/--workers` 调。
 
 ## ⚠️ 与 evaluate.py 的对齐（关键）
 
-`evaluate.py:evaluate_single` 用 `rng = np.random.default_rng(seed=9999)` 顺序生成 `num_test` 个实例。本模块以**同样的 seed、同样的顺序**调用 `generate_instance` 重建实例，因此第 i 个实例严格对应。
+冻结实例用 `np.random.default_rng(seed)` 顺序调用 `generate_instance` 生成，与 `evaluate.py:evaluate_single`（其每次 `default_rng(9999)` 后顺序生成）**完全一致**。所以 seed=9999 冻结的实例与 evaluate.py 现场生成的逐一相同。
 
-- **seed 默认 9999**，必须与 `evaluate.py` 一致。若改了 evaluate 的 seed，务必同步 `--seed`。
-- **前缀一致性**：实例序列只由 seed 顺序决定，故“缓存 N=1000、评测用前 100 个”是合法的——`loader.load_costs` 会自动找到 N≥请求值的缓存并取前缀。可“基线一次性算大集合，LLM 评测抽子集”。
+- **seed 默认 9999**，须与 `evaluate.py` 一致；改了 evaluate 的 seed 要同步 `--seed`。
+- **前缀一致性**：序列只由 seed 顺序决定，故“冻结/求解 N=1000、评测用前 100 个”合法——`load_instances` / `load_costs` 会自动找 N≥请求值的文件取前缀。
+- **真正固定**：`instances/` 默认 gitignore（确定性可重生成）；若要字节级永久固定，`git add -f instances/` 入库。
+- **推荐下一步**：让 `evaluate.py` 也改用 `load_instances` 读冻结集，使模型与基线严格同一批（当前靠 seed 一致性保证等价）。
 
 ## 集成到 evaluate.py
 
