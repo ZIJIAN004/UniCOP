@@ -1,0 +1,3 @@
+# 基线缓存由 build_optimal.py 生成，不入库（可随时重算）
+cache/
+__pycache__/
