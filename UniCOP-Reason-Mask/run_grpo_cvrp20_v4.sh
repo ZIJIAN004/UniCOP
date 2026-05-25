@@ -82,6 +82,10 @@ VLLM_MAX_MODEL_LEN=8192
 VLLM_DTYPE=bfloat16
 VLLM_STARTUP_TIMEOUT=300
 
+# 单卡已用显存超过此值(MiB)即视为"非空闲",拒绝启动。
+# 空闲卡通常只占几 MiB~几百 MiB；任何残留模型进程都是 GB 级,2000 足够区分。
+GPU_MEM_USED_THRESHOLD_MIB="${GPU_MEM_USED_THRESHOLD_MIB:-2000}"
+
 SCKEY="${SCKEY:-SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp}"
 notify() {
     local title="${1:0:100}"
@@ -140,6 +144,63 @@ stop_vllm_server() {
     VLLM_PID=""
 }
 
+# ── GPU 空闲检查 (防止往被占用的卡上启 vLLM 导致 CUDA graph capture OOM) ──
+# 根因: vLLM gpu_memory_utilization 是"按总显存×util"的全局上限,不看当前空闲量。
+#       若目标卡已被别的进程(别人的 job / 上次 crash 残留)占用,vLLM 仍按 util×总显存
+#       预算 KV cache,等到 CUDA graph capture 要额外 scratch 时物理空闲不够 → capture_end OOM。
+# 在启 vLLM 前把"vLLM 卡 + 训练卡"全查一遍,非空闲直接 fail-fast。
+check_gpu_idle() {
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        echo "[WARN] 找不到 nvidia-smi,跳过 GPU 空闲检查"
+        return 0
+    fi
+
+    local smi_out
+    smi_out="$(nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null || true)"
+    if [ -z "$smi_out" ]; then
+        echo "[WARN] nvidia-smi 查询为空,跳过 GPU 空闲检查"
+        return 0
+    fi
+
+    local gpus_to_check
+    gpus_to_check="$(echo "${VLLM_GPU},${TRAIN_GPUS_CSV}" | tr ',' ' ')"
+    echo "[$(date '+%H:%M:%S')] GPU 空闲检查 (阈值 ${GPU_MEM_USED_THRESHOLD_MIB} MiB) | 待用: GPU ${VLLM_GPU}(vLLM) + ${TRAIN_GPUS_CSV}(训练)"
+
+    local busy=0 g used total
+    for g in $gpus_to_check; do
+        used="$(echo "$smi_out"  | awk -F',' -v idx="$g" '{gsub(/ /,"",$1);gsub(/ /,"",$2)} $1==idx {print $2}')"
+        total="$(echo "$smi_out" | awk -F',' -v idx="$g" '{gsub(/ /,"",$1);gsub(/ /,"",$3)} $1==idx {print $3}')"
+        if [ -z "$used" ]; then
+            echo "  [FAIL] GPU $g 在 nvidia-smi 中不存在 (可见 GPU 数不足?)"
+            busy=$((busy+1))
+        elif [ "$used" -gt "$GPU_MEM_USED_THRESHOLD_MIB" ]; then
+            echo "  [FAIL] GPU $g 非空闲: 已用 ${used} / ${total} MiB"
+            busy=$((busy+1))
+        else
+            echo "  [OK  ] GPU $g 空闲: 已用 ${used} / ${total} MiB"
+        fi
+    done
+
+    if [ "$busy" -ne 0 ]; then
+        echo ""
+        echo "[FATAL] $busy 张待用 GPU 非空闲,拒绝启动 (否则 vLLM 大概率在 CUDA graph capture 阶段 OOM)"
+        echo "  当前 GPU 占用进程:"
+        nvidia-smi --query-compute-apps=gpu_bus_id,pid,process_name,used_memory --format=csv 2>/dev/null | sed 's/^/    /' || true
+        echo "  排查:"
+        echo "    1) 上次 crash 残留僵尸进程? 清理: pkill -u \"\$USER\" -f vllm_serve_logprobs.py ; pkill -u \"\$USER\" -f accelerate.commands.launch"
+        echo "    2) 手动跑落到别人占用的物理卡? 改用 sbatch submit_grpo_cvrp20_v4.sh,或指定空闲卡:"
+        echo "       VLLM_GPU=<空闲> TRAIN_GPUS_CSV=<空闲列表> TRAIN_PROC=<卡数> bash $0"
+        echo "    3) 确认是误判? 临时放宽: GPU_MEM_USED_THRESHOLD_MIB=<更大值> bash $0"
+        notify "❌ CVRP20 GRPO v4 GPU 非空闲,未启动" \
+"有 $busy 张待用 GPU 已被占用 (阈值 ${GPU_MEM_USED_THRESHOLD_MIB} MiB)
+时间: $(date '+%Y-%m-%d %H:%M:%S')
+详见日志: $LOG_FILE"
+        return 1
+    fi
+    echo "[$(date '+%H:%M:%S')] ✓ 所有待用 GPU 空闲"
+    return 0
+}
+
 TRAINING_COMPLETED=0
 on_exit() {
     local exit_code=$?
@@ -177,6 +238,11 @@ echo "============================================================"
 
 if [ $((4 * TRAIN_PROC % 8)) -ne 0 ]; then
     echo "[FATAL] 整除失败: per_device_batch (4) × num_gpus ($TRAIN_PROC) = $((4 * TRAIN_PROC)) 必须整除 num_generations=8"
+    exit 1
+fi
+
+if ! check_gpu_idle; then
+    echo "[FATAL] GPU 空闲检查未通过,中止 (避免 vLLM CUDA graph capture OOM)"
     exit 1
 fi
 
