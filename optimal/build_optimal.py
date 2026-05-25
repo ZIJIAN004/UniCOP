@@ -57,15 +57,15 @@ def _notify(title: str, desp: str = "") -> None:
 
 def _solve_one(args):
     """ProcessPoolExecutor worker：求解单个实例，返回 (idx, cost, feasible, solver)。"""
-    idx, problem_type, instance, timeout, lkh_bin, seed = args
+    idx, problem_type, instance, timeout, lkh_bin, seed, lkh_runs = args
     res = solve_instance(problem_type, instance, timeout=timeout,
-                         lkh_bin=lkh_bin, seed=seed)
+                         lkh_bin=lkh_bin, seed=seed, lkh_runs=lkh_runs)
     return idx, res["cost"], res["feasible"], res["solver"]
 
 
 def build_one(problem_type: str, n: int, num_test, seed: int,
               timeout: int, workers: int, lkh_bin: str, out_dir: str,
-              instances_dir: str) -> dict:
+              instances_dir: str, lkh_runs: int = 10) -> dict:
     # 读取阶段一冻结的实例（不再现场生成）；num_test=None 求解全部，否则取前 num_test 个
     instances = load_instances(problem_type, n, seed=seed,
                                num_test=num_test, inst_dir=instances_dir)
@@ -77,7 +77,7 @@ def build_one(problem_type: str, n: int, num_test, seed: int,
     solver_used = None
     t0 = time.time()
 
-    tasks = [(i, problem_type, instances[i], timeout, lkh_bin, seed)
+    tasks = [(i, problem_type, instances[i], timeout, lkh_bin, seed, lkh_runs)
              for i in range(num)]
 
     if workers <= 1:
@@ -140,12 +140,15 @@ def main():
                     help="只求冻结集前 N 个；默认 None=求全部")
     ap.add_argument("--seed", type=int, default=_DEFAULT_SEED,
                     help=f"须与冻结实例(generate_testset)一致，默认 {_DEFAULT_SEED}")
-    ap.add_argument("--timeout", type=int, default=5,
-                    help="单实例求解时间上限（秒），n 越大建议越长")
+    ap.add_argument("--timeout", type=int, default=30,
+                    help="HGS 每实例运行时长(秒)，越大越接近最优；同时作 LKH 每实例时间上限。"
+                         "n 越大建议越长（n=100 建议 30~60）")
+    ap.add_argument("--lkh_runs", type=int, default=10,
+                    help="LKH 独立运行次数取最优（仅 TSP），越大越稳，默认 10")
     ap.add_argument("--workers", type=int, default=1,
                     help="并行进程数（>1 启用多进程；Windows 需在 __main__ 下运行）")
     ap.add_argument("--lkh_bin", default=LKH_BIN,
-                    help="LKH 二进制路径（仅 TSP 使用；留空则 TSP 回退 PyVRP）")
+                    help="LKH 二进制路径（TSP 必需；缺失则 TSP 报错，不回退）")
     ap.add_argument("--instances_dir", default=INSTANCES_DIR,
                     help="冻结实例目录（generate_testset 的输出）")
     ap.add_argument("--out_dir", default=os.path.join(_HERE, "cache"))
@@ -155,11 +158,16 @@ def main():
         if pt.lower() not in SUPPORTED:
             ap.error(f"不支持的问题类型: {pt}（支持 {list(SUPPORTED)}）")
 
+    # TSP 固定用 LKH：缺二进制就别启动，免得跑一半才报错
+    if any(pt.lower() == "tsp" for pt in args.problem_types) and not args.lkh_bin:
+        ap.error("求解 TSP 需要 LKH 二进制：export LKH_BIN=/path/to/LKH 或加 --lkh_bin；"
+                 "或从 --problem_types 去掉 tsp。")
+
     print("=" * 60)
     print(f"problem_types={args.problem_types}  sizes={args.sizes}")
     print(f"num_test={args.num_test or 'ALL'}  seed={args.seed}  "
-          f"timeout={args.timeout}s  workers={args.workers}")
-    print(f"LKH_BIN={'(set)' if args.lkh_bin else '(none → TSP 用 PyVRP)'}")
+          f"timeout={args.timeout}s  lkh_runs={args.lkh_runs}  workers={args.workers}")
+    print(f"LKH_BIN={'(set)' if args.lkh_bin else '(none)'}")
     print(f"instances_dir={args.instances_dir}")
     print(f"out_dir={args.out_dir}")
     print("=" * 60)
@@ -171,7 +179,7 @@ def main():
             for pt in args.problem_types:
                 p = build_one(pt, n, args.num_test, args.seed,
                               args.timeout, args.workers, args.lkh_bin,
-                              args.out_dir, args.instances_dir)
+                              args.out_dir, args.instances_dir, args.lkh_runs)
                 summary.append(
                     f"{pt} n={n}: mean={p['mean_cost']}, "
                     f"infeas={p['infeasible_count']}/{p['num_test']}"

@@ -2,12 +2,15 @@
 optimal/solvers.py
 为 UniCOP-Reason 的问题实例求 (近) 最优解，作为 optimality gap 的分母基线。
 
-求解器分配（与 UniCOP-Distill/lkh_solver.py 同思路）：
-  TSP   → LKH        （LKH 最擅长的场景；未配置 LKH_BIN 时自动回退 PyVRP/HGS）
-  CVRP  → PyVRP/HGS
+求解器分配（固定，不混用）：
+  TSP   → LKH        （RUNS 调大求最优；未提供 LKH_BIN 直接报错，不回退）
+  CVRP  → PyVRP/HGS  （运行时长 timeout 调大求最优）
   TSPTW → PyVRP/HGS  （建模为单车辆 VRPTW）
   VRPTW → PyVRP/HGS
   TSPDL → 暂不支持    （PyVRP 不原生支持 draft limit，见 README.md）
+
+求最优的旋钮：LKH 调大 lkh_runs；HGS 调大 timeout（MaxRuntime）。n≤100 时二者均
+可达真实最优级别（注：LKH/HGS 为启发式，给出的是最优级/best-known，非可证明最优）。
 
 关键口径：返回的 cost 一律用原始 [0,1] 坐标的欧氏边长重算，与 evaluate.py 的
 prob.get_tour_distance 完全一致。求解器内部对坐标做整数缩放（×_COORD_SCALE）只用于
@@ -52,11 +55,16 @@ def _total_cost(routes: list[list[int]], coords: np.ndarray) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def solve_instance(problem_type: str, instance: dict, *,
-                   timeout: int = 5, lkh_bin: str = LKH_BIN,
-                   seed: int = 42) -> dict:
+                   timeout: int = 30, lkh_bin: str = LKH_BIN,
+                   seed: int = 42, lkh_runs: int = 10) -> dict:
     """
-    求单个实例的 (近) 最优解。
+    求单个实例的 (近) 最优解。求解器固定：TSP→LKH，其余→PyVRP/HGS。
+    为逼近最优，把 LKH 的 RUNS(lkh_runs) 与 HGS 的运行时长(timeout) 调大即可。
 
+    Args:
+        timeout:   PyVRP/HGS 每实例运行时长(秒)，越大越接近最优；同时作 LKH 每实例时间上限。
+        lkh_bin:   LKH 二进制路径（TSP 必需；为空则 TSP 直接报错，不回退）。
+        lkh_runs:  LKH 独立运行次数，取最优；越大越稳。
     Returns dict:
       {
         "cost":     float | None,   # 近最优总距离（None 表示求解失败/不可行）
@@ -69,10 +77,13 @@ def solve_instance(problem_type: str, instance: dict, *,
     coords = np.asarray(instance["coords"], dtype=float)
     try:
         if pt == "tsp":
-            if lkh_bin:
-                routes, solver = [_solve_tsp_lkh(instance, lkh_bin, seed, timeout)], "lkh"
-            else:
-                routes, solver = [_solve_tsp_pyvrp(instance, timeout)], "pyvrp"
+            if not lkh_bin:
+                raise RuntimeError(
+                    "TSP 固定用 LKH 求最优，但未提供 LKH 二进制。请 export LKH_BIN=/path/to/LKH "
+                    "(与 UniCOP-Distill/lkh_solver.py 同一环境变量) 或用 --lkh_bin 指定。"
+                )
+            routes = [_solve_tsp_lkh(instance, lkh_bin, seed, timeout, runs=lkh_runs)]
+            solver = "lkh"
         elif pt == "cvrp":
             routes, solver = _solve_cvrp_pyvrp(instance, timeout), "pyvrp"
         elif pt == "tsptw":
@@ -104,7 +115,7 @@ def solve_instance(problem_type: str, instance: dict, *,
 # TSP — LKH
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _solve_tsp_lkh(instance, lkh_bin, seed, timeout) -> Optional[list[int]]:
+def _solve_tsp_lkh(instance, lkh_bin, seed, timeout, runs=10) -> Optional[list[int]]:
     n = instance["n"]
     coords = np.asarray(instance["coords"], dtype=float)
 
@@ -125,10 +136,10 @@ def _solve_tsp_lkh(instance, lkh_bin, seed, timeout) -> Optional[list[int]]:
         with open(par_f, "w") as f:
             f.write(f"PROBLEM_FILE = {tsp_f}\n")
             f.write(f"OUTPUT_TOUR_FILE = {tour_f}\n")
-            f.write("RUNS = 1\n")
+            f.write(f"RUNS = {runs}\n")            # 多次独立运行取最优，越大越稳
             f.write(f"SEED = {seed}\n")
             f.write("TRACE_LEVEL = 0\n")
-            f.write(f"TIME_LIMIT = {timeout}\n")
+            f.write(f"TIME_LIMIT = {timeout}\n")   # 每实例时间上限(秒)
 
         # subprocess timeout 比 LKH TIME_LIMIT 宽裕 30s，防止写 tour 文件时被 kill
         result = subprocess.run([lkh_bin, par_f], capture_output=True,
@@ -202,30 +213,6 @@ def _pyvrp_solve(m, timeout):
         return None
     routes = list(result.best.routes())
     return routes or None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TSP — PyVRP（回退方案：单车辆、无约束）
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _solve_tsp_pyvrp(instance, timeout) -> Optional[list[int]]:
-    from pyvrp import Model
-
-    n = instance["n"]
-    coords = np.asarray(instance["coords"], dtype=float)
-    cs = _scaled_coords(coords, n)
-
-    m = Model()
-    depot = m.add_depot(x=cs[0][0], y=cs[0][1])
-    clients = [m.add_client(x=cs[i][0], y=cs[i][1], delivery=1) for i in range(1, n + 1)]
-    locs = [depot] + clients
-    _add_edges(m, locs, cs, with_duration=False)
-    m.add_vehicle_type(num_available=1, capacity=n + 1)
-
-    routes = _pyvrp_solve(m, timeout)
-    if routes is None:
-        return None
-    return [0] + [int(v) for v in routes[0]] + [0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

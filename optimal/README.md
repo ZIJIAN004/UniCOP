@@ -8,15 +8,16 @@
 
 ## 求解器分配
 
-| 问题 | 求解器 | 说明 |
-|------|--------|------|
-| TSP   | **LKH** | 设 `LKH_BIN` 时用 LKH；未设则回退 PyVRP/HGS |
-| CVRP  | **HGS**（PyVRP） | |
-| TSPTW | **HGS**（PyVRP，单车辆 VRPTW 建模） | |
-| VRPTW | **HGS**（PyVRP） | |
+| 问题 | 求解器 | 求最优旋钮 |
+|------|--------|-----------|
+| TSP   | **LKH**（固定，缺 `LKH_BIN` 直接报错，不回退） | `--lkh_runs` 调大（默认 10） |
+| CVRP  | **HGS**（PyVRP） | `--timeout` 调大（MaxRuntime） |
+| TSPTW | **HGS**（PyVRP，单车辆 VRPTW 建模） | `--timeout` 调大 |
+| VRPTW | **HGS**（PyVRP） | `--timeout` 调大 |
 | TSPDL | ✗ 暂不支持 | PyVRP 无 draft-limit 模型；如需对标 PIP，建议复用其官方 LKH-3 ground truth（github.com/jieyibi/PIP-constraint） |
 
-> LKH/HGS 对 n≤100 实际就是最优（gap < 0.01%），是该领域公认的“optimal”基线（exact TSP 用 Concorde，其余用 LKH/HGS）。
+> LKH/HGS 对 n≤100 把参数调大后达到真实最优级别（best-known），是该领域公认的“optimal”基线。
+> 严格说二者是启发式，给出的是**最优级/best-known 而非可证明最优**（要可证明最优需 exact TSP 用 Concorde、VRP 用分支定界，代价高得多）。对算 LLM 的 gap 而言这点差异可忽略。
 
 ## 依赖（轻量，独立于训练栈）
 
@@ -47,18 +48,22 @@ python -m optimal.generate_testset --problem_types tsp cvrp --sizes 50 --num_ins
 
 ### 阶段二 — 求 LKH/HGS 近最优（读冻结实例）
 
-```bash
-# 求全部冻结实例
-python -m optimal.build_optimal --sizes 20 50 100 --timeout 5 --workers 8
+**TSP 固定用 LKH**，必须先有 LKH 二进制（`export LKH_BIN=/path/to/LKH`，与 UniCOP-Distill 同一变量）；否则求解 TSP 会直接报错。
 
-# 只求前 N 个 / 指定类型 / TSP 用 LKH
-python -m optimal.build_optimal --problem_types cvrp --sizes 50 --num_test 200
-LKH_BIN=/path/to/LKH python -m optimal.build_optimal --problem_types tsp --sizes 100
+```bash
+# 求全部冻结实例（HGS 跑 30s/实例求最优；TSP 用 LKH，RUNS=10）
+export LKH_BIN=/path/to/LKH
+python -m optimal.build_optimal --sizes 20 50 100 --timeout 30 --lkh_runs 10 --workers 8
+
+# 只求前 N 个 / 指定类型（不含 TSP 时无需 LKH）
+python -m optimal.build_optimal --problem_types cvrp vrptw --sizes 50 --num_test 200 --timeout 30
 ```
 
 输出缓存：`optimal/cache/{type}_n{n}_seed{seed}_N{num}.json`（`costs[i]` 对应冻结实例第 i 个）
 
-> 运行时间 ≈ `实例数 × timeout / workers`（PyVRP 的 `MaxRuntime` 会跑满 timeout），用 `--timeout/--workers` 调。
+> **求最优旋钮**：HGS 调大 `--timeout`（n=100 建议 30~60s），LKH 调大 `--lkh_runs`。
+> **时间成本**：HGS 的 `MaxRuntime` 会跑满 timeout，总耗时 ≈ `实例数 × timeout / workers`。
+> 例：cvrp/vrptw/tsptw 各 1000 × 3 规模 × 30s ÷ 16 进程 ≈ 每类约 1.6h；用 `--workers` 拉满 CPU、必要时先小 `--num_test` 验证。
 
 ## ⚠️ 与 evaluate.py 的对齐（关键）
 
