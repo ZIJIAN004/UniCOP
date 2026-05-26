@@ -50,11 +50,16 @@ set -eo pipefail
 #   r1_distill     → output_sft_hybrid_cvrp20/final_model
 MODEL="${MODEL:-$DISTILL_DIR/output_sft_qwen3_template_cvrp20/final_model}"
 
+# 后端: vllm 强烈推荐 —— best-of-N(num_samples 大)必须用 vLLM 的 paged attention,
+#   本地 HF (local) 会一次性并行 num_samples 条序列, KV cache 直接 OOM (job 8168 教训).
+#   vLLM 生成完成后, 波次式的 POMO PRM (n=20, 很小) 在剩余显存里跑, 一般够.
+BACKEND="${BACKEND:-vllm}"
+
 NUM_TEST=50            # 测试实例数 (先 50 跑通, 稳定后可上 100)
 NUM_SAMPLES=32         # 每实例采样数 = best-of-N 的 N / 波次式起始池. 16+ 才有意义
 TEMP=0.6               # 采样温度 (>0 才有多样性; Qwen3-Thinking 官方推荐 0.6)
 MAX_LEN=4096           # 生成长度上限 (CVRP20 链一般 2-4k, 4096 够且省时)
-BATCH=1                # local 后端 prompt batch; num_samples=32 时每 prompt 展开 32 序列, batch=1 防 OOM
+BATCH=1                # 仅 local 后端用 (prompt batch); vLLM 走 continuous batching, 忽略此值
 KEEP_FRAC=0.5          # 波次式每个 halve 检查点保留比例
 
 SAVE_DIR="$REASON_DIR/eval_wave_bon_cvrp20_$(date '+%Y%m%d_%H%M%S')"
@@ -97,8 +102,8 @@ nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader | sed
 
 # ── 评估: 一次生成, 同时算 baseline best-of-N 曲线 + 波次式剪枝 ──────────────
 echo ""
-echo ">>> evaluate.py --bestofn --wave ($(date))"
-python evaluate.py --backend local \
+echo ">>> evaluate.py --bestofn --wave  (backend=$BACKEND) ($(date))"
+python evaluate.py --backend "$BACKEND" \
     --model_path "$MODEL" \
     --problem cvrp --problem_size 20 \
     --model_type reasoning \
