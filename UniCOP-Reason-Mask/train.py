@@ -135,11 +135,14 @@ def _patch_vllm_client_retry(max_retries: int = 10, base_backoff: float = 3.0):
         return wrapped
 
     VLLMClient.generate = _retry(_orig_generate, "generate")
-    if _orig_update_named_param is not None:
-        VLLMClient.update_named_param = _retry(_orig_update_named_param, "update_named_param")
+    # ⚠️ 不要给 update_named_param 加 retry。它内部是 NCCL broadcast + barrier(collective):
+    # retry = 训练端多做一次广播而 vLLM 端没有 → barrier 广播序号 off-by-one 永久错位死锁。
+    # 实测 2026-05-26: 跑 4 step 后训练端等 /broadcast_from/0/1808、vLLM 等 .../1/1807, 双双 5min 超时崩。
+    # 且 plain v5 无 vLLM supervisor, retry 它也救不了(没东西重启)。让它失败快崩 + resume_from_checkpoint。
+    # (generate 是纯 HTTP、无持久 collective, retry 安全, 保留。)
     print(
-        f"✓ VLLMClient.generate / update_named_param retry patched "
-        f"(max_retries={max_retries}, base_backoff={base_backoff}s)"
+        f"✓ VLLMClient.generate retry patched (update_named_param 不 retry: 避免 collective 错位死锁); "
+        f"max_retries={max_retries}, base_backoff={base_backoff}s"
     )
 
 # 顺序敏感: logprobs patch 先装 (替换 generate 实现), 再装 retry (包装 logprobs-aware
