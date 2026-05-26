@@ -840,7 +840,8 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                     prompt_mode: str = "think",
                     model_type: str = "reasoning",
                     retry_until_feasible: bool = False,
-                    max_retry_rounds: int = 3):
+                    max_retry_rounds: int = 3,
+                    wave_cfg=None, prm=None, wave_tokenizer=None):
     """
     评估单个 (problem_type, problem_size) 组合。
 
@@ -1161,6 +1162,52 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     elif retry_until_feasible:
         results["retry_summary"] = {"enabled": True, "samples": 0}
 
+    # ── 波次式 (successive-halving) best-of-N 离线回放 ────────────────────
+    # 用 POMO PRM 在 1/4 客户检查点剪枝, 与朴素 best-of-N 在【同算力(token)】下对比.
+    # 详见 wave_replay.py 模块 docstring. 仅 local/vllm + 提供 prm/tokenizer 时启用.
+    if wave_cfg is not None and prm is not None and wave_tokenizer is not None:
+        from wave_replay import wave_replay
+
+        def _ctext(it):
+            return it[0] if isinstance(it, tuple) else it
+
+        wave_completions = [[_ctext(it) for it in all_completions[i]]
+                            for i in range(num_test)]
+        wave_out = wave_replay(
+            wave_completions, instances, prob, prm, wave_tokenizer,
+            problem_type, wave_cfg,
+        )
+        results["wave"] = {
+            "n_instances":            wave_out["n_instances"],
+            "checkpoint_fracs":       list(wave_cfg.checkpoint_fracs),
+            "halve_fracs":            list(wave_cfg.halve_fracs),
+            "keep_fraction":          wave_cfg.keep_fraction,
+            "wave_C_total":           wave_out["wave_C_total"],
+            "baseline_C_total":       wave_out["baseline_C_total"],
+            "compute_saving_ratio":   wave_out["compute_saving_ratio"],
+            "wave_avg_best_dist":     wave_out["wave_avg_best_dist"],
+            "baseline_avg_best_dist": wave_out["baseline_avg_best_dist"],
+            "baseline_avg_best_dist_at_wave_C": wave_out["baseline_avg_best_dist_at_wave_C"],
+            "per_instance":           wave_out["per_instance"],
+        }
+        w = results["wave"]
+        save_str = (f"{w['compute_saving_ratio']:.1%}"
+                    if w["compute_saving_ratio"] is not None else "N/A")
+
+        def _f(x):
+            return f"{x:.4f}" if x is not None else "N/A"
+
+        print(f"\n  {'─'*55}")
+        print(f"  波次式回放 (检查点={list(wave_cfg.checkpoint_fracs)}, "
+              f"halve@{list(wave_cfg.halve_fracs)}, keep={wave_cfg.keep_fraction}):")
+        print(f"    算力(token): wave={w['wave_C_total']}  "
+              f"baseline={w['baseline_C_total']}  省={save_str}")
+        print(f"    最优距离:    wave={_f(w['wave_avg_best_dist'])}  "
+              f"baseline(全量)={_f(w['baseline_avg_best_dist'])}  "
+              f"baseline@同算力={_f(w['baseline_avg_best_dist_at_wave_C'])}")
+        print(f"    → 同算力对比: wave 的距离应 ≤ baseline@同算力 才算赢")
+        print(f"  {'─'*55}")
+
     return results
 
 
@@ -1242,6 +1289,25 @@ def main():
     parser.add_argument("--max_retry_rounds", type=int, default=3,
                         help="--retry_until_feasible 时最多 retry 几轮 (第一轮不算 retry). 默认 3, "
                              "总轮数 = 1 + max_retry_rounds.")
+    # ── 波次式 best-of-N 离线回放 (用 POMO PRM 在 1/4 检查点剪枝) ───────
+    parser.add_argument("--wave", action="store_true",
+                        help="开启波次式 best-of-N 离线回放: 生成完整链后用 POMO PRM 在 1/4 "
+                             "客户检查点回放剪枝, 与朴素 best-of-N 在同算力(token)下对比. "
+                             "需 --num_samples>1 + --pomo_ckpt_dir/--pomo_baseline_dir, 仅 local/vllm.")
+    parser.add_argument("--pomo_ckpt_dir", type=str, default="",
+                        help="POMO checkpoint 根目录 (子目录 {ts}__POMO_{TYPE}_n{N}/MODEL_FINAL.pt). --wave 时必填.")
+    parser.add_argument("--pomo_baseline_dir", type=str, default="",
+                        help="POMO-Baseline 项目根目录 (导入模型/环境代码). --wave 时必填.")
+    parser.add_argument("--wave_keep_frac", type=float, default=0.5,
+                        help="波次式每个 halve 检查点保留比例 (默认 0.5 = 留一半).")
+    parser.add_argument("--wave_checkpoint_fracs", type=float, nargs="+",
+                        default=[0.25, 0.5, 0.75, 1.0],
+                        help="检查点比例 (默认 1/4 网格). 最后一个应为 1.0 (终点选择).")
+    parser.add_argument("--wave_halve_fracs", type=float, nargs="+",
+                        default=[0.5, 0.75],
+                        help="哪些检查点做 POMO 排名淘汰 (方案A: 仅 50%/75%, 25% 只硬过滤).")
+    parser.add_argument("--wave_device", type=str, default="cuda",
+                        help="POMO PRM 运行设备 (默认 cuda).")
     args = parser.parse_args()
 
     # ── 参数校验 ──────────────────────────────────────────────────────
@@ -1258,6 +1324,14 @@ def main():
     if args.num_samples > 1 and args.temperature <= 0:
         parser.error(f"num_samples={args.num_samples}>1 但 temperature={args.temperature}<=0；"
                      "贪心解码多次结果完全相同，请设 --temperature 0.6 或类似值")
+    if args.wave:
+        if args.backend not in ("local", "vllm"):
+            parser.error("--wave 仅支持 backend=local/vllm (需 POMO PRM + tokenizer)")
+        if not args.pomo_ckpt_dir or not args.pomo_baseline_dir:
+            parser.error("--wave 必须同时指定 --pomo_ckpt_dir 和 --pomo_baseline_dir")
+        if args.num_samples <= 1:
+            print("⚠️ --wave 但 num_samples<=1, 波次式无样本池可剪枝(退化). "
+                  "建议 --num_samples 16 或更多.", flush=True)
 
     # 确定 max_completion_length
     if args.max_completion_length is not None:
@@ -1351,6 +1425,25 @@ def main():
     print(f"模型类型:  {args.model_type}  提示词模式: {prompt_mode}  "
           f"max_completion_length: {max_completion_length}  batch_size: {args.batch_size}")
 
+    # ── 波次式回放 PRM 初始化 (仅 --wave 时; tokenizer 来自 local/vllm 后端) ──
+    wave_cfg = None
+    wave_prm = None
+    if args.wave:
+        from pomo_prm import POMOPRM
+        from wave_replay import WaveConfig
+        wave_cfg = WaveConfig(
+            checkpoint_fracs=tuple(args.wave_checkpoint_fracs),
+            halve_fracs=tuple(args.wave_halve_fracs),
+            keep_fraction=args.wave_keep_frac,
+        )
+        wave_prm = POMOPRM(
+            pomo_ckpt_dir=args.pomo_ckpt_dir,
+            pomo_baseline_dir=args.pomo_baseline_dir,
+            device=args.wave_device,
+        )
+        print(f"波次式回放: 开启  checkpoints={list(wave_cfg.checkpoint_fracs)}  "
+              f"halve@{list(wave_cfg.halve_fracs)}  keep={wave_cfg.keep_fraction}")
+
     # 遍历所有 (problem, size) 组合
     combos = [(p, n) for p in args.problem for n in args.problem_size]
     print(f"\n评估组合: {len(combos)} 个  {combos}")
@@ -1404,6 +1497,8 @@ def main():
             prompt_mode, args.model_type,
             retry_until_feasible=args.retry_until_feasible,
             max_retry_rounds=args.max_retry_rounds,
+            wave_cfg=wave_cfg, prm=wave_prm,
+            wave_tokenizer=(tokenizer if args.wave else None),
         )
         results["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         all_results.append(results)
