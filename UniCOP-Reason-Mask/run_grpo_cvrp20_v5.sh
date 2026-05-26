@@ -108,7 +108,7 @@ fi
 # 提速不靠改 stage, 靠 DS_OFFLOAD=0(见 train.py make_deepspeed_config): 保留分片、去掉 CPU
 # offload, 基座分片留 GPU 不再每层经 PCIe 搬运 → fwd+bwd 实测减 ~50%(fwd+bwd 占单 step 90%)。
 ZERO_STAGE="${ZERO_STAGE:-3}"
-NUM_TRAIN=4000
+NUM_TRAIN="${NUM_TRAIN:-4000}"   # 训练 instance 数, 可 env 覆盖。total_steps = NUM_TRAIN×epochs(3)÷24
 OUTPUT_DIR_BASE="$WORK_DIR/output_v5"
 
 VLLM_PORT=8004
