@@ -152,6 +152,13 @@ _patch_vllm_client_logprobs()
 _patch_vllm_client_retry()
 
 from config import config
+
+# ── A/B 实验 env 覆盖(不动 config.py 全局默认): 临时调 batch / grad_accum ──
+# 例(测"不分片 ZeRO-2"提速): PER_DEVICE_BATCH=2 GRAD_ACCUM=24 ZERO_STAGE=2 + 4卡单NUMA。
+# num_generations 不覆盖(保持 8 路对比)。⚠️ 整除约束: per_device_batch × num_gpus % num_generations == 0。
+config.per_device_train_batch_size = int(os.environ.get("PER_DEVICE_BATCH", config.per_device_train_batch_size))
+config.gradient_accumulation_steps = int(os.environ.get("GRAD_ACCUM", config.gradient_accumulation_steps))
+
 from data.generate import build_dataset, build_mixed_dataset
 from problems import get_problem, SUPPORTED_PROBLEMS
 from pomo_prm import POMOPRM
