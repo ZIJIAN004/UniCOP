@@ -880,7 +880,8 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                     model_type: str = "reasoning",
                     retry_until_feasible: bool = False,
                     max_retry_rounds: int = 3,
-                    wave_cfg=None, prm=None, wave_tokenizer=None):
+                    wave_cfg=None, prm=None, wave_tokenizer=None,
+                    run_bestofn: bool = False):
     """
     评估单个 (problem_type, problem_size) 组合。
 
@@ -1182,6 +1183,32 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     elif retry_until_feasible:
         results["retry_summary"] = {"enabled": True, "samples": 0}
 
+    # ── 朴素 best-of-N scaling 曲线 (POMO-free 对照基线) ──────────────────
+    # 详见 bestofn_eval.py. 给出 best-of-k (k=1..N) 的 (算力, 质量) 曲线, 作为
+    # wave 要打赢的基线. 不依赖 POMO, 仅需 tokenizer + prob.
+    if run_bestofn and wave_tokenizer is not None:
+        from bestofn_eval import bestofn_replay
+
+        def _ctext_b(it):
+            return it[0] if isinstance(it, tuple) else it
+
+        bon_completions = [[_ctext_b(it) for it in all_completions[i]]
+                           for i in range(num_test)]
+        bon = bestofn_replay(bon_completions, instances, prob, wave_tokenizer)
+        results["bestofn"] = bon
+
+        def _fb(x):
+            return f"{x:.4f}" if x is not None else "N/A"
+
+        print(f"\n  {'─'*55}")
+        print(f"  best-of-N scaling 曲线 (N={bon['N']}, "
+              f"~{bon['mean_tokens_per_sample']:.0f} tok/样本, 全量算力={bon['total_tokens']}):")
+        for pt in bon["scaling_curve"]:
+            if pt["k"] in (1, 2, 4, 8, 16, 32, 64, bon["N"]):
+                print(f"    k={pt['k']:>3}  算力={pt['compute']:>11.0f}  "
+                      f"best_dist={_fb(pt['avg_best_dist'])}  feas={pt['feas_rate']:.2%}")
+        print(f"  {'─'*55}")
+
     # ── 波次式 (successive-halving) best-of-N 离线回放 ────────────────────
     # 用 POMO PRM 在 1/4 客户检查点剪枝, 与朴素 best-of-N 在【同算力(token)】下对比.
     # 详见 wave_replay.py 模块 docstring. 仅 local/vllm + 提供 prm/tokenizer 时启用.
@@ -1298,6 +1325,10 @@ def main():
                         help="--retry_until_feasible 时最多 retry 几轮 (第一轮不算 retry). 默认 3, "
                              "上限 = 1 + max_retry_rounds 轮生成. 调大慢但救更多 sample.")
     # ── 波次式 best-of-N 离线回放 (用 POMO PRM 在 1/4 检查点剪枝) ───────
+    parser.add_argument("--bestofn", action="store_true",
+                        help="输出朴素 best-of-N scaling 曲线 (best-of-k, k=1..N 的算力-质量曲线), "
+                             "作为 wave 的对照基线. 不依赖 POMO, 仅 local/vllm (需 tokenizer). "
+                             "可与 --wave 同时开 (基线 + 剪枝同图对比).")
     parser.add_argument("--wave", action="store_true",
                         help="开启波次式 best-of-N 离线回放: 生成完整链后用 POMO PRM 在 1/4 "
                              "客户检查点回放剪枝, 与朴素 best-of-N 在同算力(token)下对比. "
@@ -1333,6 +1364,8 @@ def main():
         if args.num_samples <= 1:
             print("⚠️ --wave 但 num_samples<=1, 波次式无样本池可剪枝(退化). "
                   "建议 --num_samples 16 或更多.", flush=True)
+    if args.bestofn and args.backend not in ("local", "vllm"):
+        parser.error("--bestofn 仅支持 backend=local/vllm (需 tokenizer)")
 
     # 确定 max_completion_length: 命令行 > config.eval_max_completion_length_{model_type}
     # 之前 hardcode (reasoning=10000, instruct=512) 让 config 字段成 dead config,
@@ -1456,7 +1489,8 @@ def main():
             retry_until_feasible=args.retry_until_feasible,
             max_retry_rounds=args.max_retry_rounds,
             wave_cfg=wave_cfg, prm=wave_prm,
-            wave_tokenizer=(tokenizer if args.wave else None),
+            wave_tokenizer=(tokenizer if (args.wave or args.bestofn) else None),
+            run_bestofn=args.bestofn,
         )
         results["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         all_results.append(results)
