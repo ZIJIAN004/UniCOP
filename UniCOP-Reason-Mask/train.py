@@ -211,15 +211,15 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "stage3_max_reuse_distance":      1e9,
             "gather_16bit_weights_on_model_save": True,
         }
-        # CPU offload 开关 (DS_OFFLOAD=0 关闭, 默认开)。
-        # ⚠️ 分片(ZeRO-3)是刚需不能去: 长序列(prompt+completion ~4300+ token)的激活是显存大头,
-        #    不分片(ZeRO-2/DDP)基座 8.3GB 完整压每卡 + 大激活 → 必 OOM(已实测)。
-        # 但 offload 可去: 关掉后基座仍分片在 GPU(~1.4GB/卡), 不再每层从 CPU 经 PCIe 搬运 →
-        #    实测 fwd+bwd 减 ~50%(2026-05-18, 当时为 mask 诊断才撤回, 非 OOM)。LoRA 优化器很小,
-        #    留 GPU 也只百 MB 级。显存够就 DS_OFFLOAD=0 提速; 不够再开回。
+        # offload_optimizer 始终保持 cpu(CPUAdam)。⚠️ 绝不能跟着 DS_OFFLOAD 一起关:
+        #   关掉 → DeepSpeed 改用 FusedAdam(GPU), 首次用会 JIT 编译 multi_tensor_adam.cu,
+        #   而本 env(envs/unicop) 的 CUDA toolkit 缺 dev 头文件(cuda_runtime.h not found) →
+        #   编译失败退训(2026-05-26 实测)。LoRA 优化器只 132M, 留 CPU 几乎不拖速(优化器步占单 step 极小)。
+        base["zero_optimization"]["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
+        # offload_param 才是 fwd+bwd 提速关键(基座不再每层从 CPU 经 PCIe 搬), DS_OFFLOAD=0 关它。
+        # 关后基座仍 ZeRO-3 分片在 GPU(~1.4GB/卡); 分片本身是刚需(长序列激活大, 不分片必 OOM)。
         if os.environ.get("DS_OFFLOAD", "1") != "0":
-            base["zero_optimization"]["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
-            base["zero_optimization"]["offload_param"]     = {"device": "cpu", "pin_memory": True}
+            base["zero_optimization"]["offload_param"] = {"device": "cpu", "pin_memory": True}
 
     return base
 
