@@ -18,8 +18,11 @@
 #
 # 用法:  sbatch UniCOP-Reason/submit_wave_vs_bon_cvrp20.sh
 # 提交前可改下面的 MODEL / NUM_TEST / NUM_SAMPLES 等. express=1卡/1天/最高优先级.
-
-set -euo pipefail
+#
+# ⚠️ set -euo pipefail 故意【不放在这里】: conda 激活钩子 (cuda-nvcc) 引用未定义的
+#    NVCC_PREPEND_FLAGS, set -u 下 'unbound variable' 直接崩 (job 8167 教训);
+#    且 .bashrc/conda 激活在 set -e 下也可能因非零返回提前退出. 故先做环境/conda/
+#    paths 设置, 激活完毕后再开严格模式 (对齐 run_grpo 的成功模式).
 
 export HOME=/homes/zhuoyi
 export PIP_CACHE_DIR=/homes/zhuoyi/.pip_cache
@@ -37,6 +40,9 @@ conda activate unicop
 cd /homes/zhuoyi/zijianliu/UniCOP
 source ./paths.sh
 cd "$REASON_DIR"
+
+# 环境/conda/paths 都就绪后再开严格模式 (见顶部说明, 避开 conda 钩子的 unbound/非零返回)
+set -eo pipefail
 
 # ── 配置 (按需改) ─────────────────────────────────────────────────────────
 # 要评估的模型: 默认用 SFT 产物 (forward). 想测 reverse/GRPO 模型就改这里.
