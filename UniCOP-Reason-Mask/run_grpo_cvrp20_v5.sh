@@ -71,7 +71,14 @@ NUM_TRAIN=4000
 OUTPUT_DIR_BASE="$WORK_DIR/output_v5"
 
 VLLM_PORT=8004
-VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.85}"   # 可 env 覆盖；NCCL init OOM 调小、KV 不够调大
+# gpu_memory_utilization 是"总显存×util"的全局上限,不看空闲量。zhihan 的 24G 卡上
+# 0.85 会让 weights+KV 吃掉 ~20G,CUDA graph capture 阶段没余量 → capture_end OOM。
+# 故 zhihan 默认降到 0.6 留 ~10G 给 capture;zhuoyi 维持 0.85。仍可 env 覆盖(KV 不够调大/更紧调小)。
+if [ "$HOST_ID" = "astar-zhihan" ]; then
+    VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.6}"
+else
+    VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.85}"
+fi
 VLLM_MAX_MODEL_LEN=8192
 VLLM_DTYPE=bfloat16
 VLLM_STARTUP_TIMEOUT=300
