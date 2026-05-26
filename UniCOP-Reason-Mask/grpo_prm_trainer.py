@@ -1808,11 +1808,21 @@ class GRPOPRMTrainer(GRPOTrainer):
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
         prompt_length  = prompt_ids.shape[1]
 
+        # logits_to_keep 优化: 只让 LM-head 算最后 (completion_len+1) 个位置的 logits,
+        # 省掉 prompt 段"算完整词表又被丢弃"的 gemm + 大 logits 张量(就是 nvidia-smi 里 mem 带宽尖峰)。
+        # 数值等价: 取出的 completion_logits 与原来"算全序列再切 [prompt_len-1:-1]" 逐元素相同。
+        # 经核实为 TRL 0.16 GRPOTrainer 同款做法; 需 transformers>=4.48(本项目 4.57.6 ✓)。
+        # 注: 不加 TRL 的 logits/temperature(会改训练语义) 和 logsumexp(bf16 数值不稳, selective_log_softmax
+        #     在 bf16 下本就退回 log_softmax), 仅做"少算 logits"这一等价优化。
+        completion_len = completion_ids.shape[1]
         with _sdpa_no_math():   # 禁 math 后端: SDPA 必走 flash/efficient(O(S)), 否则报错而非悄悄 O(S²)
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-        logits  = outputs.logits
-
-        completion_logits = logits[:, prompt_length - 1:-1, :]
+            outputs = model(
+                input_ids=input_ids, attention_mask=attention_mask,
+                logits_to_keep=completion_len + 1,
+            )
+        # 返回最后 completion_len+1 个位置(prompt_len-1 .. T-1)的 logits;
+        # 丢掉最后一个(预测序列外 token), 剩下正好预测 completion 各 token。
+        completion_logits = outputs.logits[:, :-1, :]
         per_token_logps = torch.log_softmax(completion_logits, dim=-1)
         per_token_logps = per_token_logps.gather(
             dim=-1, index=completion_ids.unsqueeze(-1)
