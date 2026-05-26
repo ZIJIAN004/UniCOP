@@ -440,6 +440,9 @@ def main():
     print(f"输出路径:  {config.output_dir}")
     print(f"GPU 数量:  {config.num_gpus}  ZeRO stage: {config.zero_stage}"
           f"  梯度重计算: {config.gradient_checkpointing}")
+    _ds_offload_on = (config.zero_stage == 3 and os.environ.get("DS_OFFLOAD", "1") != "0")
+    print(f"CPU offload:  {'ON (param+optimizer→CPU, 慢)' if _ds_offload_on else 'OFF (全留 GPU)'}"
+          f"   [DS_OFFLOAD={os.environ.get('DS_OFFLOAD', '1')}, 优化器={'CPUAdam' if _ds_offload_on else 'FusedAdam'}]")
     _clip_mode = ("asymmetric (Clip-Higher)"
                   if config.clip_epsilon_high > config.clip_epsilon_low
                   else "symmetric")
