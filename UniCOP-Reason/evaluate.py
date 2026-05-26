@@ -600,11 +600,13 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
 
 # ── 推理后端：vLLM ─────────────────────────────────────────────────────────────
 
-def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1):
+def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
+                     gpu_mem_util: float = 0.9):
     """
     加载 vLLM 模型。
     如果 model_path 是 LoRA adapter 目录（含 adapter_config.json 但无 config.json），
     则自动合并 LoRA 到基座模型后再加载。
+    gpu_mem_util: vLLM 预留显存比例。同 GPU 还要跑 POMO PRM(--wave) 时调低(如 0.8)留地方。
     """
     import os
     from vllm import LLM
@@ -655,7 +657,7 @@ def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1):
         tensor_parallel_size=tensor_parallel_size,
         trust_remote_code=True,
         dtype="bfloat16",
-        gpu_memory_utilization=0.9,
+        gpu_memory_utilization=gpu_mem_util,
         max_model_len=8192,
         enforce_eager=True,
     )
@@ -680,10 +682,14 @@ def _generate_vllm(model, tokenizer, prompts: list[list[dict]],
         chat_texts.append(chat_text)
 
     # temperature > 0 → 采样；temperature == 0 → 贪心（vLLM 原生语义）
+    # skip_special_tokens=False: 关键! 与 _generate_local 对齐。Qwen3-Thinking 把
+    # <think>/</think> 注册为 special token(id 151667/151668), vLLM 默认 True 会剥掉,
+    # 导致下游 rfind("</think>") 失败、think 段被算进答案、解析与 local 后端不一致。
     sampling_params = SamplingParams(
         max_tokens=max_completion_length,
         temperature=temperature,
         n=num_samples,
+        skip_special_tokens=False,
     )
 
     outputs = model.generate(chat_texts, sampling_params)
@@ -692,6 +698,10 @@ def _generate_vllm(model, tokenizer, prompts: list[list[dict]],
     for i, output in enumerate(outputs):
         for sample in output.outputs:
             completion = sample.text
+            # 与 _generate_local 一致: 去掉结构性 special token, 保留 <think>/</think>
+            for tok in ("<|im_end|>", "<|endoftext|>", "<｜end▁of▁sentence｜>",
+                        "<|begin_of_text|>", "<|eot_id|>"):
+                completion = completion.replace(tok, "")
             num_tokens = len(sample.token_ids)
             is_truncated = (num_tokens >= max_completion_length)
             all_completions[i].append((completion, is_truncated, num_tokens))
@@ -1298,6 +1308,8 @@ def main():
                         help="batch 推理大小（仅 local 模式有效）")
     parser.add_argument("--tp_size",      type=int,   default=1,
                         help="vLLM tensor parallel 卡数（仅 vllm 模式有效）")
+    parser.add_argument("--vllm_gpu_mem_util", type=float, default=0.9,
+                        help="vLLM 显存预留比例（仅 vllm）。同 GPU 还要跑 POMO PRM(--wave) 时调低(如 0.8)。")
     parser.add_argument("--prompt_mode",  type=str,   default="think",
                         choices=["think", "structured"],
                         help="提示词模式：think=自由推理 | structured=结构化逐步输出")
@@ -1393,7 +1405,8 @@ def main():
         ngram_tag = f" | no_repeat_ngram={no_repeat_ngram}" if no_repeat_ngram else ""
         backend_info = f"local | {args.model_path} | rep_penalty={rep_penalty}{ngram_tag}"
     elif args.backend == "vllm":
-        model, tokenizer = _load_vllm_model(args.model_path, args.tp_size)
+        model, tokenizer = _load_vllm_model(args.model_path, args.tp_size,
+                                            gpu_mem_util=args.vllm_gpu_mem_util)
 
         def generate_fn(prompts, num_samples, temperature, max_length, batch_size):
             return _generate_vllm(

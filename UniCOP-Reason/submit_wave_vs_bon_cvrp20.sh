@@ -111,6 +111,7 @@ python evaluate.py --backend "$BACKEND" \
     --temperature "$TEMP" \
     --max_completion_length "$MAX_LEN" \
     --batch_size "$BATCH" \
+    --vllm_gpu_mem_util 0.8 \
     --save_dir "$SAVE_DIR" \
     --bestofn \
     --wave \
