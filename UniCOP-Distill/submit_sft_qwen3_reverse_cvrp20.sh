@@ -101,7 +101,7 @@ accelerate launch --num_processes 4 --main_process_port 29600 \
     --gradient_checkpointing \
     --resume_from_checkpoint auto \
     --output_dir "$OUTPUT_DIR" \
-    --logging_steps 10 --save_steps 200
+    --logging_steps 10 --save_steps 50
 
 if [ ! -f "$OUTPUT_DIR/final_model/adapter_config.json" ]; then
     echo "ERROR: 训练未保存 LoRA adapter，跳过 merge"; exit 1
