@@ -19,6 +19,18 @@ import time
 import numpy as np
 import torch
 from accelerate.utils import broadcast_object_list, gather_object
+
+# ── SDPA 守卫: 训练前向禁 math 后端, 强制 flash/efficient(O(S))。───────────────
+# 若 SDPA 因某种 mask/dtype 真要退回 naive math(O(S²)), 直接报错而非悄悄变慢。
+# torch 无 torch.nn.attention API 时降级为 no-op(可移植到其它主机/旧 torch)。
+from contextlib import nullcontext as _nullcontext
+try:
+    from torch.nn.attention import sdpa_kernel as _sdpa_kernel, SDPBackend as _SDPB
+    def _sdpa_no_math():
+        return _sdpa_kernel([_SDPB.FLASH_ATTENTION, _SDPB.EFFICIENT_ATTENTION])
+except Exception:
+    def _sdpa_no_math():
+        return _nullcontext()
 from trl import GRPOTrainer
 
 from pomo_prm import POMOPRM, ThinkPRMResult
@@ -1796,7 +1808,8 @@ class GRPOPRMTrainer(GRPOTrainer):
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
         prompt_length  = prompt_ids.shape[1]
 
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        with _sdpa_no_math():   # 禁 math 后端: SDPA 必走 flash/efficient(O(S)), 否则报错而非悄悄 O(S²)
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
         logits  = outputs.logits
 
         completion_logits = logits[:, prompt_length - 1:-1, :]
