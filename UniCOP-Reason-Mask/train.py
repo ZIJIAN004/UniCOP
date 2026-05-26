@@ -489,10 +489,21 @@ def main():
     # 正确做法: 保留 tokenizer 从 model config 读到的上限 (Qwen2.5 是 131K),
     # prompt 长度上限由 GRPOConfig(max_prompt_length=...) 独立控制,见下面 grpo_config。
 
+    # attn 实现: 装了 flash-attn 就用 flash_attention_2(zhuoyi/zhihan 两台已装),
+    # 否则退回 sdpa(仍 O(S), 不会崩)。flash_attention_2 自身就是 O(S) 专用 kernel,
+    # 上面 _sdpa_no_math 守卫只在退回 sdpa 时起作用(flash 路径不走 F.sdpa, 守卫自动空转)。
+    try:
+        import flash_attn as _fa  # noqa: F401
+        _attn_impl = "flash_attention_2"
+    except Exception:
+        _attn_impl = "sdpa"
+    print(f"attn 实现:  {_attn_impl}  "
+          f"({'flash-attn 已装' if _attn_impl == 'flash_attention_2' else 'flash-attn 未装 → 退回 sdpa'})")
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
+        attn_implementation=_attn_impl,
     )
 
     # 如果前面 add_special_tokens 新加了 pad token (vocab size +1),
