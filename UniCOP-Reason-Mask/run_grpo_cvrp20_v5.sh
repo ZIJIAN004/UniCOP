@@ -61,10 +61,47 @@ fi
 echo "[RL 起点] SFT 产物 (非原始基座): $MODEL_BASE"
 echo "[BASE_MODEL_TYPE=$BASE_MODEL_TYPE] qwen3_thinking→Qwen3-4B SFT | r1_distill→R1-7B SFT"
 
-TOTAL_GPUS=7
-VLLM_GPU=6
-TRAIN_GPUS_CSV="0,1,2,3,4,5"
-TRAIN_PROC=6
+# ── GPU 选择 ──────────────────────────────────────────────────────────
+# zhihan 默认动态挑卡: nvidia-smi 扫所有卡, 用 free 显存 ≥ GPU_MIN_FREE_MIB 的空闲卡,
+# 不再写死 GPU 索引——某张卡被别人占了也能自动避开, 不会整个跑不起来。
+#   1 张做 vLLM + 其余做训练(训练进程数取 ≤可用-1 的最大偶数, 满足 4×n%8==0, 上限 NEED_TRAIN_PROC)。
+# 手动覆盖: 显式 export VLLM_GPU + TRAIN_GPUS_CSV (+TRAIN_PROC) 即跳过自动挑卡。
+# 其他主机(zhuoyi 在 sbatch 下 SLURM 已隔离卡)维持原固定分配。
+# 注: GPU_MIN_FREE_MIB=22528(22G, used≤2048) 比 check_gpu_idle 的 used≤2000 略松,
+#     但真正的空闲卡 used 只有几~几百 MiB, 两个判据都轻松通过。
+GPU_MIN_FREE_MIB="${GPU_MIN_FREE_MIB:-22528}"   # 22G; 单卡 free ≥ 此值才算空闲
+NEED_TRAIN_PROC="${NEED_TRAIN_PROC:-6}"          # 期望训练进程数(须偶数)
+
+if [ -n "${VLLM_GPU:-}" ] && [ -n "${TRAIN_GPUS_CSV:-}" ]; then
+    TRAIN_PROC="${TRAIN_PROC:-$(echo "$TRAIN_GPUS_CSV" | awk -F, '{print NF}')}"
+    echo "[GPU] 手动指定: vLLM=GPU $VLLM_GPU | 训练=GPU $TRAIN_GPUS_CSV ($TRAIN_PROC 进程)"
+elif [ "$HOST_ID" = "astar-zhihan" ]; then
+    _free_list=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null \
+        | awk -F',' -v th="$GPU_MIN_FREE_MIB" '{gsub(/ /,"",$1);gsub(/ /,"",$2)} $2+0>=th {print $1}') || true
+    _free_gpus=($_free_list)
+    _nfree=${#_free_gpus[@]}
+    echo "[GPU] 空闲卡(free≥${GPU_MIN_FREE_MIB}MiB): ${_free_gpus[*]:-无}  (共 $_nfree 张)"
+    if [ "$_nfree" -ge $((NEED_TRAIN_PROC + 1)) ]; then
+        TRAIN_PROC="$NEED_TRAIN_PROC"
+    else
+        _avail=$((_nfree - 1))                       # 留 1 张给 vLLM
+        TRAIN_PROC=$(( _avail - (_avail % 2) ))      # 训练进程向下取偶数
+        echo "[GPU] ⚠️ 空闲卡不足 $((NEED_TRAIN_PROC + 1)) 张, 降级到 1 vLLM + $TRAIN_PROC 训练"
+    fi
+    if [ "$TRAIN_PROC" -lt 2 ]; then
+        echo "[FATAL] 空闲卡不足(需至少 3 张: 1 vLLM + 2 训练), 当前仅 $_nfree 张 free≥${GPU_MIN_FREE_MIB}MiB"
+        nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader 2>/dev/null || true
+        exit 1
+    fi
+    _sel=("${_free_gpus[@]:0:$((TRAIN_PROC + 1))}")
+    TRAIN_GPUS_CSV=$(IFS=,; echo "${_sel[*]:0:$TRAIN_PROC}")   # 前 TRAIN_PROC 张做训练
+    VLLM_GPU="${_sel[$TRAIN_PROC]}"                            # 第 TRAIN_PROC+1 张做 vLLM
+    echo "[GPU] 自动分配: vLLM=GPU $VLLM_GPU | 训练=GPU $TRAIN_GPUS_CSV ($TRAIN_PROC 进程)"
+else
+    VLLM_GPU=6
+    TRAIN_GPUS_CSV="0,1,2,3,4,5"
+    TRAIN_PROC=6
+fi
 
 ZERO_STAGE=3
 NUM_TRAIN=4000
