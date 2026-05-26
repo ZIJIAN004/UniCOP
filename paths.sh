@@ -119,3 +119,15 @@ export BASE_MODEL_TYPE BASE_MODEL BASE_MODEL_R1 BASE_MODEL_QWEN3
 export VLLM_REASONING_FLAGS GEN_TEMPERATURE GEN_TOP_P GEN_TOP_K STAGE1_KEEP_THINK
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
+
+# ── CUDA dev 头/库永久补全(让 DeepSpeed/torch JIT 编译 CUDA 扩展能找到头) ──────────
+# conda env 把 CUDA 头/库放在 $CUDA_HOME/targets/x86_64-linux/{include,lib}, 而 torch 默认
+# 只看 $CUDA_HOME/include → FusedAdam 等编译时报 "cuda_runtime.h: No such file or directory"。
+# 这里把真目录永久加进 编译器(CPATH)/链接器(LIBRARY_PATH)/运行时(LD_LIBRARY_PATH) 搜索路径。
+# 用 [ -d ] 守卫: 目录存在才加, 没有 targets 布局的主机/env 上是无害 no-op。不需换 analog_env。
+_CUDA_TARGETS="$CUDA_HOME/targets/x86_64-linux"
+if [ -d "$_CUDA_TARGETS/include" ]; then
+    export CPATH="$_CUDA_TARGETS/include:${CPATH:-}"
+    export LIBRARY_PATH="$_CUDA_TARGETS/lib:${LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="$_CUDA_TARGETS/lib:$LD_LIBRARY_PATH"
+fi
