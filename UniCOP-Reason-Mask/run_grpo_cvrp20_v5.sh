@@ -71,14 +71,14 @@ NUM_TRAIN=4000
 OUTPUT_DIR_BASE="$WORK_DIR/output_v5"
 
 VLLM_PORT=8004
-# gpu_memory_utilization 是"总显存×util"的全局上限,不看空闲量。zhihan 的 24G 卡上
-# 0.85 会让 weights+KV 吃掉 ~20G,CUDA graph capture 阶段没余量 → capture_end OOM。
-# 故 zhihan 默认降到 0.6 留 ~10G 给 capture;zhuoyi 维持 0.85。仍可 env 覆盖(KV 不够调大/更紧调小)。
-if [ "$HOST_ID" = "astar-zhihan" ]; then
-    VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.6}"
-else
-    VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.85}"
-fi
+# gpu_memory_utilization 保持 0.85。
+# ⚠️ 不要为了绕 capture OOM 而降低它:实测 zhihan 24G 卡降到 0.6 会把 KV cache 砍半,
+#    配合 --enable_prefix_caching + ~3000 token 长生成触发 preemption/eviction,
+#    约一半 rollout 损坏 → parse_rate 从 1.0 掉到 0.5 (2026-05-26 实测对比 211256 vs 124129)。
+# capture OOM 的真因是上次 crash 的残留进程占显存,不是 0.85 太高 → 先 pkill 清干净:
+#    pkill -u $USER -f vllm_serve_logprobs.py; pkill -u $USER -f accelerate.commands.launch
+# 干净卡上 0.85 正常跑且 parse~1.0。仍可 env 覆盖(确有需要再调)。
+VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.85}"
 VLLM_MAX_MODEL_LEN=8192
 VLLM_DTYPE=bfloat16
 VLLM_STARTUP_TIMEOUT=300
