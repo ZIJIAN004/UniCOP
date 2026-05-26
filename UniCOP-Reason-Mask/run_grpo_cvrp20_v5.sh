@@ -108,14 +108,17 @@ NUM_TRAIN=4000
 OUTPUT_DIR_BASE="$WORK_DIR/output_v5"
 
 VLLM_PORT=8004
-# gpu_memory_utilization 保持 0.85。
-# ⚠️ 不要为了绕 capture OOM 而降低它:实测 zhihan 24G 卡降到 0.6 会把 KV cache 砍半,
-#    配合 --enable_prefix_caching + ~3000 token 长生成触发 preemption/eviction,
-#    约一半 rollout 损坏 → parse_rate 从 1.0 掉到 0.5 (2026-05-26 实测对比 211256 vs 124129)。
-# capture OOM 的真因是上次 crash 的残留进程占显存,不是 0.85 太高 → 先 pkill 清干净:
-#    pkill -u $USER -f vllm_serve_logprobs.py; pkill -u $USER -f accelerate.commands.launch
-# 干净卡上 0.85 正常跑且 parse~1.0。仍可 env 覆盖(确有需要再调)。
-VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.85}"
+# gpu_memory_utilization = 0.80 是 zhihan 24G 卡 + 这个 4B 模型的唯一甜点值。两边都是悬崖:
+#   ▲ 太高(≥0.85): CUDA graph capture 要 ~4.68GiB, 且这块显存在 util 预算之外
+#     (capture 之后才发生)。可用 = 23.69×(1-util): 0.85→3.55GiB < 4.68 → capture_end OOM;
+#     0.80→4.74GiB ≥ 4.68 → 仅 0.06GiB 余量但能过。所以 0.80 是能开 capture 的上限。
+#   ▼ 太低(≤0.6): KV cache 被砍半 → Maximum concurrency 4.66x < num_generations=8,
+#     一个 prompt 的 8 条采样装不下 → 疯狂 RECOMPUTE 抢占(实测 51 次 vs 0.80 时 1 次),
+#     prefix caching + 重算损坏约一半 rollout → parse/coverage 从 1.0 腰斩到 0.5
+#     (2026-05-26 实测对比 211256@0.80 vs 124129@0.60)。
+#   ✓ 0.80: KV 9.98GiB → concurrency 8.87x ≥ 8, 不抢占, parse~1.0; capture 也刚好放得下。
+# OOM 别再靠降 util 绕(会跌破 concurrency<8); concurrency 不够就降 num_generations 或开 enforce_eager。
+VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.80}"
 VLLM_MAX_MODEL_LEN=8192
 VLLM_DTYPE=bfloat16
 VLLM_STARTUP_TIMEOUT=300
