@@ -103,11 +103,10 @@ else
     TRAIN_PROC=6
 fi
 
-# ZeRO stage 可 env 覆盖。LoRA-on-4B(132M 可训, 基座 8.3GB 在 24G 卡装得下)其实不需要
-# ZeRO-3 切碎基座+offload——那是给"装不下的全参微调"用的, 对 LoRA 是用错刀, 逐层 param
-# all-gather + CPU↔GPU 搬运正是 fwd+bwd 90% 耗时的来源。改 ZERO_STAGE=2: 基座每卡完整副本、
-# 不分片不 offload, 每 step 只 reduce 132M LoRA 梯度 → fwd+bwd 预期数倍提速。
-# A/B 测速: ZERO_STAGE=2 bash run_grpo_cvrp20_v5.sh  (OOM 再退回 3 或 stage3+关 offload_param)
+# ZeRO stage 可 env 覆盖。⚠️ 分片(ZeRO-3)是刚需: 长序列(prompt+completion ~4300+ token)的
+# 激活才是显存大头, 不分片(ZeRO-2/DDP)基座 8.3GB 压满每卡 + 大激活 → OOM(已实测)。
+# 提速不靠改 stage, 靠 DS_OFFLOAD=0(见 train.py make_deepspeed_config): 保留分片、去掉 CPU
+# offload, 基座分片留 GPU 不再每层经 PCIe 搬运 → fwd+bwd 实测减 ~50%(fwd+bwd 占单 step 90%)。
 ZERO_STAGE="${ZERO_STAGE:-3}"
 NUM_TRAIN=4000
 OUTPUT_DIR_BASE="$WORK_DIR/output_v5"

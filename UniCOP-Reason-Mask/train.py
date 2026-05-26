@@ -210,18 +210,16 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "stage3_max_live_parameters":     1e8,
             "stage3_max_reuse_distance":      1e9,
             "gather_16bit_weights_on_model_save": True,
-            "offload_optimizer": {
-                "device":     "cpu",
-                "pin_memory": True,
-            },
-            # offload_param 恢复 cpu (用户决定 2026-05-18 撤回 offload 关闭):
-            # 之前关 offload_param 收益是 fwd+bwd 减 50%, 但 mask attach 诊断未完成,
-            # 先恢复保守配置, 等 mask 验证 work 之后再决定是否再激进.
-            "offload_param": {
-                "device":     "cpu",
-                "pin_memory": True,
-            },
         }
+        # CPU offload 开关 (DS_OFFLOAD=0 关闭, 默认开)。
+        # ⚠️ 分片(ZeRO-3)是刚需不能去: 长序列(prompt+completion ~4300+ token)的激活是显存大头,
+        #    不分片(ZeRO-2/DDP)基座 8.3GB 完整压每卡 + 大激活 → 必 OOM(已实测)。
+        # 但 offload 可去: 关掉后基座仍分片在 GPU(~1.4GB/卡), 不再每层从 CPU 经 PCIe 搬运 →
+        #    实测 fwd+bwd 减 ~50%(2026-05-18, 当时为 mask 诊断才撤回, 非 OOM)。LoRA 优化器很小,
+        #    留 GPU 也只百 MB 级。显存够就 DS_OFFLOAD=0 提速; 不够再开回。
+        if os.environ.get("DS_OFFLOAD", "1") != "0":
+            base["zero_optimization"]["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
+            base["zero_optimization"]["offload_param"]     = {"device": "cpu", "pin_memory": True}
 
     return base
 
