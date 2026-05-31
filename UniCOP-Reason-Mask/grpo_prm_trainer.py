@@ -91,8 +91,11 @@ def _strip_chat_specials(text: str) -> str:
 
 
 # 逐 token log-prob 的 chunk 大小 (token 维分块, 与 completion 总长解耦)。
-# 越小峰值显存越低; 512 对 7B + 词表~151k 约 1.8GiB/块 (fp32), 安全且开销可忽略。
-_LOGP_CHUNK_SIZE = 512
+# 越小峰值显存越低, 且数值【完全等价】(分块大小不改数学, 逐元素一致)。
+# 256 对词表~151k: _logp_from_hidden_chunked(change A) 约 0.62GiB/块, _selective_logp_chunked 同量级,
+# 比 512 省 ~0.6GiB 峰值, 速度代价可忽略 (块数翻倍 = 多一倍 kernel launch, 微秒级; head 仅占整步 ~1%)。
+# 为 ZeRO-2 压线腾显存默认设 256; 显存宽裕想稍快可调回 512。
+_LOGP_CHUNK_SIZE = 256
 
 
 def _selective_logp_chunked(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
