@@ -26,7 +26,25 @@ from accelerate.utils import broadcast_object_list, gather_object
 # ── SDPA 守卫: 训练前向禁 math 后端, 强制 flash/efficient(O(S))。───────────────
 # 若 SDPA 因某种 mask/dtype 真要退回 naive math(O(S²)), 直接报错而非悄悄变慢。
 # torch 无 torch.nn.attention API 时降级为 no-op(可移植到其它主机/旧 torch)。
-from contextlib import nullcontext as _nullcontext
+from contextlib import nullcontext as _nullcontext, contextmanager
+
+
+@contextmanager
+def _cuda_timer(store: dict, key: str, enabled: bool):
+    """精细化耗时统计: cuda.synchronize() 包夹一段代码, 累加到 store[key]。
+    enabled=False 时零开销 no-op (正常训练不受影响)。GPU 异步, 必须 sync 才准。"""
+    if not enabled:
+        yield
+        return
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    _t = time.time()
+    try:
+        yield
+    finally:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        store[key] = store.get(key, 0.0) + (time.time() - _t)
 try:
     from torch.nn.attention import sdpa_kernel as _sdpa_kernel, SDPBackend as _SDPB
     def _sdpa_no_math():
@@ -152,14 +170,22 @@ class GRPOPRMTrainer(GRPOTrainer):
                 f"当前 = {self.args.num_generations}"
             )
 
-        # ── 第 1 个 step 各阶段耗时打印 (诊断瓶颈用) ────────────────────
-        # 三段: rollout (vLLM 生成) / reward (resample + advantages) /
-        # forward+backward (含 NCCL AllReduce). 仅 rank 0 第 1 个 step 打印.
-        # gradient_accumulation_steps > 1 时 training_step 会被调多次,
-        # fwd_bwd 累加直到达到 grad_accum_steps 才视为完整 step.
+        # ── 精细化阶段耗时 profiler (诊断速度瓶颈 / A-B 各加速改动) ──────────
+        # 把一个 optimizer step 拆成: gen(vLLM) / score(PRM+advantage) /
+        # fwd.backbone / fwd.head / bwd(含 GC 重算 + NCCL + ZeRO-3 gather) / optim。
+        # 每个桶对应一个可调加速旋钮 (见 _print_step_timing 的映射)。
+        #   PROFILE_STEPS=N  累计 N 个 step 求平均 (默认 1)
+        #   PROFILE_WARMUP=W 先跳过 W 个 step 再测 (默认 1, 避开 FusedAdam/flash JIT 噪声)
+        # 仅 rank 0 打印。PROFILE_STEPS=0 时退化为旧版"只测第 1 step"。
         self._timing_log: dict[str, float] = {}
-        self._timing_fwd_bwd_count: int = 0
+        self._timing_fwd_bwd_count: int = 0          # 当前 opt step 内已累计的 micro 数
         self._timing_done: bool = False
+        self._prof_total = int(os.environ.get("PROFILE_STEPS", "1"))   # 测几个 step
+        self._prof_warmup = int(os.environ.get("PROFILE_WARMUP", "1")) # 先跳几个 step
+        self._prof_opt_seen = 0                       # 已完成的 optimizer step 数
+        self._prof_measured = 0                       # 已计入统计的 step 数
+        self._optim_wrapped = False
+        self._optim_timer_ok = False
 
     def _get_train_sampler(self, dataset=None):
         return super()._get_train_sampler()
@@ -179,7 +205,7 @@ class GRPOPRMTrainer(GRPOTrainer):
     # ══════════════════════════════════════════════════════════════════
 
     def _generate_and_score_completions(self, inputs):
-        _record = not self._timing_done
+        _record = self._prof_on
         if _record and torch.cuda.is_available():
             torch.cuda.synchronize()
         _t0 = time.time()
@@ -1898,19 +1924,21 @@ class GRPOPRMTrainer(GRPOTrainer):
                 and not getattr(self, "_chunked_head_disabled", False)):
             try:
                 backbone, lm_head = self._resolve_backbone_head(model)
-                with _sdpa_no_math():
-                    bb_out = backbone(input_ids=input_ids,
-                                      attention_mask=attention_mask, use_cache=False)
-                hidden = (bb_out.last_hidden_state
-                          if hasattr(bb_out, "last_hidden_state") else bb_out[0])
+                with _cuda_timer(self._timing_log, "fwd.backbone", self._prof_on):
+                    with _sdpa_no_math():
+                        bb_out = backbone(input_ids=input_ids,
+                                          attention_mask=attention_mask, use_cache=False)
+                    hidden = (bb_out.last_hidden_state
+                              if hasattr(bb_out, "last_hidden_state") else bb_out[0])
                 # 预测 completion[j] 的 logit 在位置 (P+j-1); 取 [P-1 : S-1] 共 completion_len 个,
                 # 与原路径 logits_to_keep=C+1 再 [:, :-1, :] 的切片逐元素等价。
                 hidden_comp = hidden[:, prompt_length - 1:-1, :]            # [B, C, H]
-                weight = self._gather_head_weight(lm_head)                  # [V, H] frozen dense
-                return torch_checkpoint.checkpoint(
-                    _logp_from_hidden_chunked, hidden_comp, completion_ids, weight,
-                    use_reentrant=False,
-                )
+                with _cuda_timer(self._timing_log, "fwd.head", self._prof_on):
+                    weight = self._gather_head_weight(lm_head)              # [V, H] frozen dense
+                    return torch_checkpoint.checkpoint(
+                        _logp_from_hidden_chunked, hidden_comp, completion_ids, weight,
+                        use_reentrant=False,
+                    )
             except Exception as _e:
                 if not getattr(self, "_chunked_head_warned", False):
                     print(f"⚠️ 分块 LM head (CHUNKED_LM_HEAD) 失败, 永久回退到 "
@@ -1933,7 +1961,8 @@ class GRPOPRMTrainer(GRPOTrainer):
 
     def compute_loss(self, model, inputs, return_outputs=False,
                      num_items_in_batch=None):
-        return self._compute_loss(model, inputs)
+        with _cuda_timer(self._timing_log, "fwd", self._prof_on):
+            return self._compute_loss(model, inputs)
 
     def _compute_loss(self, model, inputs):
         """
@@ -2111,14 +2140,61 @@ class GRPOPRMTrainer(GRPOTrainer):
         return loss
 
     # ══════════════════════════════════════════════════════════════════
-    #  第 1 个 step 耗时打印 (诊断瓶颈)
+    #  精细化阶段耗时 profiler (诊断瓶颈 / A-B 各加速旋钮)
     # ══════════════════════════════════════════════════════════════════
 
+    @property
+    def _prof_on(self) -> bool:
+        """当前 optimizer step 是否在测量窗口内 (跳过 warmup, 只测 PROFILE_STEPS 个)。"""
+        return (not self._timing_done
+                and self._prof_warmup <= self._prof_opt_seen
+                < self._prof_warmup + self._prof_total)
+
+    def _advance_step(self):
+        """一个 optimizer step 完成后推进边界: 计数 + 到达 PROFILE_STEPS 则打印。"""
+        was_measured = self._prof_on            # 必须在 opt_seen++ 之前取
+        self._prof_opt_seen += 1
+        self._timing_fwd_bwd_count = 0          # 重置 micro 计数, 进入下一 step
+        if was_measured:
+            self._prof_measured += 1
+        if not self._timing_done and self._prof_measured >= self._prof_total:
+            self._timing_done = True
+            self._print_step_timing()
+
+    def _install_optim_timer(self):
+        """懒包 self.optimizer.step: 计 optim 耗时 + 推进 step 边界。
+        optim 每个 optimizer step 调一次 (grad_accum 个 micro 之后), 是 CPUAdam
+        vs FusedAdam 的关键诊断点 (DS_OFFLOAD 的主要成本)。"""
+        self._optim_wrapped = True
+        try:
+            _orig = self.optimizer.step
+        except Exception:
+            self._optim_timer_ok = False        # 包不上 → training_step 兜底推进 (optim 计 0)
+            return
+        self._optim_timer_ok = True
+        _self = self
+
+        def _timed_step(*a, **k):
+            _rec = _self._prof_on
+            if _rec and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            _t = time.time()
+            out = _orig(*a, **k)
+            if _rec and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            if _rec:
+                _self._timing_log["optim"] = (
+                    _self._timing_log.get("optim", 0.0) + time.time() - _t)
+            _self._advance_step()               # optim 已计入, 此时推进边界才对
+            return out
+
+        self.optimizer.step = _timed_step
+
     def training_step(self, *args, **kwargs):
-        """包住单次 micro-batch 的 forward + backward.
-        gradient_accumulation_steps 次 training_step 累加后视为完整 step.
-        """
-        _record = not self._timing_done
+        """单次 micro-batch 的 forward + backward。grad_accum 次累加后才触发 optimizer.step。"""
+        if not self._optim_wrapped:
+            self._install_optim_timer()
+        _record = self._prof_on
         if _record and torch.cuda.is_available():
             torch.cuda.synchronize()
         _t0 = time.time()
@@ -2129,39 +2205,48 @@ class GRPOPRMTrainer(GRPOTrainer):
             torch.cuda.synchronize()
         if _record:
             self._timing_log["fwd_bwd"] = (
-                self._timing_log.get("fwd_bwd", 0.0) + time.time() - _t0
-            )
-            self._timing_fwd_bwd_count += 1
-            grad_accum = max(1, getattr(self.args, "gradient_accumulation_steps", 1))
-            if self._timing_fwd_bwd_count >= grad_accum:
-                self._timing_done = True
-                self._print_first_step_timing()
-
+                self._timing_log.get("fwd_bwd", 0.0) + time.time() - _t0)
+        self._timing_fwd_bwd_count += 1
+        # 兜底: 若 optimizer.step 没能被包 (DeepSpeed 内部 step), 用 micro 计数推进边界 (optim 计 0)
+        ga = max(1, getattr(self.args, "gradient_accumulation_steps", 1))
+        if not getattr(self, "_optim_timer_ok", False) and self._timing_fwd_bwd_count >= ga:
+            self._advance_step()
         return loss
 
-    def _print_first_step_timing(self):
+    def _print_step_timing(self):
         if not self.accelerator.is_main_process:
             return
-        r = self._timing_log
-        total = r.get("rollout", 0) + r.get("reward", 0) + r.get("fwd_bwd", 0)
+        n = max(1, self._prof_measured)          # 实测 step 数, 用于求每-step 平均
+        r = {k: v / n for k, v in self._timing_log.items()}   # 每 step 平均
+        gen   = r.get("rollout", 0.0)            # vLLM 生成 + 权重同步
+        score = r.get("reward", 0.0)             # PRM + terminal + advantage + resample
+        fwd   = r.get("fwd", 0.0)                # _compute_loss 前向 (累 grad_accum micro)
+        fbb   = r.get("fwd_bwd", 0.0)            # 前向+反向 (累 grad_accum micro)
+        bwd   = max(0.0, fbb - fwd)              # 反向 = fwd_bwd - fwd
+        bb    = r.get("fwd.backbone", 0.0)
+        head  = r.get("fwd.head", 0.0)
+        optim = r.get("optim", 0.0)
+        total = gen + score + fbb + optim
         if total <= 0:
             return
-        pct = lambda x: 100.0 * x / total
-        n_micro = self._timing_fwd_bwd_count
+        pc = lambda x: 100.0 * x / total
+        ga = max(1, getattr(self.args, "gradient_accumulation_steps", 1))
         print(
-            f"\n{'='*64}\n"
-            f"  第 1 个 step 各阶段耗时 (rank 0)\n"
-            f"{'='*64}\n"
-            f"  rollout (vLLM 生成):              "
-            f"{r.get('rollout', 0):7.2f}s  ({pct(r.get('rollout', 0)):5.1f}%)\n"
-            f"  reward  (resample + advantages):  "
-            f"{r.get('reward', 0):7.2f}s  ({pct(r.get('reward', 0)):5.1f}%)\n"
-            f"  fwd+bwd (含 NCCL AllReduce, "
-            f"{n_micro}×accum): "
-            f"{r.get('fwd_bwd', 0):7.2f}s  ({pct(r.get('fwd_bwd', 0)):5.1f}%)\n"
-            f"  {'-'*58}\n"
-            f"  单 step 总计:                     {total:7.2f}s\n"
-            f"{'='*64}\n",
+            f"\n{'='*72}\n"
+            f"  精细化阶段耗时 (rank0, 每 step 平均; 测 {n} step, 跳过前 {self._prof_warmup})\n"
+            f"  grad_accum={ga}  →  fwd/bwd 桶是 {ga} 个 micro 之和\n"
+            f"{'='*72}\n"
+            f"  gen   vLLM生成+权重同步     {gen:8.2f}s ({pc(gen):5.1f}%)  ← vLLM/采样长度\n"
+            f"  score PRM+terminal+adv      {score:8.2f}s ({pc(score):5.1f}%)  ← POMO PRM/CPU\n"
+            f"  fwd   前向(backbone+head)   {fwd:8.2f}s ({pc(fwd):5.1f}%)  ← Liger/change A\n"
+            f"      ├ backbone(36层)        {bb:8.2f}s            ← Liger/DS_OFFLOAD\n"
+            f"      └ head(分块logp)        {head:8.2f}s            ← change A(CHUNKED_LM_HEAD)\n"
+            f"  bwd   反向=fwd_bwd-fwd      {bwd:8.2f}s ({pc(bwd):5.1f}%)  ← 梯度重计算(GC)/NCCL/gather\n"
+            f"  optim 优化器step            {optim:8.2f}s ({pc(optim):5.1f}%)  ← DS_OFFLOAD(CPUAdam vs FusedAdam)\n"
+            f"  {'-'*66}\n"
+            f"  单 step 总计                {total:8.2f}s\n"
+            f"  (注: bwd 含被 GC/ZeRO-3 隐藏的重算与通信; optim≈0 说明 DeepSpeed 内部 step 未走 self.optimizer.step)\n"
+            f"{'='*72}\n",
             flush=True,
         )
 

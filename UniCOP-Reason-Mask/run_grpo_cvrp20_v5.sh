@@ -52,6 +52,15 @@ export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
 export USE_LIGER="${USE_LIGER:-1}"
 export LIGER_SWIGLU="${LIGER_SWIGLU:-1}"
 
+# ── 梯度重计算开关 (A/B 测速用)。默认开; GRAD_CKPT=0 关掉 (省 backward 重算, 吃显存) ──
+GRAD_CKPT="${GRAD_CKPT:-1}"
+if [ "$GRAD_CKPT" = "1" ]; then
+    GC_FLAG="--gradient_checkpointing"
+else
+    GC_FLAG=""
+    echo "[GC] gradient_checkpointing 已关闭 (GRAD_CKPT=0)"
+fi
+
 # ── 配置 ──────────────────────────────────────────────────────────────
 PROBLEM="cvrp"
 SIZE=20
@@ -329,7 +338,7 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPUS_CSV" \
     --model "$MODEL_BASE" \
     --num_gpus "$TRAIN_PROC" \
     --zero_stage "$ZERO_STAGE" \
-    --gradient_checkpointing \
+    $GC_FLAG \
     --output_dir "$OUTPUT_DIR_BASE" \
     --pomo_ckpt_dir "$POMO_CKPT_DIR" \
     --pomo_baseline_dir "$POMO_BASELINE_DIR" \
