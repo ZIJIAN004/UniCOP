@@ -42,8 +42,18 @@ export PYTHONUNBUFFERED=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export NCCL_DEBUG=WARN
 export PYTHONFAULTHANDLER=1
-export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"   # zhuoyi 防 hang 默认禁；zhihan 单机可 export 0 走 P2P 省显存
-export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
+# NCCL 传输默认按主机分流 (HOST_ID 来自 paths.sh):
+#   zhihan (astar-zhihan, 单机) → 默认开 P2P/SHM (=0), ZeRO-3 集合通信走 NVLink/共享内存, 大幅提速;
+#   zhuoyi 等其它 → 默认禁 (=1), 否则 ZeRO-3 init hang 30min (reference_zhuoyi_nccl_topology)。
+# 仍可用 env 覆盖: NCCL_P2P_DISABLE=1 bash ... (zhihan 万一 init hang 时退回)。
+if [ "${HOST_ID:-}" = "astar-zhihan" ]; then
+    _NCCL_DEFAULT=0
+else
+    _NCCL_DEFAULT=1
+fi
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-$_NCCL_DEFAULT}"
+export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-$_NCCL_DEFAULT}"
+echo "[NCCL] HOST_ID=${HOST_ID:-?}  P2P_DISABLE=$NCCL_P2P_DISABLE  SHM_DISABLE=$NCCL_SHM_DISABLE  (0=开/快, 1=禁/稳)"
 
 # ── Liger Kernel 提速 (RMSNorm/RoPE/SwiGLU), 默认开启 ───────────────────
 # 兼容性已验证: tests/test_liger_compat.py 4/4 PASS (含 LoRA×SwiGLU 反传)。
