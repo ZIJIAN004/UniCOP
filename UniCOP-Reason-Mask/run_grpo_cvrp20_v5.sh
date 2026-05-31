@@ -149,7 +149,7 @@ VLLM_PORT=8004
 #   ✓ 0.80: KV 9.98GiB → concurrency 8.87x ≥ 8, 不抢占, parse~1.0; capture 也刚好放得下。
 # OOM 别再靠降 util 绕(会跌破 concurrency<8); concurrency 不够就降 num_generations 或开 enforce_eager。
 VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.80}"
-VLLM_MAX_MODEL_LEN=8192
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-5248}"   # ≥ max_prompt(1280)+max_completion(3584)+overhead; 8192→5248 同步收紧, 顺带提 vLLM 并发
 VLLM_DTYPE=bfloat16
 VLLM_STARTUP_TIMEOUT=300
 

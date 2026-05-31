@@ -37,12 +37,14 @@ class Config:
     # Qwen3 tokenizer BPE 比 R1 拆得更细 (smoke test 实测 CVRP-10 prompt 921 vs
     # R1 估 ~700, ratio ≈ 1.32). 为保 R1 → Qwen3 切换时实际 output capacity
     # 不缩水, 按 ratio 等比放大:
-    #   max_prompt_length:     768 → 1280 (CVRP-20 prompt 留 buffer)
-    #   max_completion_length: 4096 → 6144 (Qwen3 等价于 R1 4096 token 内容)
-    # 两个值对 R1 path 无副作用 (R1 prompt 短不触发上限).
-    # vLLM 端 max_model_len 同步 5120 → 8192 (1280 + 6144 + chat overhead).
+    #   max_prompt_length:     768 → 1280 (CVRP-20 prompt 留 buffer, 实测 max~1201, 保持 1280 已够)
+    #   max_completion_length: 6144 → 3584 (token-probe 实测 completion max~3215/p95~3196,
+    #     6144 过度配置; 收紧到 3584(~11% headroom)大幅省激活/hidden/logp/KV 显存, 适配 ZeRO-2)
+    # ⚠️ RL 训练中 completion 长度可能随训练增长 → 盯 stats/truncation_rate, 若 >1~2% 说明被截断
+    #     伤推理/parse, 应调回更大(如 4096)。
+    # vLLM 端 max_model_len 同步 8192 → 5248 (run script VLLM_MAX_MODEL_LEN, ≥1280+3584+overhead).
     max_prompt_length: int             = 1280
-    max_completion_length: int         = 6144
+    max_completion_length: int         = 3584
     learning_rate: float               = 1e-5   # v5 用 2e-5 第 1 step grad_norm explode (3.87 clip→1.0,
                                                 # Δθ=2e-5, 比 v4 第 1 step Δθ=2e-8 大 100,000x), 模型 push 过头进 plateau.
                                                 # 降回 1e-5: Δθ 减半, 配合 warmup 0.02 (10 step) 避免第 1 step explode.
@@ -238,7 +240,7 @@ class Config:
     #   reasoning → 推理模型（DeepSeek-R1-Distill 系列），需长 completion 容纳 <think> 链
     #   instruct  → 普通指令模型（Qwen2.5-Instruct 等），直接输出答案，无需长 completion
     eval_model_type: str = "reasoning"
-    # eval cap 调高: 训练 max_completion_length=6144, eval 留 ~2x 余量给 think outlier.
+    # eval cap 调高: 训练 max_completion_length=3584, eval 留大余量给 think outlier (与训练 cap 解耦).
     # 12000 < Qwen3-4B max_position_embeddings (262144) 和 R1-7B (131072), 引擎无障碍.
     # evaluate.py:954 已改为读这个字段 (原来是 hardcode 10000, dead config), 改这里生效.
     eval_max_completion_length_reasoning: int = 12000
