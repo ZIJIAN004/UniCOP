@@ -18,6 +18,7 @@ import json
 import time
 import numpy as np
 import torch
+import torch.utils.checkpoint as torch_checkpoint
 from accelerate.utils import broadcast_object_list, gather_object
 
 # ── SDPA 守卫: 训练前向禁 math 后端, 强制 flash/efficient(O(S))。───────────────
@@ -67,6 +68,39 @@ def _strip_chat_specials(text: str) -> str:
         if tok in text:
             text = text.replace(tok, "")
     return text
+
+
+# 逐 token log-prob 的 chunk 大小 (token 维分块, 与 completion 总长解耦)。
+# 越小峰值显存越低; 512 对 7B + 词表~151k 约 1.8GiB/块 (fp32), 安全且开销可忽略。
+_LOGP_CHUNK_SIZE = 512
+
+
+def _selective_logp_chunked(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """显存友好的逐 token log-prob, 不物化整块 [B, T, V] 的 log_softmax。
+
+    数学上等价于 ``log_softmax(logits, -1).gather(-1, index)``:
+        log p(token) = logit[token] - logsumexp(logits over vocab)
+    但在 token 维分块、每块临时 upcast fp32 计算, 因此:
+      * 不再额外造一个和 logits 等大的 [B, T, V] 张量 (原 log_softmax 的 OOM 元凶);
+      * fp32 reduction 比原 bf16 log_softmax 数值更稳 (解决"logsumexp bf16 不稳"顾虑)。
+
+    建议配合 torch.utils.checkpoint(use_reentrant=False) 调用: backward 会按块重算,
+    不把任何 [B, T, V] 中间量留到反传, forward / backward 峰值都只是单块大小。
+
+    Args:
+        logits: [B, T, V], 通常是 outputs.logits[:, :-1, :] (policy 对 completion 的预测)。
+        index:  [B, T], 各位置实际 token id (completion_ids)。
+    Returns:
+        [B, T] 的 per-token log-prob (fp32)。
+    """
+    parts = []
+    T = logits.shape[1]
+    for s in range(0, T, _LOGP_CHUNK_SIZE):
+        e = min(s + _LOGP_CHUNK_SIZE, T)
+        lg = logits[:, s:e, :].float()                                      # [B, c, V] fp32 (临时)
+        sel = lg.gather(dim=-1, index=index[:, s:e].unsqueeze(-1)).squeeze(-1)  # [B, c]
+        parts.append(sel - torch.logsumexp(lg, dim=-1))                     # [B, c]
+    return torch.cat(parts, dim=1)                                          # [B, T]
 
 
 class GRPOPRMTrainer(GRPOTrainer):
@@ -1812,8 +1846,7 @@ class GRPOPRMTrainer(GRPOTrainer):
         # 省掉 prompt 段"算完整词表又被丢弃"的 gemm + 大 logits 张量(就是 nvidia-smi 里 mem 带宽尖峰)。
         # 数值等价: 取出的 completion_logits 与原来"算全序列再切 [prompt_len-1:-1]" 逐元素相同。
         # 经核实为 TRL 0.16 GRPOTrainer 同款做法; 需 transformers>=4.48(本项目 4.57.6 ✓)。
-        # 注: 不加 TRL 的 logits/temperature(会改训练语义) 和 logsumexp(bf16 数值不稳, selective_log_softmax
-        #     在 bf16 下本就退回 log_softmax), 仅做"少算 logits"这一等价优化。
+        # 注: 不加 TRL 的 logits/temperature(会改训练语义), 仅做"少算 logits"这一等价优化。
         completion_len = completion_ids.shape[1]
         with _sdpa_no_math():   # 禁 math 后端: SDPA 必走 flash/efficient(O(S)), 否则报错而非悄悄 O(S²)
             outputs = model(
@@ -1823,10 +1856,14 @@ class GRPOPRMTrainer(GRPOTrainer):
         # 返回最后 completion_len+1 个位置(prompt_len-1 .. T-1)的 logits;
         # 丢掉最后一个(预测序列外 token), 剩下正好预测 completion 各 token。
         completion_logits = outputs.logits[:, :-1, :]
-        per_token_logps = torch.log_softmax(completion_logits, dim=-1)
-        per_token_logps = per_token_logps.gather(
-            dim=-1, index=completion_ids.unsqueeze(-1)
-        ).squeeze(-1)
+        # 显存优化: 不对整块 [B, T, V] 做 log_softmax (会再物化一个等大张量, 即 OOM 元凶),
+        # 改用分块 + fp32 + gradient-checkpoint 的逐 token logprob (见 _selective_logp_chunked)。
+        # 数学等价于 log_softmax(logits).gather(completion_ids); fp32 比原 bf16 更稳。
+        # use_reentrant=False: backward 按块重算, 不把 [B, T, V] 中间量留到反传。
+        per_token_logps = torch_checkpoint.checkpoint(
+            _selective_logp_chunked, completion_logits, completion_ids,
+            use_reentrant=False,
+        )
 
         if old_per_token_logps is None:
             old_per_token_logps = inputs.get("logprobs")
