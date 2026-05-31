@@ -190,6 +190,42 @@ class GRPOPRMTrainer(GRPOTrainer):
         self._optim_wrapped = False
         self._optim_timer_ok = False
 
+        # ── 算子级 profiler: torch.profiler (PROFILE_TORCH=1 启用) ──────────────
+        # 把 bwd 黑盒拆到算子级: 区分 矩阵乘(aten::*mm/linear) vs NCCL(c10d/nccl) vs
+        # 同步空转(cudaDeviceSynchronize/aten::copy_)。一锤定音"剩下的时间到底花在哪"。
+        # schedule: 跳过前 PROFILE_TORCH_WARMUP 个 opt step, 再 active PROFILE_TORCH_ACTIVE 个,
+        # 然后 on_trace_ready 打印 key_averages 表。仅 rank0。开销大, 仅诊断用, 默认关。
+        self._torch_prof = None
+        self._torch_prof_done = False
+        if os.environ.get("PROFILE_TORCH", "0") == "1":
+            try:
+                from torch.profiler import profile as _tprofile, schedule as _tschedule, ProfilerActivity as _TAct
+                _w = int(os.environ.get("PROFILE_TORCH_WARMUP", "2"))
+                _a = int(os.environ.get("PROFILE_TORCH_ACTIVE", "2"))
+
+                def _on_ready(p):
+                    if not self.accelerator.is_main_process:
+                        return
+                    print(f"\n{'#'*72}\n  torch.profiler 算子级 (rank0)  按 CUDA self time 排序 top30\n{'#'*72}", flush=True)
+                    print(p.key_averages().table(sort_by="self_cuda_time_total", row_limit=30), flush=True)
+                    print(f"\n{'#'*72}\n  按 CPU self time 排序 top20 (看 Python/同步/编排开销)\n{'#'*72}", flush=True)
+                    print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=20), flush=True)
+                    print(f"{'#'*72}\n  [PROFILE_TORCH 完成, 可 Ctrl-C 停止]\n{'#'*72}", flush=True)
+                    self._torch_prof_done = True
+
+                self._torch_prof = _tprofile(
+                    activities=[_TAct.CPU, _TAct.CUDA],
+                    schedule=_tschedule(wait=1, warmup=_w, active=_a, repeat=1),
+                    on_trace_ready=_on_ready,
+                    record_shapes=False, with_stack=False, profile_memory=False,
+                )
+                self._torch_prof.start()
+                print(f"✓ torch.profiler 已启用 (wait=1, warmup={_w}, active={_a}); "
+                      f"约第 {1 + _w + 1}~{1 + _w + _a} 个 opt step 后打印算子表", flush=True)
+            except Exception as _e:
+                print(f"⚠️ torch.profiler 启用失败, 跳过: {type(_e).__name__}: {_e}", flush=True)
+                self._torch_prof = None
+
     def _get_train_sampler(self, dataset=None):
         return super()._get_train_sampler()
 
@@ -2163,6 +2199,12 @@ class GRPOPRMTrainer(GRPOTrainer):
         if not self._timing_done and self._prof_measured >= self._prof_total:
             self._timing_done = True
             self._print_step_timing()
+        # 算子级 profiler 每个 optimizer step 推进一次 schedule
+        if self._torch_prof is not None and not self._torch_prof_done:
+            try:
+                self._torch_prof.step()
+            except Exception:
+                pass
 
     def _install_optim_timer(self):
         """懒包 self.optimizer.step: 计 optim 耗时 + 推进 step 边界。
