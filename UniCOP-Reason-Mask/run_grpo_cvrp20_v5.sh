@@ -45,6 +45,13 @@ export PYTHONFAULTHANDLER=1
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"   # zhuoyi 防 hang 默认禁；zhihan 单机可 export 0 走 P2P 省显存
 export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
 
+# ── Liger Kernel 提速 (RMSNorm/RoPE/SwiGLU), 默认开启 ───────────────────
+# 兼容性已验证: tests/test_liger_compat.py 4/4 PASS (含 LoRA×SwiGLU 反传)。
+# 只融合模型 forward 层算子 (~10-20% 吞吐), 与自定义 GRPO loss 解耦; train.py 里
+# 已强制关 cross_entropy/FLCE。单次禁用: USE_LIGER=0 bash run_grpo_cvrp20_v5.sh
+export USE_LIGER="${USE_LIGER:-1}"
+export LIGER_SWIGLU="${LIGER_SWIGLU:-1}"
+
 # ── 配置 ──────────────────────────────────────────────────────────────
 PROBLEM="cvrp"
 SIZE=20
