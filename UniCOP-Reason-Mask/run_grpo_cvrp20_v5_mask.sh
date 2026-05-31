@@ -79,7 +79,7 @@ TRAIN_GPUS_CSV="0,1,2,3,4,5"
 TRAIN_PROC=6
 
 ZERO_STAGE=3
-NUM_TRAIN=4000
+NUM_TRAIN="${NUM_TRAIN:-1000}"   # 一个 epoch 的 instance 数, 可 env 覆盖。total_steps = NUM_TRAIN×epochs(3)÷24 (1000→125)
 OUTPUT_DIR_BASE="$WORK_DIR/output_v5_mask"
 
 VLLM_PORT=8005
