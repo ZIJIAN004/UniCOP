@@ -158,6 +158,9 @@ from config import config
 # num_generations 不覆盖(保持 8 路对比)。⚠️ 整除约束: per_device_batch × num_gpus % num_generations == 0。
 config.per_device_train_batch_size = int(os.environ.get("PER_DEVICE_BATCH", config.per_device_train_batch_size))
 config.gradient_accumulation_steps = int(os.environ.get("GRAD_ACCUM", config.gradient_accumulation_steps))
+# 消融实验: DISABLE_PRM=1 关闭 POMO PRM 过程奖励 (只留 A_feas + A_outcome), 且下面不加载 POMO。
+if os.environ.get("DISABLE_PRM") is not None:
+    config.disable_prm = os.environ.get("DISABLE_PRM") == "1"
 
 from data.generate import build_dataset, build_mixed_dataset
 from problems import get_problem, SUPPORTED_PROBLEMS
@@ -665,7 +668,10 @@ def main():
           f"{os.environ.get('BASE_MODEL_TYPE', '(unset)')})")
 
     # ── 初始化奖励模块 + 训练 ──────────────────────────────────────────
-    if config.reward_mode == "prm":
+    # disable_prm=True (消融): 不加载 POMO, pomo_prm=None。trainer 三处 PRM 注入都
+    # 由 `not config.disable_prm and self.pomo_prm is not None` 守卫, 自然跳过 →
+    # 只剩 A_feas + A_outcome, 且不依赖 POMO checkpoint、省 POMO 那块显存。
+    if config.reward_mode == "prm" and not config.disable_prm:
         pomo_prm = POMOPRM(
             pomo_ckpt_dir=config.pomo_ckpt_dir,
             pomo_baseline_dir=config.pomo_baseline_dir,
@@ -676,6 +682,8 @@ def main():
         pomo_prm.check_checkpoints(problem_types, [config.problem_size])
     else:
         pomo_prm = None
+        if config.disable_prm:
+            print("⚠️ DISABLE_PRM: 消融模式, 不加载 POMO PRM, 只用 A_feas + A_outcome")
 
     trainer = GRPOPRMTrainer(
         pomo_prm=pomo_prm,

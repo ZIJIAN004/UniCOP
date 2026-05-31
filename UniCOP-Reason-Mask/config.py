@@ -50,7 +50,7 @@ class Config:
                                                 # 降回 1e-5: Δθ 减半, 配合 warmup 0.02 (10 step) 避免第 1 step explode.
     per_device_train_batch_size: int   = 4
     gradient_accumulation_steps: int   = 8
-    num_train_epochs: int              = 3
+    num_train_epochs: int              = 2   # 2 epoch 快速迭代 (原 3); total_steps = num_train×2÷eff_prompt
     warmup_ratio: float                = 0.02   # v5 grad spike 修复: warmup 从 5 step (0.01) 延长到 10 step (0.02),
                                                 # 让 LR 在 reward outlier 触发 grad spike 时仍小, 避免第 1 step 过冲.
                                                 # 仍比 v4 默认 0.05 (25 step) 短一半, 保留 v5 设计 "早看效果" 意图.

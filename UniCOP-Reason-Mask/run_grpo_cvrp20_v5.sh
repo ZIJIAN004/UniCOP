@@ -135,7 +135,7 @@ fi
 # offload, 基座分片留 GPU 不再每层经 PCIe 搬运 → fwd+bwd 实测减 ~50%(fwd+bwd 占单 step 90%)。
 ZERO_STAGE="${ZERO_STAGE:-3}"
 NUM_TRAIN="${NUM_TRAIN:-1000}"   # 一个 epoch 的 instance 数, 可 env 覆盖。total_steps = NUM_TRAIN×epochs(3)÷24 (1000→125)
-OUTPUT_DIR_BASE="$WORK_DIR/output_v5"
+OUTPUT_DIR_BASE="${OUTPUT_DIR_BASE:-$WORK_DIR/output_v5}"   # 可 env 覆盖, 消融实验用独立目录避免与主实验打架
 
 VLLM_PORT=8004
 # gpu_memory_utilization = 0.80 是 zhihan 24G 卡 + 这个 4B 模型的唯一甜点值。两边都是悬崖:
