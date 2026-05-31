@@ -161,6 +161,10 @@ config.gradient_accumulation_steps = int(os.environ.get("GRAD_ACCUM", config.gra
 # 消融实验: DISABLE_PRM=1 关闭 POMO PRM 过程奖励 (只留 A_feas + A_outcome), 且下面不加载 POMO。
 if os.environ.get("DISABLE_PRM") is not None:
     config.disable_prm = os.environ.get("DISABLE_PRM") == "1"
+# NUM_GEN: 覆盖 num_generations (默认 8)。单卡诊断用 4 → per_device_batch 可降到 4 避免 OOM 污染计时。
+# ⚠️ 整除约束: per_device_batch × num_gpus % num_generations == 0 (run script 同步用 NUM_GEN 校验)。
+if os.environ.get("NUM_GEN") is not None:
+    config.num_generations = int(os.environ.get("NUM_GEN"))
 
 from data.generate import build_dataset, build_mixed_dataset
 from problems import get_problem, SUPPORTED_PROBLEMS

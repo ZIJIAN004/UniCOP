@@ -307,12 +307,13 @@ echo "  LR:        2e-5 (v4 加倍, 配 warmup 5 step 快收敛)"
 echo "  Warmup:    0.01 × 500 step = 5 step"
 echo "  输出目录:  $OUTPUT_DIR_BASE"
 _PDB="${PER_DEVICE_BATCH:-4}"   # 跟 train.py 的 PER_DEVICE_BATCH 覆盖一致
-echo "  整除检查:  per_device_batch ($_PDB) × num_gpus ($TRAIN_PROC) = $(( _PDB * TRAIN_PROC )),  整除 num_generations (8) ? $(( (_PDB * TRAIN_PROC) % 8 == 0 ))"
+_NUM_GEN="${NUM_GEN:-8}"        # 跟 train.py 的 NUM_GEN 覆盖一致 (单卡诊断可设 4)
+echo "  整除检查:  per_device_batch ($_PDB) × num_gpus ($TRAIN_PROC) = $(( _PDB * TRAIN_PROC )),  整除 num_generations ($_NUM_GEN) ? $(( (_PDB * TRAIN_PROC) % _NUM_GEN == 0 ))"
 echo "  时间:      $(date)"
 echo "============================================================"
 
-if [ $(( _PDB * TRAIN_PROC % 8 )) -ne 0 ]; then
-    echo "[FATAL] 整除失败: per_device_batch ($_PDB) × num_gpus ($TRAIN_PROC) = $(( _PDB * TRAIN_PROC )) 必须整除 num_generations=8 (调 PER_DEVICE_BATCH 或 TRAIN_PROC)"
+if [ $(( _PDB * TRAIN_PROC % _NUM_GEN )) -ne 0 ]; then
+    echo "[FATAL] 整除失败: per_device_batch ($_PDB) × num_gpus ($TRAIN_PROC) = $(( _PDB * TRAIN_PROC )) 必须整除 num_generations=$_NUM_GEN (调 PER_DEVICE_BATCH 或 TRAIN_PROC 或 NUM_GEN)"
     exit 1
 fi
 
