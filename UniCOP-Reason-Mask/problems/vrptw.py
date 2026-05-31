@@ -51,7 +51,14 @@ class VRPTW(ProblemBase):
         routes = parse_multi_route(completion, instance["n"])
         if routes is None:
             return None
-        return sum(_route_distance(r, instance["coords"]) for r in routes)
+        # 同 CVRP: parse_multi_route 不保证末节点回 depot，缺失的 return leg 必须计入，
+        # 否则距离系统性低估。未闭合路线补回 depot 再算 (已闭合的不变)。
+        coords = instance["coords"]
+        total = 0.0
+        for r in routes:
+            rc = r if r and r[-1] == 0 else r + [0]
+            total += _route_distance(rc, coords)
+        return total
 
     def is_feasible(self, completion: str, instance: dict) -> bool:
         n, coords, tw = instance["n"], instance["coords"], instance["time_windows"]

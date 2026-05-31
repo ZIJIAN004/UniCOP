@@ -49,7 +49,17 @@ class CVRP(ProblemBase):
         routes = parse_multi_route(completion, instance["n"])
         if routes is None:
             return None
-        return sum(self.total_distance(r, instance["coords"]) for r in routes)
+        # parse_multi_route 只强制首节点 = depot(0)，不保证末节点回 depot。
+        # CVRP 中车辆必须返回 depot：缺失的 return leg (末客户→0) 是真实成本，
+        # 必须计入。否则距离系统性低估 (每条缺 -> 0 的路线漏一段)，会跌破 HGS 下界，
+        # 且因 A_outcome 用 z-score(-distance)，模型会学到"不写 -> 0"来刷短距离 (reward hacking)。
+        # 这里把每条未闭合路线补上回 depot 再算，已闭合的不变 (幂等)。
+        coords = instance["coords"]
+        total = 0.0
+        for r in routes:
+            rc = r if r and r[-1] == 0 else r + [0]
+            total += self.total_distance(rc, coords)
+        return total
 
     def is_feasible(self, completion: str, instance: dict) -> bool:
         n, demands, capacity = instance["n"], instance["demands"], instance["capacity"]
