@@ -37,7 +37,11 @@ class TSP(ProblemBase):
         route = parse_single_route(completion, instance["n"])
         if route is None:
             return None
-        return self.total_distance(route, instance["coords"])
+        # parse_single_route 只强制首节点=depot，不保证末节点回 depot。
+        # TSP 是闭合回路 0->...->0，缺尾 depot 会漏算 末客户->0 的 return leg，
+        # 距离系统性低估。补齐闭合再算 (已闭合的不变)。
+        rc = route if route and route[-1] == 0 else route + [0]
+        return self.total_distance(rc, instance["coords"])
 
     def is_feasible(self, completion: str, instance: dict) -> bool:
         n = instance["n"]

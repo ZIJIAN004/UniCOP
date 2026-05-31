@@ -52,7 +52,10 @@ class TSPTW(ProblemBase):
         route = parse_single_route(completion, instance["n"])
         if route is None:
             return None
-        _, dist = _simulate(route, instance["coords"], instance["time_windows"])
+        # 缺尾 depot 会漏算 末客户->0 的 return leg (距离低估)。补齐闭合再模拟；
+        # _simulate 对 nxt==0 跳过时窗判定，只累加距离，satisfied 计数不受影响。
+        rc = route if route and route[-1] == 0 else route + [0]
+        _, dist = _simulate(rc, instance["coords"], instance["time_windows"])
         return dist
 
     def is_feasible(self, completion: str, instance: dict) -> bool:

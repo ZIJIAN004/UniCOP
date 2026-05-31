@@ -80,7 +80,10 @@ class TSPDL(ProblemBase):
         route = parse_single_route(completion, instance["n"])
         if route is None:
             return None
-        _, dist = _simulate(route, instance["coords"],
+        # 缺尾 depot 会漏算 末客户->0 的 return leg (距离低估)。补齐闭合再模拟；
+        # _simulate 对 nxt==0 跳过 draft/load 判定，只累加距离，satisfied 计数不受影响。
+        rc = route if route and route[-1] == 0 else route + [0]
+        _, dist = _simulate(rc, instance["coords"],
                             instance["demands"], instance["draft_limits"],
                             instance["capacity"])
         return dist
