@@ -205,6 +205,12 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "reduce_bucket_size":   5e8,
             "reduce_scatter":       True,
         }
+        # ZeRO-2 只 offload 优化器状态 (参数不分片, 不 offload param)。
+        # LoRA 可训练仅 ~132M, 优化器状态分片后每卡 ~0.26GB, 搬 CPU 给 ZeRO-2 压线腾这点显存。
+        # 关键: 不像 ZeRO-3 param offload 每层搬权重 → 这里只在 optimizer.step 搬 132M 梯度/状态,
+        # CPUAdam 在 132M 上很快, 速度代价可忽略。DS_OFFLOAD=0 可关 (要装 CUDA dev 头走 GPU FusedAdam)。
+        if os.environ.get("DS_OFFLOAD", "1") != "0":
+            base["zero_optimization"]["offload_optimizer"] = {"device": "cpu", "pin_memory": True}
 
     elif zero_stage == 3:
         base["zero_optimization"] = {

@@ -94,8 +94,8 @@ def _strip_chat_specials(text: str) -> str:
 # 越小峰值显存越低, 且数值【完全等价】(分块大小不改数学, 逐元素一致)。
 # 256 对词表~151k: _logp_from_hidden_chunked(change A) 约 0.62GiB/块, _selective_logp_chunked 同量级,
 # 比 512 省 ~0.6GiB 峰值, 速度代价可忽略 (块数翻倍 = 多一倍 kernel launch, 微秒级; head 仅占整步 ~1%)。
-# 为 ZeRO-2 压线腾显存默认设 256; 显存宽裕想稍快可调回 512。
-_LOGP_CHUNK_SIZE = 256
+# 为 ZeRO-2 压线腾显存默认设 256; 显存宽裕想稍快可调回 512, 还差一点可 LOGP_CHUNK=128 (再省 ~0.3GiB)。
+_LOGP_CHUNK_SIZE = int(os.environ.get("LOGP_CHUNK", "256"))
 
 
 def _selective_logp_chunked(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
