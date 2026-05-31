@@ -499,6 +499,38 @@ def main():
         _attn_impl = "sdpa"
     print(f"attn 实现:  {_attn_impl}  "
           f"({'flash-attn 已装' if _attn_impl == 'flash_attention_2' else 'flash-attn 未装 → 退回 sdpa'})")
+
+    # ── (可选) Liger Kernel 提速: 只融合 RMSNorm/RoPE/(可选)SwiGLU ───────────────
+    # 这些 Triton kernel 在模型 forward 层加速 (减少 kernel 启动 + HBM 往返, ~10-20% 吞吐),
+    # 与自定义 GRPO _compute_loss 完全解耦。必须关 cross_entropy / fused_linear_cross_entropy:
+    # 我们手动算 completion logits 做 per-token logprob, 不走模型内置 loss 路径。
+    # 默认关闭, 对现有训练零影响; 启用: export USE_LIGER=1
+    #   SwiGLU 与 LoRA(gate/up/down_proj) 有交互, 先只开 rms_norm+rope 验证一版,
+    #   稳定后再 export LIGER_SWIGLU=1 叠加。patch 必须在 from_pretrained 之前生效。
+    if os.environ.get("USE_LIGER", "0") == "1":
+        try:
+            from transformers import AutoConfig
+            _mt = AutoConfig.from_pretrained(
+                config.model_name, trust_remote_code=True).model_type
+            _use_swiglu = os.environ.get("LIGER_SWIGLU", "0") == "1"
+            _liger_kwargs = dict(rms_norm=True, rope=True, swiglu=_use_swiglu,
+                                 cross_entropy=False, fused_linear_cross_entropy=False)
+            if _mt == "qwen3":
+                from liger_kernel.transformers import apply_liger_kernel_to_qwen3 as _apply_liger
+            elif _mt == "qwen2":
+                from liger_kernel.transformers import apply_liger_kernel_to_qwen2 as _apply_liger
+            else:
+                _apply_liger = None
+                print(f"⚠️ Liger: 未识别 model_type={_mt}, 跳过 (仅适配 qwen2/qwen3)")
+            if _apply_liger is not None:
+                _apply_liger(**_liger_kwargs)
+                print(f"✓ Liger Kernel 已启用 (model_type={_mt}, swiglu={_use_swiglu}, "
+                      f"cross_entropy/FLCE=关)")
+        except ImportError:
+            print("⚠️ USE_LIGER=1 但未装 liger-kernel, 跳过 (pip install liger-kernel)")
+        except Exception as _e:
+            print(f"⚠️ Liger 启用失败, 跳过: {type(_e).__name__}: {_e}")
+
     model = AutoModelForCausalLM.from_pretrained(
         config.model_name,
         torch_dtype=torch.bfloat16,
