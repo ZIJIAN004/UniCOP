@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --qos large
 #SBATCH --gpus=7
-#SBATCH --exclude=canele1                 # 易挂节点(用户称 cancel1)，排除避免训练中途挂掉
+#SBATCH --nodelist=canele1                # 固定用 canele1 (用户指定)
+#SBATCH --no-requeue                      # canele1 易挂; 故障直接 FAIL 不重排, 避免日志截断/白跑
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/grpo_cvrp20_v5_noprm_%j.log
 
 # 消融实验脚手架: v5 关闭 POMO PRM 过程奖励 (只用 A_feas + A_outcome) 跟主 v5 对比。

@@ -10,7 +10,7 @@
 #SBATCH --gpus=5
 #SBATCH --job-name=zijia_v5_z2_5gpu
 #SBATCH --comment="zijianliu, do not cancel"
-#SBATCH --exclude=canele1                 # 易挂节点(用户称 cancel1);投前用 sinfo 核对真实名再调
+#SBATCH --nodelist=canele1                # 固定用 canele1 (用户指定; 易挂, 已配 --no-requeue 兜底)
 #SBATCH --no-requeue                       # 【强制】节点故障直接 FAIL, 不重排截断日志
 #SBATCH --open-mode=append                 # 【强制】日志追加, 杜绝被覆盖
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/grpo_cvrp20_v5_z2_5gpu_%x_%j.log
