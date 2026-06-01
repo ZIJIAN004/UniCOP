@@ -641,7 +641,7 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
 # ── 推理后端：vLLM ─────────────────────────────────────────────────────────────
 
 def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
-                     gpu_mem_util: float = 0.9):
+                     gpu_mem_util: float = 0.9, max_model_len: int = 8192):
     """
     加载 vLLM 模型。
     如果 model_path 是 LoRA adapter 目录（含 adapter_config.json 但无 config.json），
@@ -698,7 +698,7 @@ def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
         trust_remote_code=True,
         dtype="bfloat16",
         gpu_memory_utilization=gpu_mem_util,
-        max_model_len=8192,
+        max_model_len=max_model_len,
         enforce_eager=True,
     )
     tokenizer = model.get_tokenizer()
@@ -1407,8 +1407,12 @@ def main():
         ngram_tag = f" | no_repeat_ngram={no_repeat_ngram}" if no_repeat_ngram else ""
         backend_info = f"local | {args.model_path} | rep_penalty={rep_penalty}{ngram_tag}"
     elif args.backend == "vllm":
+        # max_model_len 按本次 max_completion_length 动态算 (留 prompt buffer),
+        # 取代原写死的 8192——否则长 think (如 base 模型 10112) 会超限报错.
+        _vllm_max_len = max_completion_length + 1536
         model, tokenizer = _load_vllm_model(args.model_path, args.tp_size,
-                                            gpu_mem_util=args.vllm_gpu_mem_util)
+                                            gpu_mem_util=args.vllm_gpu_mem_util,
+                                            max_model_len=_vllm_max_len)
 
         def generate_fn(prompts, num_samples, temperature, max_length, batch_size):
             return _generate_vllm(
