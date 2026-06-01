@@ -703,33 +703,36 @@ def compute_hlr_loss(
 
     _loss_stamp(f"BEFORE per-segment assembly + LR forward loop")
     _N_SEG = len(segments)
-    for seg_idx, seg in enumerate(segments):
-        _hit_stamp = (seg_idx % 20 == 0) or (seg_idx >= _N_SEG - 3)
-        if seg.type in ("explicit", "solution"):
-            student_embeds_parts.append(seg_idx_to_embed[seg_idx])
-            student_labels_parts.append(seg_idx_to_labels[seg_idx])
-            if _hit_stamp:
-                _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type} assembled")
-        elif seg.type == "latent":
-            k = seg.k
-            in_pos = seg.teacher_input_pos
-            in_pos = min(max(in_pos, 0), T_teacher - 1)
-            h_input = teacher_hidden_states[-1][:, in_pos, :].detach()
-            # LR forward 是 pure local (LR 不在 ZeRO-3 wrap, 修复后), 不触发 collective.
-            # 不包 hlr_timer: 此处在 latent 段循环内, 逐段 cuda.synchronize 会放大观察者效应;
-            # LR 很小, 其耗时归入相邻段即可.
-            layer_hiddens, _ = latent_reasoner(h_input, k=k)
-            top_hidden = layer_hiddens[-1]
-            latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)
-            student_embeds_parts.append(latent_inputs_embeds)
-            student_labels_parts.append(torch.full(
-                (k,), -100, dtype=torch.long, device=device
-            ))
-            align_records.append((layer_hiddens, seg.teacher_align_pos))
-            if _hit_stamp:
-                _loss_stamp(f"seg {seg_idx}/{_N_SEG} type=latent k={k} LR forward done")
-        else:
-            raise ValueError(f"未知 segment 类型: {seg.type}")
+    # 整段包一次 hlr_timer("latent_loop"): 补上逐段 LR forward 的计时盲区
+    # (此前这段不计时, [TIMING] 七段之和 << 真实 micro 墙钟, 看不到这里)。
+    # 只在循环边界 sync 两次(__enter__/__exit__), 段内仍不逐段 sync → 不放大观察者效应。
+    with hlr_timer("latent_loop"):
+        for seg_idx, seg in enumerate(segments):
+            _hit_stamp = (seg_idx % 20 == 0) or (seg_idx >= _N_SEG - 3)
+            if seg.type in ("explicit", "solution"):
+                student_embeds_parts.append(seg_idx_to_embed[seg_idx])
+                student_labels_parts.append(seg_idx_to_labels[seg_idx])
+                if _hit_stamp:
+                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type} assembled")
+            elif seg.type == "latent":
+                k = seg.k
+                in_pos = seg.teacher_input_pos
+                in_pos = min(max(in_pos, 0), T_teacher - 1)
+                h_input = teacher_hidden_states[-1][:, in_pos, :].detach()
+                # LR forward 是 pure local (LR 不在 ZeRO-3 wrap, 修复后), 不触发 collective.
+                # 段内不逐段 sync (会放大观察者效应); 整段耗时由外层 latent_loop 计。
+                layer_hiddens, _ = latent_reasoner(h_input, k=k)
+                top_hidden = layer_hiddens[-1]
+                latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)
+                student_embeds_parts.append(latent_inputs_embeds)
+                student_labels_parts.append(torch.full(
+                    (k,), -100, dtype=torch.long, device=device
+                ))
+                align_records.append((layer_hiddens, seg.teacher_align_pos))
+                if _hit_stamp:
+                    _loss_stamp(f"seg {seg_idx}/{_N_SEG} type=latent k={k} LR forward done")
+            else:
+                raise ValueError(f"未知 segment 类型: {seg.type}")
 
     _loss_stamp("AFTER segments loop (exited gather_ctx)")
     student_embeds = torch.cat(student_embeds_parts, dim=1)        # [1, T_student, H_main]
