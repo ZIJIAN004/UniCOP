@@ -275,7 +275,8 @@ class POMOPRM:
         """
         返回指定问题/规模的 checkpoint 绝对路径。
         - TSP/CVRP/VRPTW: POMO-Baseline 格式
-            {pomo_ckpt_dir}/{timestamp}__POMO_{TYPE_UPPER}_n{N}/MODEL_FINAL.pt
+            {pomo_ckpt_dir}/{timestamp}__POMO_{TYPE_UPPER}_n{N}/MODEL_BEST.pt
+            (优先 MODEL_BEST.pt 最优验证 ckpt; 回退 MODEL_FINAL.pt 兼容旧目录)
         - TSPTW: PIP-D (NeurIPS 2024) 格式
             {pipd_ckpt_dir}/tsptw{N}_easy/POMO_star_PIP-D/epoch-10000.pt
         """
@@ -301,7 +302,12 @@ class POMOPRM:
                 "MODEL_FINAL.pt",
             )
         # 字典序最大 = 时间戳最新（POMO-Baseline 用 {YYYYMMDD}_{HHMM} 前缀）
-        return os.path.join(candidates[-1], "MODEL_FINAL.pt")
+        ckpt_dir = candidates[-1]
+        # 优先 MODEL_BEST.pt（最优验证 ckpt）, 回退 MODEL_FINAL.pt（只有 FINAL 的旧目录不破坏）
+        best = os.path.join(ckpt_dir, "MODEL_BEST.pt")
+        if os.path.exists(best):
+            return best
+        return os.path.join(ckpt_dir, "MODEL_FINAL.pt")
 
     # ── 模型加载（懒加载 + 缓存） ────────────────────────────────────
 
