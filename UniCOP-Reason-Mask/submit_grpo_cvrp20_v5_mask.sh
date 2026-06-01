@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --qos large
 #SBATCH --gpus=7
+#SBATCH --exclude=canele1                 # 易挂节点(用户称 cancel1)，排除避免训练中途挂掉
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/grpo_cvrp20_v5_mask_%j.log
 
 export HOME=/homes/zhuoyi
