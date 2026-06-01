@@ -1,7 +1,7 @@
 #!/bin/bash
 # run_grpo_cvrp20_v5.sh — GRPO + POMO PRM · CVRP n=20 · reward_scheme=v5
-#   GPU 拓扑可配 (submit/launcher 覆盖); sweep 实测甜点位 = 1 vLLM + 2 训练
-#   (无快速互联, 多卡梯度同步通信>并行收益) · v4 + hardgate distance + cov/cons 加权 A_feas
+#   GPU: 1 vLLM + 6 训练 (默认动态挑卡, submit/env 可覆盖); 实测吞吐随卡数提升 (per-completion 6卡<4卡<2卡)
+#   · v4 + hardgate distance + cov/cons 加权 A_feas
 #
 # v5 设计 (修 v4 7414 run 信号弱 + 冷启动):
 #   - A_feas 加回 parse + cov + cons(hardgate cov_gate_v5=1.0) + format
@@ -44,8 +44,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export NCCL_DEBUG=WARN
 export PYTHONFAULTHANDLER=1
 # NCCL 传输默认按主机分流 (HOST_ID 来自 paths.sh):
-#   zhihan (astar-zhihan, 单机) → 默认开 P2P/SHM (=0): 集合通信走卡间 P2P/共享内存而非禁用回退, 比禁用快
-#     (注: 这些卡无 NVLink, 多卡梯度同步仍是瓶颈 → 见甜点位说明, 默认只跑 2 训练卡);
+#   zhihan (astar-zhihan, 单机) → 默认开 P2P/SHM (=0): 集合通信走卡间 P2P/共享内存而非禁用回退, 比禁用快;
 #   zhuoyi 等其它 → 默认禁 (=1), 否则 init hang 30min (reference_zhuoyi_nccl_topology)。
 # 仍可用 env 覆盖: NCCL_P2P_DISABLE=1 bash ... (zhihan 万一 init hang 时退回)。
 if [ "${HOST_ID:-}" = "astar-zhihan" ]; then
@@ -131,13 +130,13 @@ else
     TRAIN_PROC=6
 fi
 
-# ZeRO stage 可 env 覆盖。当前 CVRP20 配置(max_completion≤3584, B=4, 24G 卡)ZeRO-2 放得下,
-# sweep 甜点位即用 ZeRO-2(不分片参数, 每卡常驻基座 8.3GB)。⚠️ 早期 6144 completion 下 ZeRO-2 会 OOM,
-# 现已随 max_completion 6144→3584 缓解; ZeRO-3 留给更大规模(更长序列/更大 batch/更省显存)分片基座参数。
+# ZeRO stage 可 env 覆盖。当前 CVRP20 配置(max_completion≤3584, B=4, 24G 卡)ZeRO-2 放得下(不分片参数,
+# 每卡常驻基座 8.3GB)。⚠️ 早期 6144 completion 下 ZeRO-2 会 OOM, 现已随 max_completion 6144→3584 缓解;
+# ZeRO-3 留给更大规模(更长序列/更大 batch/更省显存)分片基座参数。
 # DS_OFFLOAD=0(见 train.py make_deepspeed_config): 去掉 CPU offload, 优化器/参数留 GPU 省 PCIe 搬运;
 # 实测提速有限(非早期预估的 ~50%)——bwd 通信(无快速互联下的梯度同步)才是单 step 大头(~88%)。
 ZERO_STAGE="${ZERO_STAGE:-3}"
-NUM_TRAIN="${NUM_TRAIN:-1000}"   # 一个 epoch 的 instance 数, 可 env 覆盖。total_steps = NUM_TRAIN×epochs(2)÷(4×训练卡数); 例 1000×2÷(4×2)=250 (2 卡)
+NUM_TRAIN="${NUM_TRAIN:-1000}"   # 一个 epoch 的 instance 数, 可 env 覆盖。total_steps = NUM_TRAIN×epochs(2)÷(4×训练卡数); 例 1000×2÷(4×6)=83 (6 卡)
 OUTPUT_DIR_BASE="${OUTPUT_DIR_BASE:-$WORK_DIR/output_v5}"   # 可 env 覆盖, 消融实验用独立目录避免与主实验打架
 
 VLLM_PORT=8004

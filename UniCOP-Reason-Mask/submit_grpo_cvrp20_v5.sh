@@ -1,21 +1,15 @@
 #!/bin/bash
 #SBATCH --qos large
-#SBATCH --gpus=3
+#SBATCH --gpus=7
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/grpo_cvrp20_v5_%j.log
 
-# GPU 拓扑: sweep 实测甜点位 = 1 vLLM + 2 卡训练 (无 NVLink 下梯度同步中转最少, 每-completion 最低)。
+# GPU: 1 vLLM + 6 卡训练 (run 脚本默认动态挑卡)。实测吞吐随卡数提升 (per-completion: 6卡5.0s<4卡6.8s<2卡11.7s),
+# 卡越多总训练越快; 仅当 SU/卡时受限时才降卡数 (2 卡最省算力但墙钟慢 2.34×)。
 export HOME=/homes/zhuoyi
 export PIP_CACHE_DIR=/homes/zhuoyi/.pip_cache
 export TMPDIR=/homes/zhuoyi/tmp
 export XDG_CACHE_HOME=/homes/zhuoyi/.cache
 export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
-
-# ── GPU 甜点位: 1 vLLM (GPU 2) + 2 卡训练 (GPU 0,1), B=4, num_gen=8, ZeRO-2 (整除 4×2=8 % 8 ✓) ──
-export VLLM_GPU=2
-export TRAIN_GPUS_CSV=0,1
-export TRAIN_PROC=2
-export PER_DEVICE_BATCH=4
-export ZERO_STAGE=2
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
