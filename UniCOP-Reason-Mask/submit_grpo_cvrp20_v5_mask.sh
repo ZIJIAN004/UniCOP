@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --qos large
 #SBATCH --gpus=7
-#SBATCH --nodelist=canele1                # 固定用 canele1 (用户指定)
+#SBATCH --exclude=canele1                 # 跳过易挂节点 canele1, SLURM 自动挑空闲节点
 #SBATCH --no-requeue                      # canele1 易挂; 故障直接 FAIL 不重排, 避免日志截断/白跑
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/grpo_cvrp20_v5_mask_%j.log
 

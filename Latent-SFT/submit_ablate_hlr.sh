@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --qos large
 #SBATCH --gpus=4
-#SBATCH --nodelist=canele1
+#SBATCH --exclude=canele1
 #SBATCH --no-requeue
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/Latent-SFT/ablate_hlr_%j.log
 
