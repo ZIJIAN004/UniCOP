@@ -35,6 +35,7 @@ export PIP_CACHE_DIR=/homes/zhuoyi/.pip_cache
 export TMPDIR=/homes/zhuoyi/tmp
 export XDG_CACHE_HOME=/homes/zhuoyi/.cache
 export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
+export PYTHONUNBUFFERED=1   # log 实时刷新, 避免 ZeRO-3 init 静默期 log "假卡住"
 
 # ── zhuoyi 多卡 NCCL 拓扑必加 (无 NVLink, 走 socket transport) ──
 export NCCL_P2P_DISABLE=1
@@ -204,13 +205,24 @@ if [ "${HLR_DIAG:-0}" = "1" ]; then
     echo "  ⚡ HLR_DIAG=1 诊断模式: logging_steps=$LOGGING_STEPS  limit=${HLR_DIAG_LIMIT:-无(全量)}  (HLR_TIMING=$HLR_TIMING HLR_DS_PROFILE=$HLR_DS_PROFILE)"
 fi
 
+# ── A/B 提速对照开关 (诊断用, 默认行为不变 = ZeRO-3 + GC) ──
+#   GRAD_CKPT=0  : 关 gradient_checkpointing — 省 backward 重算前向(实测 backward 占 64%), 吃激活显存, 需大卡
+#   ZERO_STAGE=2 : 换 ZeRO-2 — LoRA 主基座冻结, 不必每 micro all-gather shard, 省参数通信, 吃显存(基座常驻)
+ZERO_STAGE="${ZERO_STAGE:-3}"
+GC_FLAG="--gradient_checkpointing"
+if [ "${GRAD_CKPT:-1}" = "0" ]; then
+    GC_FLAG=""
+    echo "  [对照] gradient_checkpointing 关闭 (GRAD_CKPT=0)"
+fi
+echo "  [对照] ZeRO stage=$ZERO_STAGE  gradient_checkpointing=${GRAD_CKPT:-1}"
+
 accelerate launch --num_processes 4 --main_process_port 29700 \
     Latent-SFT/train.py \
     --model "$MODEL_PATH" \
     --data "$PROFILED_DATA" \
     $EXTRA_EPOCHS_FLAG \
-    --zero_stage 3 \
-    --gradient_checkpointing \
+    --zero_stage "$ZERO_STAGE" \
+    $GC_FLAG \
     --output_dir "$OUTPUT_DIR" \
     --logging_steps $LOGGING_STEPS --save_steps 200 \
     $DIAG_FLAGS

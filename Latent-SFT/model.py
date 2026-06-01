@@ -801,7 +801,13 @@ def compute_hlr_loss(
         else:
             align_loss = torch.tensor(0.0, device=device)
 
-    total_loss = alpha * student_loss + beta * align_loss + gamma * teacher_loss
+    # 消融友好: β/γ=0 时真把该项踢出计算图 (否则 0×loss 仍反向遍历, 测不准 backward 各路占比);
+    # β=γ=1 (正常训练) 与原式 α·student + β·align + γ·teacher 完全等价。
+    total_loss = alpha * student_loss
+    if beta != 0:
+        total_loss = total_loss + beta * align_loss
+    if gamma != 0:
+        total_loss = total_loss + gamma * teacher_loss
 
     return (
         total_loss,

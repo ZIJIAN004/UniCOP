@@ -319,6 +319,9 @@ def train_hlr(cfg: HLRConfig):
     # ── 训练循环 ──
     _stamp("before training loop (entering first epoch)")
     global_step = 0
+    # 诊断: HLR_MAX_STEPS>0 时跑到该 optimizer-step 数就停 (消融用; 基于 global_step, 所有 rank 同步 break)
+    _max_steps = int(os.environ.get("HLR_MAX_STEPS", "0"))
+    _should_stop = False
     # 进度条: total = 实际 optimizer-step 数 (每 epoch floor(len/ga) 次 sync boundary).
     # 主进程独占 (4 卡 disable 其余, 否则 4 条 bar 互相刷屏);
     # SLURM --output 非 tty, mininterval=10 限流, 避免每步一行 \r 撑爆日志.
@@ -418,6 +421,14 @@ def train_hlr(cfg: HLRConfig):
                 progress_bar.update(1)
                 progress_bar.set_postfix(loss=f"{_loss_val:.3f}")
 
+                # 诊断: 到 HLR_MAX_STEPS 补报最后一段计时后停本配置 (所有 rank 同步, 不破坏 ZeRO-3 collective)
+                if _max_steps and global_step >= _max_steps:
+                    hlr_timing_report(accelerator.process_index, global_step)
+                    if accelerator.is_main_process:
+                        print(f"[ABLATE] global_step={global_step} 达 HLR_MAX_STEPS={_max_steps}, 停止本配置", flush=True)
+                    _should_stop = True
+                    break
+
                 # 所有 rank 都报分段计时 (对比各 rank barrier_wait 看负载失衡)
                 if global_step % cfg.logging_steps == 0:
                     hlr_timing_report(accelerator.process_index, global_step)
@@ -451,10 +462,14 @@ def train_hlr(cfg: HLRConfig):
             # 本 micro-step 结束, 重置 data_fetch 计时锚点 (测下一步 dataloader 等待)
             _t_data_prev = time.perf_counter()
 
+        if _should_stop:
+            break
+
     progress_bar.close()
 
-    # ── 最终保存 ──
-    _save_hlr_checkpoint(accelerator, model, latent_reasoner, tokenizer, cfg, "final")
+    # ── 最终保存 (消融诊断 _max_steps break 时跳过, 不浪费 ZeRO-3 gather state_dict) ──
+    if not _should_stop:
+        _save_hlr_checkpoint(accelerator, model, latent_reasoner, tokenizer, cfg, "final")
 
     if accelerator.is_main_process:
         print(f"\nHLR 训练完成！模型保存到: {cfg.output_dir}")
