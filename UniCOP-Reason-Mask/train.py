@@ -165,6 +165,9 @@ if os.environ.get("DISABLE_PRM") is not None:
 # ⚠️ 整除约束: per_device_batch × num_gpus % num_generations == 0 (run script 同步用 NUM_GEN 校验)。
 if os.environ.get("NUM_GEN") is not None:
     config.num_generations = int(os.environ.get("NUM_GEN"))
+# SAVE_STEPS: 覆盖 checkpoint 保存间隔 (默认 50)。某些实验要更密的存档 (如 noprm 用 20)。
+if os.environ.get("SAVE_STEPS") is not None:
+    config.save_steps = int(os.environ.get("SAVE_STEPS"))
 
 from data.generate import build_dataset, build_mixed_dataset
 from problems import get_problem, SUPPORTED_PROBLEMS
