@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --qos large
 #SBATCH --gpus=7
-#SBATCH --exclude=canele1                 # 跳过易挂节点 canele1, SLURM 自动挑空闲节点
-#SBATCH --no-requeue                      # canele1 易挂; 故障直接 FAIL 不重排, 避免日志截断/白跑
+#SBATCH --nodelist=canele3                # 固定跑在 canele3 (a5000:8, 够 7 卡); 顺带避开易挂的 canele1
+#SBATCH --no-requeue                      # 故障直接 FAIL 不重排, 避免日志截断/白跑
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/grpo_cvrp20_v5_noprm_%j.log
 
 # 消融实验脚手架: v5 关闭 POMO PRM 过程奖励 (只用 A_feas + A_outcome) 跟主 v5 对比。
