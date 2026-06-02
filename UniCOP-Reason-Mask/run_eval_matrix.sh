@@ -9,6 +9,7 @@
 #   ONLY=SFT  GPU=2,3 TP=2 nohup bash run_eval_matrix.sh > eval_SFT.out  2>&1 &
 #   ONLY=BASE GPU=4,5 TP=2 nohup bash run_eval_matrix.sh > eval_BASE.out 2>&1 &
 # 可调环境变量: NUM_TEST(默认1000) TEMP(0.6) GPU(0) TP(1) ONLY(空=全部|RL|SFT|BASE)
+#   DO_BO1(1) DO_BO8WAVE(1): 设 0 跳过对应阶段 (如 BO1 已跑完 → DO_BO1=0)
 #   每模型长度: MAXLEN_RL/MAXLEN_SFT(默认6144) MAXLEN_BASE(默认10112)
 #   注: evaluate.py 默认已关 enforce_eager(CUDA graph 开). graph capture 若报错, 给 run() 的 evaluate 加 --enforce_eager 回退.
 set -u
@@ -28,6 +29,8 @@ TEMP=${TEMP:-0.6}             # Qwen3-thinking 推荐采样温度 (BO8)
 MAXLEN_RL=${MAXLEN_RL:-6144}; MAXLEN_SFT=${MAXLEN_SFT:-6144}; MAXLEN_BASE=${MAXLEN_BASE:-10112}
 GPU=${GPU:-0}                # 单卡填 "0"; tp=2 填 "0,1"
 TP=${TP:-1}                  # tensor parallel 卡数; 2 卡 KV 翻倍减抢占
+DO_BO1=${DO_BO1:-1}          # 0=跳过 BO1(已跑完时用)
+DO_BO8WAVE=${DO_BO8WAVE:-1}  # 0=跳过 BO8/wave
 ONLY=${ONLY:-}               # 空=跑全部三个模型; 或 RL / SFT / BASE (三卡并行用)
 SAVE_DIR="$SCRIPT_DIR/eval_results_matrix"; LOG_DIR="$SCRIPT_DIR/eval_logs_matrix"
 mkdir -p "$SAVE_DIR" "$LOG_DIR"
@@ -58,7 +61,7 @@ WAVE=(--wave --bestofn --pomo_ckpt_dir "$POMO_CKPT_DIR" --pomo_baseline_dir "$PO
 for spec in "RL:$RL_MODEL:$MAXLEN_RL" "SFT:$SFT_MODEL:$MAXLEN_SFT" "BASE:$BASE_MODEL:$MAXLEN_BASE"; do
   name="${spec%%:*}"; rest="${spec#*:}"; model="${rest%:*}"; ml="${rest##*:}"
   if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then continue; fi
-  run "${name}_BO1"     "$model" "$ml" --num_samples 1
-  run "${name}_BO8wave" "$model" "$ml" --num_samples 8 --temperature "$TEMP" "${WAVE[@]}"
+  [ "$DO_BO1" = "1" ]     && run "${name}_BO1"     "$model" "$ml" --num_samples 1
+  [ "$DO_BO8WAVE" = "1" ] && run "${name}_BO8wave" "$model" "$ml" --num_samples 8 --temperature "$TEMP" "${WAVE[@]}"
 done
 echo "[$(date '+%F %T')] 完成 (ONLY=${ONLY:-ALL}). 结果 JSON: $SAVE_DIR  日志: $LOG_DIR"
