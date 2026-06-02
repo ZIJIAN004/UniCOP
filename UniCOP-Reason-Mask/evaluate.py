@@ -1046,7 +1046,8 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                     retry_until_feasible: bool = False,
                     max_retry_rounds: int = 3,
                     wave_cfg=None, prm=None, wave_tokenizer=None,
-                    run_bestofn: bool = False):
+                    run_bestofn: bool = False,
+                    shard_id: int = 0, num_shards: int = 1):
     """
     评估单个 (problem_type, problem_size) 组合。
 
@@ -1066,6 +1067,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     completion_lens  = []
     all_coverage     = []
     all_constraint   = []
+    per_instance_best = []   # [(global_idx, best_dist 或 None)] 供分片合并 / 逐一对齐 optimal
 
     # 收集示例:按 "解析成功 / 解析失败" 各多条备选,最终各挑 3 个,
     # 不够的一类用另一类补,总计 6 个。便于定位 parse 逻辑是否出问题。
@@ -1073,12 +1075,15 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     parsed_samples   = []            # list of (instance_idx, completion_text)
     unparsed_samples = []
 
-    # 预生成所有实例和 prompt
-    instances = []
-    prompts = []
-    for _ in range(num_test):
-        instance = prob.generate_instance(problem_size, rng)
+    # 预生成所有实例 (rng 确定性: 所有 shard 必须生成同一批 seed=9999 实例, 故全量生成不跳过)
+    all_instances = [prob.generate_instance(problem_size, rng) for _ in range(num_test)]
+    # 数据并行分片: 跨步取本 shard 负责的全局下标 (num_shards=1 时即全量, 行为不变)
+    kept_idx = list(range(num_test))[shard_id::num_shards] if num_shards > 1 else list(range(num_test))
+    n_eval = len(kept_idx)
+    instances = [all_instances[gi] for gi in kept_idx]
 
+    prompts = []
+    for instance in instances:
         if prompt_mode == "foarl":
             # FOARL 原版 prompt (instruct 臂); 与 UniCOP prompt 不同, 直接覆盖
             prompt = _build_foarl_prompt(instance, problem_type)
@@ -1092,12 +1097,11 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             # structured 模式：替换 system prompt 和 user 末尾输出格式
             if prompt_mode == "structured":
                 prompt = _apply_structured_prompt(prompt, problem_type)
-
-        instances.append(instance)
         prompts.append(prompt)
 
     # 调用推理后端
-    print(f"[{problem_type.upper()} n={problem_size}] 生成 {num_test} 实例 × {num_samples} 采样 ...")
+    _shard_tag = f" [shard {shard_id}/{num_shards}]" if num_shards > 1 else ""
+    print(f"[{problem_type.upper()} n={problem_size}]{_shard_tag} 生成 {n_eval} 实例 × {num_samples} 采样 ...")
     all_completions = generate_fn(
         prompts, num_samples, temperature, max_completion_length, batch_size,
     )
@@ -1106,7 +1110,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     total_truncated = 0
     # retry 统计 (retry_until_feasible=True 时收集 per-sample)
     retry_records: list[dict] = []
-    for i in range(num_test):
+    for i in range(n_eval):
         instance = instances[i]
         instance_best = None
 
@@ -1164,6 +1168,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                     if instance_best is None or dist < instance_best:
                         instance_best = dist
 
+        per_instance_best.append((kept_idx[i], instance_best))   # 全局下标 → best (None=无可行)
         if instance_best is not None:
             instance_has_feas += 1
             best_dists.append(instance_best)
@@ -1173,7 +1178,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     coverage_rate      = float(np.mean(all_coverage)) if all_coverage else 0.0
     constraint_rate    = float(np.mean(all_constraint)) if all_constraint else 0.0
     global_feas_rate   = total_feasible / total_samples if total_samples else 0
-    instance_feas_rate = instance_has_feas / num_test
+    instance_feas_rate = instance_has_feas / n_eval if n_eval else 0.0
     truncation_rate    = total_truncated / total_samples if total_samples else 0
     avg_best_dist      = float(np.mean(best_dists)) if best_dists else float("nan")
     avg_comp_len       = float(np.mean(completion_lens)) if completion_lens else 0.0
@@ -1182,7 +1187,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
 
     # ── 打印结果 ──────────────────────────────────────────────────────
     print(f"\n  {'─'*55}")
-    print(f"  {problem_type.upper()}  n={problem_size}  |  {num_test} 实例 × {num_samples} 采样 = {total_samples} 次")
+    print(f"  {problem_type.upper()}  n={problem_size}  |  {n_eval} 实例 × {num_samples} 采样 = {total_samples} 次")
     print(f"  推理链长度:   avg={avg_comp_len:.0f}  min={min_comp_len}  max={max_comp_len} tokens")
     print(f"  截断率:       {truncation_rate:.2%}  ({total_truncated}/{total_samples})")
     print(f"  格式匹配率:   {parse_rate:.2%}  ({total_parsed}/{total_samples})")
@@ -1315,8 +1320,25 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
         "instance_feasibility_rate": round(instance_feas_rate, 4),
         "avg_best_dist":        round(avg_best_dist, 4) if not np.isnan(avg_best_dist) else None,
         "feasible_instances":   instance_has_feas,
+        "n_eval":               n_eval,
         "examples":             example_records,
     }
+
+    # ── 分片元数据 + 合并所需原始量 (num_shards>1 时; merge_shards.py 据此合并) ──
+    if num_shards > 1:
+        results["shard"] = {"shard_id": shard_id, "num_shards": num_shards, "num_test_full": num_test}
+        # per-instance best (全局下标对齐); 原始计数供精确重算聚合
+        results["per_instance_best"] = [[gi, (round(d, 6) if d is not None else None)]
+                                        for gi, d in per_instance_best]
+        results["_raw"] = {
+            "n_eval": n_eval, "total_samples": total_samples, "total_parsed": total_parsed,
+            "total_feasible": total_feasible, "total_truncated": total_truncated,
+            "instance_has_feas": instance_has_feas,
+            "sum_coverage": float(np.sum(all_coverage)) if all_coverage else 0.0,
+            "sum_constraint": float(np.sum(all_constraint)) if all_constraint else 0.0,
+            "sum_comp_len": float(np.sum(completion_lens)) if completion_lens else 0.0,
+            "best_dists": [round(float(x), 6) for x in best_dists],
+        }
 
     # ── Retry-until-feasible 汇总 ─────────────────────────────────────
     if retry_until_feasible and retry_records:
@@ -1366,7 +1388,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             return _foarl_to_route_lines(t) if prompt_mode == "foarl" else t
 
         bon_completions = [[_ctext_b(it) for it in all_completions[i]]
-                           for i in range(num_test)]
+                           for i in range(n_eval)]
         bon = bestofn_replay(bon_completions, instances, prob, wave_tokenizer)
         results["bestofn"] = bon
 
@@ -1392,7 +1414,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             return it[0] if isinstance(it, tuple) else it
 
         wave_completions = [[_ctext(it) for it in all_completions[i]]
-                            for i in range(num_test)]
+                            for i in range(n_eval)]
         wave_out = wave_replay(
             wave_completions, instances, prob, prm, wave_tokenizer,
             problem_type, wave_cfg,
@@ -1483,6 +1505,11 @@ def main():
                              "答案截断, 且不惩罚重复。思维臂建议 10000(确保推理充分); instruct 臂保持 0")
     parser.add_argument("--answer_budget", type=int, default=1024,
                         help="budget forcing 第二段(强制出答案)的 max_tokens (仅 --think_budget>0 生效)")
+    parser.add_argument("--num_shards", type=int, default=1,
+                        help="数据并行分片总数: 把 num_test 个实例跨步分到 N 个进程并行(各占 1 卡)。"
+                             "1=不分片。所有 shard 仍生成同一批 seed=9999 实例, 只处理自己那份")
+    parser.add_argument("--shard_id", type=int, default=0,
+                        help="本进程的分片号 (0..num_shards-1)")
     parser.add_argument("--model_type",   type=str,   default="reasoning",
                         choices=["reasoning", "instruct"],
                         help="reasoning=推理模型(10000 tokens)，instruct=指令模型(512 tokens)")
@@ -1702,6 +1729,7 @@ def main():
             wave_cfg=wave_cfg, prm=wave_prm,
             wave_tokenizer=(tokenizer if (args.wave or args.bestofn) else None),
             run_bestofn=args.bestofn,
+            shard_id=args.shard_id, num_shards=args.num_shards,
         )
         results["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         all_results.append(results)
@@ -1735,7 +1763,9 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     # 输出文件：{模型名}_{时间戳}.json，内含全部超参数 + 各组合结果
-    fname = f"{model_label}_{run_timestamp}.json"
+    # 分片时带 shard 标签, 避免 N 个进程互相覆盖 (供 merge_shards.py 合并)
+    _shard_sfx = f"_shard{args.shard_id}of{args.num_shards}" if args.num_shards > 1 else ""
+    fname = f"{model_label}_{run_timestamp}{_shard_sfx}.json"
     out_path = os.path.join(out_dir, fname)
 
     output = {
