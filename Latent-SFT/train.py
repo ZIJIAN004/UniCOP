@@ -46,6 +46,9 @@ _HLR_RANK = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
 # 默认关 (生产干净), export HLR_DEBUG=1 开启全部 rank-level 诊断 stamp.
 # 再遇 ZeRO-3 hang 时直接 HLR_DEBUG=1 重跑即可定位.
 _HLR_DEBUG = os.environ.get("HLR_DEBUG", "0") == "1"
+# 显存报告 (export HLR_MEM_REPORT=1 开启): 对比 ZeRO-3 vs ZeRO-2 每卡峰值占用与剩余 headroom,
+# 用于预判 ZeRO-2 (基座不分片, 全 4B 常驻) 会不会 OOM, 以及 ZeRO-3 还剩多少空间.
+_HLR_MEM_REPORT = os.environ.get("HLR_MEM_REPORT", "0") == "1"
 
 
 def _stamp(msg: str) -> None:
@@ -53,6 +56,27 @@ def _stamp(msg: str) -> None:
         return
     elapsed = time.time() - _HLR_T0
     print(f"[STAMP rank={_HLR_RANK} +{elapsed:6.1f}s] {msg}", flush=True)
+
+
+def _report_gpu_memory(accelerator, tag: str) -> None:
+    """每卡打印整段 run 的峰值/剩余显存 (HLR_MEM_REPORT=1)。
+    peak_reserved = allocator 实际向 CUDA 要到的峰值, 最接近 OOM 天花板;
+    headroom = total - peak_reserved 即该卡还能再吃多少 (越小越接近 OOM)。
+    所有 rank 都打, 看 4 卡是否均衡。峰值含 init/load 一次性瞬时占用 (OOM 预判要算上)。"""
+    if not _HLR_MEM_REPORT or not torch.cuda.is_available():
+        return
+    dev = torch.cuda.current_device()
+    free, total = torch.cuda.mem_get_info(dev)
+    _GB = 1024 ** 3
+    peak_alloc = torch.cuda.max_memory_allocated(dev) / _GB
+    peak_resv = torch.cuda.max_memory_reserved(dev) / _GB
+    total_gb = total / _GB
+    print(
+        f"[MEM {tag} rank={accelerator.process_index} dev={dev}] "
+        f"total={total_gb:.2f}G peak_alloc={peak_alloc:.2f}G peak_reserved={peak_resv:.2f}G "
+        f"headroom={total_gb - peak_resv:.2f}G cur_free={free / _GB:.2f}G",
+        flush=True,
+    )
 
 
 def make_deepspeed_config(zero_stage: int) -> dict | None:
@@ -424,6 +448,7 @@ def train_hlr(cfg: HLRConfig):
                 # 诊断: 到 HLR_MAX_STEPS 补报最后一段计时后停本配置 (所有 rank 同步, 不破坏 ZeRO-3 collective)
                 if _max_steps and global_step >= _max_steps:
                     hlr_timing_report(accelerator.process_index, global_step)
+                    _report_gpu_memory(accelerator, f"step{global_step}")
                     if accelerator.is_main_process:
                         print(f"[ABLATE] global_step={global_step} 达 HLR_MAX_STEPS={_max_steps}, 停止本配置", flush=True)
                     _should_stop = True
@@ -466,6 +491,7 @@ def train_hlr(cfg: HLRConfig):
             break
 
     progress_bar.close()
+    _report_gpu_memory(accelerator, "final")
 
     # ── 最终保存 (消融诊断 _max_steps break 时跳过, 不浪费 ZeRO-3 gather state_dict) ──
     if not _should_stop:
