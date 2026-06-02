@@ -655,6 +655,9 @@ class GRPOPRMTrainer(GRPOTrainer):
                 np.mean([c["format"] for c in components])),
             "reward/A_abs_mean":          self._gather_mean(advantages.abs().mean()),
             "reward/A_std":               self._gather_mean(advantages.std()),
+            # 全局可行解平均 tour 距离 (已是 gather 后全局值, 不再 _gather_mean).
+            # 每个 step 报一次, 看绝对距离趋势 (配 logging_steps=1).
+            "reward/mean_feasible_distance": getattr(self, "_last_mean_distance", float("nan")),
             "prm/n_zscore_groups":        float(n_with_zscore),
             "prm/n_fallback_groups":      float(n_with_fallback),
         }
@@ -783,6 +786,13 @@ class GRPOPRMTrainer(GRPOTrainer):
         # ── 7. 切回本 rank ──────────────────────────────────────────
         rank = self.accelerator.process_index
         my_start = rank * B
+
+        # per-step 距离趋势监控: 全局可行解的平均 tour 距离 (nan=不可行已剔除).
+        # 用绝对距离而非 z-score(A_outcome 已被组内零均值抹掉量级), 才能看 gap 趋势.
+        _feas_dist = all_dist_t[~torch.isnan(all_dist_t)]
+        self._last_mean_distance = (
+            float(_feas_dist.mean()) if _feas_dist.numel() > 0 else float("nan"))
+
         a_out = (all_a_feas_norm[my_start:my_start + B]
                  + all_a_outcome_norm[my_start:my_start + B])
 

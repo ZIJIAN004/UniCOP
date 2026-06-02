@@ -86,6 +86,7 @@ HP_ARGS=()
 if [ -n "${LR:-}" ];      then HP_ARGS+=(--learning_rate "$LR"); fi
 if [ -n "${KL_COEF:-}" ]; then HP_ARGS+=(--kl_coef "$KL_COEF"); fi
 if [ -n "${EPOCHS:-}" ];  then HP_ARGS+=(--num_train_epochs "$EPOCHS"); fi
+if [ -n "${LOGGING_STEPS:-}" ]; then HP_ARGS+=(--logging_steps "$LOGGING_STEPS"); fi
 
 # vLLM server 参数 (与 auto_train.sh 对齐)
 VLLM_PORT=8000

@@ -34,6 +34,7 @@ export NUM_TRAIN=1000
 export LR=1e-6
 export KL_COEF=0.05
 export EPOCHS=1
+export LOGGING_STEPS=1     # 每个 step 报一次 reward/mean_feasible_distance, 看距离趋势
 export OUTPUT_DIR_BASE=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason/output_paperhp
 
 source /homes/zhuoyi/.bashrc
