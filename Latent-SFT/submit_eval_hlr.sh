@@ -28,6 +28,9 @@ export PIP_CACHE_DIR=/homes/zhuoyi/.pip_cache
 export TMPDIR=/homes/zhuoyi/tmp
 export XDG_CACHE_HOME=/homes/zhuoyi/.cache
 export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
+# 缓解高显存压力下的 allocator cache flush 抖动 (与训练侧 8442 诊断一致, 推理同样受益).
+# 纯 CUDA allocator 行为, 不改任何计算语义.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"

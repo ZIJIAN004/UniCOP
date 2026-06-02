@@ -22,6 +22,9 @@ export PIP_CACHE_DIR=/homes/zhuoyi/.pip_cache
 export TMPDIR=/homes/zhuoyi/tmp
 export XDG_CACHE_HOME=/homes/zhuoyi/.cache
 export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
+# 缓解双 forward + output_hidden_states 高显存压力下的 allocator cache flush 抖动 (诊断 8442 反复出现).
+# 纯 CUDA allocator 行为, 不改 collective/loss/B=1 假设. 首次上线先在 smoke 跑 1 步确认 PyTorch/NCCL 不报错.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
 
 # 无 NVLink NCCL (同 submit_train_hlr)
