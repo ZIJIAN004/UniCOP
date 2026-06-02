@@ -379,8 +379,6 @@ def main():
                         help="GRPO KL 系数 beta (默认读 config.py)")
     parser.add_argument("--num_train_epochs", type=int, default=config.num_train_epochs,
                         help="训练 epoch 数 (默认读 config.py)")
-    parser.add_argument("--logging_steps", type=int, default=config.logging_steps,
-                        help="日志报送间隔 (默认读 config.py; 探针设 1 看每步距离趋势)")
     # POMO PRM (always enabled, vanilla reward 路径已删除)
     parser.add_argument("--pomo_ckpt_dir", type=str, default=config.pomo_ckpt_dir,
                         help="POMO checkpoint 根目录，子目录: {type}_n{size}/MODEL_BEST.pt")
@@ -416,7 +414,6 @@ def main():
     config.learning_rate          = args.learning_rate
     config.kl_coef                = args.kl_coef
     config.num_train_epochs       = args.num_train_epochs
-    config.logging_steps          = args.logging_steps
     config.reward_mode            = args.reward_mode
     config.pomo_ckpt_dir          = args.pomo_ckpt_dir
     config.pomo_baseline_dir      = args.pomo_baseline_dir
