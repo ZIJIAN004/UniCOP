@@ -9,7 +9,7 @@
 #     - LR            = 1e-6      (温和; train.py 经 env 覆盖)
 #     - epochs        = 1         (单 epoch)
 #     - 其余 Mask 超参不动: kl_coef=0.0 / clip 0.20-0.28 / num_generations=8 / num_train=1000
-#     - 输出隔离 output_v6, vLLM 端口 8006
+#     - 输出隔离 output_v6, vLLM 端口沿用 v5 默认 8004 (独占节点, 不会与 v5 撞)
 #   ⚠️ 注意: 本次同时变了"信号(v6)"和"温和超参(LR/epoch)"两个轴, 若 gap 改善
 #            无法单独归因; 如需干净归因, 另跑一组"v6 + Mask 默认超参(LR=1e-5/epoch=2)"。
 #
