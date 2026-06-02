@@ -19,7 +19,7 @@
 #SBATCH --gpus=7
 #SBATCH --job-name=zijia_cvrp20_v6
 #SBATCH --comment="zijianliu, pure v6 PRM sigmoid, do not cancel"
-#SBATCH --exclude=canele1
+#SBATCH --exclude=canele1,canele2
 #SBATCH --no-requeue
 #SBATCH --open-mode=append
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/grpo_cvrp20_v6_%j.log
