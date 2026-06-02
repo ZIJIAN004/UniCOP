@@ -35,7 +35,7 @@ GPU=${GPU:-0}                # 单卡填 "0"; tp=2 填 "0,1"
 TP=${TP:-1}                  # tensor parallel 卡数; 2 卡 KV 翻倍减抢占
 DO_BO1=${DO_BO1:-1}          # 0=跳过 BO1(已跑完时用)
 DO_BO8WAVE=${DO_BO8WAVE:-1}  # 0=跳过 BO8/wave
-GPU_MEM=${GPU_MEM:-0.85}     # vLLM 显存比例; 0.85 留余量给 CUDA graph 捕获(对齐训练) + wave 的 POMO; 仍 OOM 降 0.80
+GPU_MEM=${GPU_MEM:-0.8}      # vLLM 显存比例; 0.8 留余量给 CUDA graph 捕获 + wave 的 POMO; 仍 OOM 再降
 ONLY=${ONLY:-}               # 空=跑全部三个模型; 或 RL / SFT / BASE (三卡并行用)
 SAVE_DIR="$SCRIPT_DIR/eval_results_matrix"; LOG_DIR="$SCRIPT_DIR/eval_logs_matrix"
 mkdir -p "$SAVE_DIR" "$LOG_DIR"
