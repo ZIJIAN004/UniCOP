@@ -1627,7 +1627,7 @@ class GRPOPRMTrainer(GRPOTrainer):
 
         # PRM 段广播 (mean 模式, 注入沿用 v5; a_proc 改 sigmoid)
         prm_base = getattr(config, "prm_base_v4", 1.5)   # v6 不用于 a_proc, 仅保留诊断对齐
-        proc_alpha = getattr(config, "proc_alpha_v4", 50.0)
+        proc_alpha = getattr(config, "proc_alpha_v6", 200.0)   # v6 独立, 不复用 v5 的 50
 
         # v6 sigmoid 标准化参数
         trim_frac = getattr(config, "trim_frac_v6", 0.05)

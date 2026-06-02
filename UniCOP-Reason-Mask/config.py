@@ -202,14 +202,19 @@ class Config:
     #     1. gather 跨 rank 所有 fully-feasible trajectory 的所有 normal step 的原始 R_step
     #     2. 截尾 (按 |R_step| 剔最大的 trim_frac_v6) → mu=mean(bulk), s=clamp(std(bulk),...)
     #     3. a_proc = sigmoid((raw_R_step - mu) / s) ∈ (0,1), 违例/重复 step 仍游离 (a_proc=0)
-    #   注入沿用 v5 完全相同的 mean 模式 (proc_alpha_v4 * a_proc / seg_len).
-    #   PRM 是否只对 fully_feas 算 / prm_base / proc_alpha 共用 v5/v4 参数.
+    #   注入沿用 v5 完全相同的 mean 模式 (proc_alpha_v6 * a_proc / seg_len).
+    #   fully_feas 门控共用 v5；但 proc_alpha 用 v6 独立参数 (见下).
     # trim_frac_v6: 批级截尾比例, 按 |R_step| 绝对值剔掉最大的 trim_frac (两侧极端都被剔).
     trim_frac_v6: float            = 0.05
     # s_min_v6: 标准差下界, clamp(s, s_min_v6, s_max_v6), 防除零 + 过度放大.
     s_min_v6: float                = 1e-2
     # s_max_v6: 标准差上界, 防极端波动.
     s_max_v6: float                = 1e3
+    # proc_alpha_v6: v6 段注入权重 (独立于 v5 的 proc_alpha_v4=50).
+    #   v6 的 a_proc=sigmoid()∈(0,1) 均值~0.5, 仅为 v5 a_proc(均值~1.43)的 ~1/2.86;
+    #   同 proc_alpha 下 v6 的 PRM footprint 会缩到 ~1/3. 设 200 把 per-step 信号
+    #   提到偏强档 (≈ v5 footprint 的 ~1.5x, 测更强 PRM 是否压 gap).
+    proc_alpha_v6: float           = 200.0
 
     # ── CVRP constrained-decoding mask (跟 reward_scheme 正交) ────────
     # use_mask=True 时:
