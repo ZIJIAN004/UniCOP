@@ -77,8 +77,15 @@ TRAIN_PROC=6
 ZERO_STAGE=3
 # num_train 2000 → 4000: 总 update 数 250 → 500, 加 update 频率, GRPO 主流
 # (DAPO/DeepSeek-R1) 推荐数千 update, 250 偏少. 代价: 总训练时间翻倍 ~160h.
-NUM_TRAIN=4000
-OUTPUT_DIR_BASE="$WORK_DIR/output_6gpu"
+NUM_TRAIN="${NUM_TRAIN:-4000}"
+OUTPUT_DIR_BASE="${OUTPUT_DIR_BASE:-$WORK_DIR/output_6gpu}"
+
+# ── RL 超参覆盖 (env 不设则回落 train.py/config.py 默认) ──────────────
+# 用于对照实验, 例如对齐论文 (Jiang et al. 2025): LR=1e-6 KL_COEF=0.05 EPOCHS=1
+HP_ARGS=()
+if [ -n "${LR:-}" ];      then HP_ARGS+=(--learning_rate "$LR"); fi
+if [ -n "${KL_COEF:-}" ]; then HP_ARGS+=(--kl_coef "$KL_COEF"); fi
+if [ -n "${EPOCHS:-}" ];  then HP_ARGS+=(--num_train_epochs "$EPOCHS"); fi
 
 # vLLM server 参数 (与 auto_train.sh 对齐)
 VLLM_PORT=8000
@@ -210,6 +217,7 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPUS_CSV" \
     --problem "$PROBLEM" \
     --problem_size "$SIZE" \
     --num_train "$NUM_TRAIN" \
+    ${HP_ARGS[@]+"${HP_ARGS[@]}"} \
     --model "$MODEL_BASE" \
     --num_gpus "$TRAIN_PROC" \
     --zero_stage "$ZERO_STAGE" \
