@@ -29,7 +29,7 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 MODEL="${MODEL:-/homes/zhuoyi/zijianliu/models/Qwen3-4B-Instruct-2507}"
 NUM_GPUS="${NUM_GPUS:-4}"
 DATA="${DATA:-data/foarl_cvrp20.jsonl}"
-SRC="${SRC:-../UniCOP-Distill/data/solutions_cvrp20.jsonl}"
+SRC="${SRC:-../UniCOP-Distill/data/chains_template_cvrp20.jsonl}"   # 与思维臂同源(取 </think> 后答案)
 OUTPUT_DIR="${OUTPUT_DIR:-./output_sft_foarl_cvrp20}"
 SANITY="${SANITY:-0}"   # 1 = 只取 256 条做 sanity
 

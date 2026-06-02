@@ -16,9 +16,14 @@ build_foarl_cvrp_data.py — 把 UniCOP 的 solutions_cvrp20.jsonl 转成 FOARL 
 
 chat 外壳 (system/user/assistant) 由 train_sft_foarl.py 用 Instruct 的 chat_template 套, 本脚本不管。
 
+源文件兼容两种 (自动识别):
+  - chains_template_cvrp20.jsonl (默认, 与思维臂同源): 答案 = output 里 </think> 之后那段
+  - solutions_cvrp20.jsonl:                            答案 = solution 字段
+默认用 template, 保证无思维臂与思维臂的实例集逐一一致 (最干净的消融)。
+
 用法:
   python build_foarl_cvrp_data.py \
-    --src ../UniCOP-Distill/data/solutions_cvrp20.jsonl \
+    --src ../UniCOP-Distill/data/chains_template_cvrp20.jsonl \
     --out data/foarl_cvrp20.jsonl --k_nn 2
 """
 import argparse
@@ -77,6 +82,16 @@ def parse_routes(solution_text: str):
     return routes if routes else None
 
 
+def get_solution_text(rec) -> str:
+    """兼容两种源: solutions(有 'solution') / template(output 里 </think> 之后是答案)。"""
+    if rec.get("solution"):
+        return rec["solution"]
+    out = rec.get("output", "") or ""
+    if "</think>" in out:
+        return out.split("</think>", 1)[1]
+    return out
+
+
 def dist_matrix(coords: np.ndarray) -> np.ndarray:
     diff = coords[:, None, :] - coords[None, :, :]
     return np.sqrt((diff ** 2).sum(-1))
@@ -126,14 +141,15 @@ def build_input(coords: np.ndarray, demands: np.ndarray, D: np.ndarray, k_nn: in
     return inp
 
 
-def check_feasible(routes, demands, capacity) -> bool:
-    """FOARL utils.compute_metric_cop 的可行性判据 (start/end depot + 容量 + 全客户恰好一次)。"""
+def check_feasible(routes, demands, capacity, tol: float = 1e-9) -> bool:
+    """FOARL utils.compute_metric_cop 的可行性判据 (start/end depot + 容量 + 全客户恰好一次)。
+    tol: 容量超限容忍 (template demand 仅 2 位小数, 舍入会让极少解严格判超载, 放宽可吸收)。"""
     n_cust = len(demands) - 1
     visited = set()
     for r in routes:
         if not r or r[0] != 0 or r[-1] != 0:
             return False
-        if sum(demands[node] for node in r if node != 0) > capacity + 1e-9:
+        if sum(demands[node] for node in r if node != 0) > capacity + tol:
             return False
         visited.update(node for node in r if node != 0)
     return visited == set(range(1, n_cust + 1))
@@ -141,17 +157,21 @@ def check_feasible(routes, demands, capacity) -> bool:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", default="../UniCOP-Distill/data/solutions_cvrp20.jsonl")
+    ap.add_argument("--src", default="../UniCOP-Distill/data/chains_template_cvrp20.jsonl",
+                    help="默认 template (与思维臂同源, 取 </think> 后答案); 也兼容 solutions_*.jsonl")
     ap.add_argument("--out", default="data/foarl_cvrp20.jsonl")
     ap.add_argument("--k_nn", type=int, default=2)
     ap.add_argument("--obj_decimals", type=int, default=2, help="Objective 小数位 (FOARL 用 2)")
     ap.add_argument("--max_records", type=int, default=0, help="只转前 N 条 (验证用), 0=全量")
+    ap.add_argument("--drop_infeasible", action="store_true",
+                    help="丢弃(按展示 demand)严格不可行样本; 默认保留, 与思维臂同实例集")
     args = ap.parse_args()
 
     n_in = n_out = 0
     skip_parse_inst = skip_parse_route = skip_infeasible = 0
     # 定量自检累加器
-    feas_ok = 0
+    feas_strict = 0        # 严格 tol=0 可行
+    feas_tol = 0           # 容 0.05 舍入后可行
     dist_err = []          # |recompute_dist - solver_distance|
     obj_vals = []          # solver_distance, 算相对误差用
     regex_parse_ok = 0     # 产出的 output 能否被 FOARL 的 Routes/Objective 正则解析回
@@ -177,14 +197,18 @@ def main():
                 skip_parse_inst += 1
                 continue
             coords, demands, capacity = parsed
-            routes = parse_routes(rec["solution"])
+            routes = parse_routes(get_solution_text(rec))
             if routes is None:
                 skip_parse_route += 1
                 continue
-            if not check_feasible(routes, demands, capacity):
+            feas = check_feasible(routes, demands, capacity)             # 严格
+            if feas:
+                feas_strict += 1
+            if check_feasible(routes, demands, capacity, tol=0.05):      # 容舍入
+                feas_tol += 1
+            if args.drop_infeasible and not feas:
                 skip_infeasible += 1
                 continue
-            feas_ok += 1
 
             n_cust = coords.shape[0] - 1
             D = dist_matrix(coords)
@@ -230,10 +254,12 @@ def main():
     print(f"  成功写出:        {n_out}  ({n_out / max(n_in,1):.1%})")
     print(f"  跳过-实例解析失败: {skip_parse_inst}")
     print(f"  跳过-路线解析失败: {skip_parse_route}")
-    print(f"  跳过-不可行:      {skip_infeasible}")
+    print(f"  跳过-不可行(仅 --drop_infeasible 时): {skip_infeasible}")
     print("-" * 60)
-    print(f"  [自检1] 可行性通过: {feas_ok}/{n_out + skip_infeasible} "
-          f"= {feas_ok / max(n_out + skip_infeasible,1):.2%}")
+    _denom = n_out + skip_infeasible
+    print(f"  [自检1] 可行(严格 tol=0):  {feas_strict}/{_denom} = {feas_strict/max(_denom,1):.2%}")
+    print(f"          可行(容 0.05 舍入): {feas_tol}/{_denom} = {feas_tol/max(_denom,1):.2%}")
+    print(f"          (template demand 仅 2 位小数, 舍入会让少量解严格判超载, 容忍后应≈100%)")
     if dist_err:
         de = np.array(dist_err); ov = np.array(obj_vals)
         print(f"  [自检2] 重算距离 vs solver_distance: "
