@@ -372,13 +372,6 @@ def main():
     parser.add_argument("--clip_epsilon_high", type=float,
                         default=config.clip_epsilon_high,
                         help="GRPO ratio clip 上界 ε_high，> ε_low 启用 DAPO Clip-Higher (默认 0.28)")
-    # ── RL 超参 CLI 覆盖 (不传则用 config.py 默认; 用于对照实验, 如对齐论文 lr/kl/epoch) ──
-    parser.add_argument("--learning_rate", type=float, default=config.learning_rate,
-                        help="GRPO 学习率 (默认读 config.py)")
-    parser.add_argument("--kl_coef", type=float, default=config.kl_coef,
-                        help="GRPO KL 系数 beta (默认读 config.py)")
-    parser.add_argument("--num_train_epochs", type=int, default=config.num_train_epochs,
-                        help="训练 epoch 数 (默认读 config.py)")
     # POMO PRM (always enabled, vanilla reward 路径已删除)
     parser.add_argument("--pomo_ckpt_dir", type=str, default=config.pomo_ckpt_dir,
                         help="POMO checkpoint 根目录，子目录: {type}_n{size}/MODEL_BEST.pt")
@@ -411,9 +404,6 @@ def main():
     config.no_repeat_ngram_size   = args.no_repeat_ngram_size
     config.clip_epsilon_low       = args.clip_epsilon_low
     config.clip_epsilon_high      = args.clip_epsilon_high
-    config.learning_rate          = args.learning_rate
-    config.kl_coef                = args.kl_coef
-    config.num_train_epochs       = args.num_train_epochs
     config.reward_mode            = args.reward_mode
     config.pomo_ckpt_dir          = args.pomo_ckpt_dir
     config.pomo_baseline_dir      = args.pomo_baseline_dir
@@ -445,8 +435,6 @@ def main():
                   else "symmetric")
     print(f"Ratio clip:  ε_low={config.clip_epsilon_low}, "
           f"ε_high={config.clip_epsilon_high}  [{_clip_mode}]")
-    print(f"RL 超参:    lr={config.learning_rate}  kl_coef(beta)={config.kl_coef}  "
-          f"epochs={config.num_train_epochs}")
 
     # ── 加载模型 ────────────────────────────────────────────────────────
     print("\n加载模型...")
