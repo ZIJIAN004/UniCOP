@@ -17,6 +17,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # = MASK_DIR
 source "$(dirname "$SCRIPT_DIR")/paths.sh"                   # 注入 UNICOP_ROOT/MASK_DIR/DISTILL_DIR/POMO_*
 cd "$SCRIPT_DIR"
 
+# tp>1 时 vLLM 起 worker 子进程: 必须用 spawn, 否则父进程已 init CUDA → fork 报
+# "Cannot re-initialize CUDA in forked subprocess". 对 tp=1 无副作用.
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
 RL_MODEL="$MASK_DIR/output_v5/cvrp_n20/merged_model"
 SFT_MODEL="$DISTILL_DIR/output_sft_qwen3_template_cvrp20/final_model"
 BASE_MODEL="$UNICOP_ROOT/model/Qwen3-4B-Thinking-2507"
