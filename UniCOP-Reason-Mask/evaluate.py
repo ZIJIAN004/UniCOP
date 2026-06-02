@@ -713,6 +713,72 @@ def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
 # 仅作用于已生成 output token (vLLM v0 2-arg 回调: (past_token_ids, logits))。
 _NO_REPEAT_NGRAM_SIZE = 0          # 0=关; 由 main() 从 --no_repeat_ngram_size 设置
 _NO_REPEAT_NGRAM_MIN_REPEATS = 1   # 由 main() 从 --no_repeat_ngram_min_repeats 设置
+_THINK_BUDGET = 0                  # 0=关 budget forcing; 由 main() 从 --think_budget 设置
+_ANSWER_BUDGET = 1024              # budget forcing 第二段(强制出答案)的 max_tokens
+
+# FOARL Alpaca 开场白 (放进 chat 的 system role, 内容为 FOARL 原版)
+FOARL_PREAMBLE = (
+    "Below is an instruction describing a combinatorial optimization problem. "
+    "It is paired with an input that provides the data of the instance. "
+    "Your task is to produce a feasible solution that optimizes (minimizes or maximizes) "
+    "the given objective."
+)
+
+
+def _build_foarl_prompt(instance: dict, problem_type: str, k_nn: int = 2) -> list[dict]:
+    """从 evaluate 的实例 dict 构造 FOARL 原版内容的 chat prompt (system=preamble, user=instruction+input)。
+    与 FOARL/build_foarl_cvrp_data.py 同口径 (坐标[0,1]/demand浮点/容量1.0 + k近邻)。当前仅 CVRP。"""
+    import numpy as np
+    if problem_type != "cvrp":
+        raise NotImplementedError(f"FOARL prompt 目前只支持 cvrp, 收到 {problem_type}")
+    n = instance["n"]
+    coords = np.asarray(instance["coords"], dtype=float)
+    demands = np.asarray(instance["demands"], dtype=float)
+    capacity = instance["capacity"]
+    p = n + 1
+    D = np.sqrt(((coords[:, None, :] - coords[None, :, :]) ** 2).sum(-1))
+    instruction = (
+        f"Solve the Capacitated Vehicle Routing Problem (CVRP) with {n} customers "
+        "and 1 depot (node 0). Each customer node has a demand. "
+        f"All vehicles have the same capacity {capacity}. You must assign each customer to exactly one route "
+        "and ensure that the sum of demands on each route does not exceed the vehicle capacity. "
+        "Minimize the total distance traveled.\n\n"
+        f"The input includes city coordinates, the {k_nn} nearest neighbors for each city, and their respective distances. "
+        "Provide the solution in the following format:\n"
+        "1. A list of routes, each route as an ordered list of visited nodes (start/end at the depot).\n"
+        "2. Objective: The total distance of all routes."
+    )
+    descs = []
+    for i in range(p):
+        order = np.argsort(D[i])
+        neigh = [j for j in order if j != i][:k_nn]
+        nb = "[" + ", ".join(f"{j}: {D[i, j]:.3f}" for j in neigh) + "]"
+        coord = [round(float(coords[i, 0]), 3), round(float(coords[i, 1]), 3)]
+        descs.append(f"Node {i}, coordinates: {coord}, demand: {round(float(demands[i]),4)}, neighbors: {nb};".replace("'", ""))
+    inp = "".join(descs)
+    inp = ".".join(inp.rsplit(";", 1))
+    return [{"role": "system", "content": FOARL_PREAMBLE},
+            {"role": "user", "content": f"{instruction}\n\n{inp}"}]
+
+
+def _foarl_to_route_lines(completion: str) -> str:
+    """把 FOARL 答案 'Routes: [[0,..,0],..], Objective: X' 转成 'Route k: 0 -> .. -> 0' 多行,
+    供下游 parse_multi_route 解析。解析失败则原样返回 (下游会判为不可行)。"""
+    import re as _re
+    import ast as _ast
+    m = _re.search(r"Routes:\s*\[\s*(.*)\]", completion, _re.DOTALL)
+    if not m:
+        return completion
+    try:
+        routes = _ast.literal_eval(f"[{m.group(1).strip()}]")
+    except (SyntaxError, ValueError):
+        return completion
+    if not isinstance(routes, list) or not all(isinstance(r, list) for r in routes):
+        return completion
+    return "\n".join(
+        f"Route {k}: " + " -> ".join(str(int(v)) for v in r)
+        for k, r in enumerate(routes, 1) if r
+    )
 
 
 class NoRepeatNGramLogitsProcessor:
@@ -774,30 +840,65 @@ def _generate_vllm(model, tokenizer, prompts: list[list[dict]],
 
     # skip_special_tokens=False: 关键! 与 _generate_local 对齐, 保留 <think>/</think>
     # (Qwen3-Thinking 注册为 special token), 否则 </think> 被剥导致下游 rfind 解析错乱。
+    _STRIP = ("<|im_end|>", "<|endoftext|>", "<｜end▁of▁sentence｜>",
+              "<|begin_of_text|>", "<|eot_id|>")
+
+    def _clean(t: str) -> str:
+        # 与 _generate_local 一致: 去结构性 special token, 保留 <think>/</think>
+        for tok in _STRIP:
+            t = t.replace(tok, "")
+        return t
+
     _lps = None
     if _NO_REPEAT_NGRAM_SIZE and _NO_REPEAT_NGRAM_SIZE >= 2:
         _lps = [NoRepeatNGramLogitsProcessor(_NO_REPEAT_NGRAM_SIZE, _NO_REPEAT_NGRAM_MIN_REPEATS)]
+    _temp = temperature if num_samples > 1 else 0
+
+    # ── budget forcing: think 到预算还没出 </think> 就强制注入 </think> 再生成答案 (两段式) ──
+    #   正常样本(自然出 </think>+答案) 只第一段一次; 仅卡住样本(无 </think>)走第二段。
+    if _THINK_BUDGET and _THINK_BUDGET > 0:
+        sp1 = SamplingParams(max_tokens=_THINK_BUDGET, temperature=_temp, n=num_samples,
+                             skip_special_tokens=False, logits_processors=_lps)
+        out1 = model.generate(chat_texts, sp1)
+        phase1 = [[None] * num_samples for _ in range(len(prompts))]   # (text, ntok)
+        pending = []                                                   # (i, s, forced_input)
+        for i, output in enumerate(out1):
+            for s, samp in enumerate(output.outputs):
+                txt, ntok = samp.text, len(samp.token_ids)
+                phase1[i][s] = (txt, ntok)
+                if "</think>" not in txt:                              # 卡住没收尾 → 强制
+                    pending.append((i, s, chat_texts[i] + txt + "</think>\n\n"))
+        ans_map = {}
+        if pending:
+            sp2 = SamplingParams(max_tokens=_ANSWER_BUDGET, temperature=_temp, n=1,
+                                 skip_special_tokens=False)            # 答案段不加 ngram 约束
+            out2 = model.generate([p[2] for p in pending], sp2)
+            for (i, s, _), o2 in zip(pending, out2):
+                ans_map[(i, s)] = (o2.outputs[0].text, len(o2.outputs[0].token_ids))
+        all_completions = [[] for _ in range(len(prompts))]
+        for i in range(len(prompts)):
+            for s in range(num_samples):
+                txt, ntok = phase1[i][s]
+                if (i, s) in ans_map:                                  # 强制出了答案
+                    ans_txt, ans_ntok = ans_map[(i, s)]
+                    full = _clean(txt) + "</think>\n\n" + _clean(ans_txt)
+                    all_completions[i].append((full, False, ntok + ans_ntok))
+                else:                                                  # 自然收尾
+                    all_completions[i].append((_clean(txt), ntok >= _THINK_BUDGET, ntok))
+        return all_completions
+
+    # ── 普通单段路径 ──
     sampling_params = SamplingParams(
-        max_tokens=max_completion_length,
-        temperature=temperature if num_samples > 1 else 0,
-        n=num_samples,
-        skip_special_tokens=False,
-        logits_processors=_lps,
+        max_tokens=max_completion_length, temperature=_temp,
+        n=num_samples, skip_special_tokens=False, logits_processors=_lps,
     )
-
     outputs = model.generate(chat_texts, sampling_params)
-
     all_completions = [[] for _ in range(len(prompts))]
     for i, output in enumerate(outputs):
         for sample in output.outputs:
-            completion = sample.text
-            # 与 _generate_local 一致: 去掉结构性 special token, 保留 <think>/</think>
-            for tok in ("<|im_end|>", "<|endoftext|>", "<｜end▁of▁sentence｜>",
-                        "<|begin_of_text|>", "<|eot_id|>"):
-                completion = completion.replace(tok, "")
             num_tokens = len(sample.token_ids)
-            is_truncated = (num_tokens >= max_completion_length)
-            all_completions[i].append((completion, is_truncated, num_tokens))
+            all_completions[i].append(
+                (_clean(sample.text), num_tokens >= max_completion_length, num_tokens))
 
     return all_completions
 
@@ -977,17 +1078,20 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     prompts = []
     for _ in range(num_test):
         instance = prob.generate_instance(problem_size, rng)
-        prompt   = prob.build_prompt(instance)
 
-        # instruct 模型：剥离 system prompt 中的 <think> 指令
-        if model_type == "instruct":
-            for msg in prompt:
-                if msg["role"] == "system":
-                    msg["content"] = _strip_think_instructions(msg["content"])
-
-        # structured 模式：替换 system prompt 和 user 末尾输出格式
-        if prompt_mode == "structured":
-            prompt = _apply_structured_prompt(prompt, problem_type)
+        if prompt_mode == "foarl":
+            # FOARL 原版 prompt (instruct 臂); 与 UniCOP prompt 不同, 直接覆盖
+            prompt = _build_foarl_prompt(instance, problem_type)
+        else:
+            prompt = prob.build_prompt(instance)
+            # instruct 模型：剥离 system prompt 中的 <think> 指令
+            if model_type == "instruct":
+                for msg in prompt:
+                    if msg["role"] == "system":
+                        msg["content"] = _strip_think_instructions(msg["content"])
+            # structured 模式：替换 system prompt 和 user 末尾输出格式
+            if prompt_mode == "structured":
+                prompt = _apply_structured_prompt(prompt, problem_type)
 
         instances.append(instance)
         prompts.append(prompt)
@@ -1028,6 +1132,10 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                 num_tokens = item[2] if len(item) > 2 else None
             else:
                 completion, is_truncated, num_tokens = item, False, None
+
+            # FOARL 臂: 把 'Routes: [[...]]' 转成 'Route k: 0 -> .. -> 0' 供下游 parse_multi_route
+            if prompt_mode == "foarl":
+                completion = _foarl_to_route_lines(completion)
 
             total_samples += 1
             if is_truncated:
@@ -1254,7 +1362,8 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
         from bestofn_eval import bestofn_replay
 
         def _ctext_b(it):
-            return it[0] if isinstance(it, tuple) else it
+            t = it[0] if isinstance(it, tuple) else it
+            return _foarl_to_route_lines(t) if prompt_mode == "foarl" else t
 
         bon_completions = [[_ctext_b(it) for it in all_completions[i]]
                            for i in range(num_test)]
@@ -1368,6 +1477,12 @@ def main():
                         help="配合 --no_repeat_ngram_size: 仅当 n-gram 已重复 >= 此值次才禁其后继。"
                              "1=第2次即禁(HF原义); 思维模型有'Final routes+</think>后拷贝'的合法2次重复, "
                              "建议设 3-6 放行合法拷贝、只杀重复几十次的退化循环")
+    parser.add_argument("--think_budget", type=int, default=0,
+                        help="vLLM budget forcing: think 段 token 预算。0=关(单段)。>0 时两段式: think 到"
+                             "预算还没出 </think> 就强制注入 </think> 再生成答案 → 治 thinking 循环导致的"
+                             "答案截断, 且不惩罚重复。思维臂建议 10000(确保推理充分); instruct 臂保持 0")
+    parser.add_argument("--answer_budget", type=int, default=1024,
+                        help="budget forcing 第二段(强制出答案)的 max_tokens (仅 --think_budget>0 生效)")
     parser.add_argument("--model_type",   type=str,   default="reasoning",
                         choices=["reasoning", "instruct"],
                         help="reasoning=推理模型(10000 tokens)，instruct=指令模型(512 tokens)")
@@ -1383,8 +1498,9 @@ def main():
                         help="vLLM 强制 eager（关 CUDA graph）。默认 False=开 CUDA graph+async output(对齐训练端,快)。"
                              "仅当 graph capture 报错时才加此 flag 回退。")
     parser.add_argument("--prompt_mode",  type=str,   default="think",
-                        choices=["think", "structured"],
-                        help="提示词模式：think=自由推理 | structured=结构化逐步输出")
+                        choices=["think", "structured", "foarl"],
+                        help="提示词模式：think=自由推理 | structured=结构化逐步输出 | "
+                             "foarl=FOARL 原版(instruction+kNN, 答案 Routes:[[...]]; 用于 instruct 臂, 仅 CVRP)")
     parser.add_argument("--repetition_penalty", type=float, default=1.0,
                         help="重复惩罚系数，1.0=无惩罚，1.2-1.5=常用范围（仅 local 模式）")
     parser.add_argument("--no_repeat_ngram_size", type=int, default=0,
@@ -1472,15 +1588,22 @@ def main():
         ngram_tag = f" | no_repeat_ngram={no_repeat_ngram}" if no_repeat_ngram else ""
         backend_info = f"local | {args.model_path} | rep_penalty={rep_penalty}{ngram_tag}"
     elif args.backend == "vllm":
-        global _NO_REPEAT_NGRAM_SIZE, _NO_REPEAT_NGRAM_MIN_REPEATS
+        global _NO_REPEAT_NGRAM_SIZE, _NO_REPEAT_NGRAM_MIN_REPEATS, _THINK_BUDGET, _ANSWER_BUDGET
         _NO_REPEAT_NGRAM_SIZE = args.no_repeat_ngram_size
         _NO_REPEAT_NGRAM_MIN_REPEATS = args.no_repeat_ngram_min_repeats
+        _THINK_BUDGET = args.think_budget
+        _ANSWER_BUDGET = args.answer_budget
         if _NO_REPEAT_NGRAM_SIZE:
             print(f"[no-repeat-ngram] 启用 logits processor, n={_NO_REPEAT_NGRAM_SIZE}, "
                   f"min_repeats={_NO_REPEAT_NGRAM_MIN_REPEATS} (前 {_NO_REPEAT_NGRAM_MIN_REPEATS} 次放行)")
-        # max_model_len 按本次 max_completion_length 动态算 (留 prompt buffer),
-        # 取代原写死的 8192——否则长 think (如 base 模型 10112) 会超限报错.
-        _vllm_max_len = max_completion_length + 1536
+        if _THINK_BUDGET:
+            print(f"[budget-forcing] think_budget={_THINK_BUDGET}, answer_budget={_ANSWER_BUDGET} "
+                  f"(两段式: 到预算无 </think> 则强制收尾出答案)")
+        # max_model_len 动态算 (留 prompt buffer); budget forcing 时按 think+answer 预算。
+        if _THINK_BUDGET and _THINK_BUDGET > 0:
+            _vllm_max_len = _THINK_BUDGET + _ANSWER_BUDGET + 1536
+        else:
+            _vllm_max_len = max_completion_length + 1536
         model, tokenizer = _load_vllm_model(args.model_path, args.tp_size,
                                             gpu_mem_util=args.vllm_gpu_mem_util,
                                             max_model_len=_vllm_max_len,
