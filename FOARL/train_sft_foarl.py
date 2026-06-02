@@ -261,6 +261,20 @@ def main():
     print(f"  response_template: {resp_str!r} → IDs: {resp_ids}")
     collator = DataCollatorForCompletionOnlyLM(response_template=resp_ids, tokenizer=tokenizer)
 
+    # ── completion-only 自检 (金标准): 解码首样本 label!=-100 的 token, 应只剩答案 ──
+    #    只在 rank0 跑一次。空 → response_template 没命中, mask 全掉, loss 学不到东西;
+    #    含 prompt 内容 → mask 边界错位。正确结果: 只有 "Routes: ..., Objective: ...<eos>"。
+    if os.environ.get("LOCAL_RANK", "0") == "0":
+        _enc = tokenizer(dataset[0]["text"], add_special_tokens=False)
+        _b = collator([{"input_ids": _enc["input_ids"], "attention_mask": _enc["attention_mask"]}])
+        _kept = [t for t, l in zip(_enc["input_ids"], _b["labels"][0].tolist()) if l != -100]
+        _dec = tokenizer.decode(_kept)
+        print(f"  [completion-only 自检] 参与 loss token 数={len(_kept)}; 解码={_dec[:160]!r}")
+        if len(_kept) == 0:
+            print("  [FAIL] 无 token 参与 loss → response_template 没命中, completion-only 失效!")
+        elif "Routes:" not in _dec:
+            print("  [WARN] 参与 loss 的内容不含 'Routes:', mask 边界可能错位")
+
     trainer = SFTTrainer(model=model, args=sft_config, train_dataset=dataset,
                          processing_class=tokenizer, peft_config=peft_config, data_collator=collator)
 

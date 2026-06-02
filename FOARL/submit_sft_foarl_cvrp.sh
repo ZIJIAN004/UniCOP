@@ -65,7 +65,16 @@ if [ ! -f "$DATA" ]; then
 fi
 
 SANITY_FLAG=""
-[ "$SANITY" = "1" ] && SANITY_FLAG="--max_samples 256"
+LOG_STEPS=10
+RESUME_FLAG="--resume_from_checkpoint auto"
+# sanity: 少量样本 + 每步打 loss + 独立目录不续 ckpt (避免与全量互相污染)
+if [ "$SANITY" = "1" ]; then
+    SANITY_FLAG="--max_samples 512"
+    LOG_STEPS=1
+    RESUME_FLAG=""
+    OUTPUT_DIR="${OUTPUT_DIR}_sanity"
+    echo "[sanity] 输出改到独立目录: $OUTPUT_DIR (不续 ckpt)"
+fi
 
 accelerate launch --num_processes "$NUM_GPUS" --main_process_port 29610 \
     train_sft_foarl.py \
@@ -77,8 +86,8 @@ accelerate launch --num_processes "$NUM_GPUS" --main_process_port 29610 \
     --batch_size 4 --grad_accum 4 \
     --max_length 4096 --max_output_length 1024 \
     --zero_stage 3 --gradient_checkpointing \
-    --save_steps 200 --logging_steps 10 \
-    --resume_from_checkpoint auto \
+    --save_steps 200 --logging_steps "$LOG_STEPS" \
+    $RESUME_FLAG \
     $SANITY_FLAG
 EC=$?
 
