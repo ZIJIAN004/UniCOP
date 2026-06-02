@@ -35,6 +35,7 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 export BASE_MODEL_TYPE=qwen3_thinking   # Qwen3-4B SFT 产物作为 RL 起点
 export LR=1e-6                           # 温和学习率 (train.py env 覆盖)
 export EPOCHS=1                          # 单 epoch
+export SAVE_STEPS=20                     # 每 20 step 存档 (~41 步的短跑, 存 step20/40 + final)
 # REWARD_SCHEME=v6 / OUTPUT_DIR_BASE=output_v6 / VLLM_PORT=8006 由 run_grpo_cvrp20_v6.sh 设
 
 source /homes/zhuoyi/.bashrc
