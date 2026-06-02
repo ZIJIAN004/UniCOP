@@ -20,6 +20,34 @@ _D="$(cd "$(dirname "$0")" && pwd)"
 export REWARD_SCHEME="${REWARD_SCHEME:-v6}"
 export OUTPUT_DIR_BASE="${OUTPUT_DIR_BASE:-$_D/output_v6}"   # 跟 output_v5 隔离
 
+_USER="${USER:-$(whoami)}"
+
+# ── 诊断 + 清理上次崩溃残留 ────────────────────────────────────────
+#   现象: 全新唯一端口(8261)在干净节点(7 卡全空)仍报 address already in use。
+#   归因: 上次失败的 vLLM 进程没退干净——释放了 GPU(所以 nvidia-smi 看着空),
+#         但 python 进程还赖在节点上占着监听 socket。
+#   安全性: 本 job 独占整节点 7 卡, 故本节点上任何 vllm_serve_logprobs / trl
+#           vllm-serve 进程都是死 job 的残留, 此刻杀掉绝不会误伤(本 job 的 vLLM
+#           还没起)。清理仅在 SLURM 下执行(独占节点), 裸跑不动以免误杀。
+echo "[v6][diag] === 启动前本节点监听端口 (8000-8499) ==="
+( ss -ltnp 2>/dev/null | grep -E ':8[0-4][0-9][0-9]\b' || echo "  (无)" ) | sed 's/^/  /'
+echo "[v6][diag] === 本用户残留 vllm/trl/accelerate 进程 ==="
+( ps -u "$_USER" -o pid,etime,cmd 2>/dev/null \
+    | grep -iE 'vllm_serve_logprobs|trl.scripts.vllm_serve|vllm-serve|accelerate.commands.launch' \
+    | grep -v grep || echo "  (无)" ) | sed 's/^/  /'
+
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    echo "[v6][cleanup] 独占节点, 清理残留 vLLM/trainer 进程..."
+    pkill -u "$_USER" -f vllm_serve_logprobs.py      2>/dev/null || true
+    pkill -u "$_USER" -f 'trl.scripts.vllm_serve'    2>/dev/null || true
+    pkill -u "$_USER" -f 'accelerate.commands.launch' 2>/dev/null || true
+    sleep 3
+    echo "[v6][diag] === 清理后监听端口 (8000-8499) ==="
+    ( ss -ltnp 2>/dev/null | grep -E ':8[0-4][0-9][0-9]\b' || echo "  (无)" ) | sed 's/^/  /'
+else
+    echo "[v6][cleanup] 非 SLURM(裸跑), 跳过残留清理(避免误杀共享节点进程)。"
+fi
+
 # ── 选 vLLM 端口: 按 SLURM job id 唯一化 + 向上扫空闲 ──────────────
 #   为什么不能只靠"扫空闲端口": vLLM 先加载模型(~19s)、最后才 bind, 扫描与 bind
 #   之间隔 20-30s。同节点若有第二个 v6 job, 两边都在各自的加载窗口里看到同一端口
