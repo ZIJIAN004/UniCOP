@@ -707,6 +707,33 @@ def compute_hlr_loss(
     # (此前这段不计时, [TIMING] 七段之和 << 真实 micro 墙钟, 看不到这里)。
     # 只在循环边界 sync 两次(__enter__/__exit__), 段内仍不逐段 sync → 不放大观察者效应。
     with hlr_timer("latent_loop"):
+        # ── 可选: 批量化 LR forward (HLR_BATCHED_LR=1) ──
+        # 把所有 latent 段的 LR forward 从 n_lat 次串行合并成 1 次 batched (B'=n_lat, pad 到 max_k).
+        # 等价性: 各段输入是不同 detach 的 teacher hidden, past_kv=None, RoPE start_pos=0,
+        #   causal SDPA 在 batch 维独立 + 右 pad 在因果掩码下不泄漏进真实位置 → 真实位置逐元素等价.
+        # 正确性红线(否则静默改坏 α/β):
+        #   - 注入 _inj 按真实 k 切片去 pad (不能把 pad 位喂进 student 序列);
+        #   - align 端把 layer_hiddens 也切到 [:k], 使下游 lh[:,-1,:] 取到真实段末位(k-1)而非 pad 位.
+        # 数值由 test_batched_lr.py 的 allclose 对拍守门. LR pure-local, 不碰任何 collective.
+        _batched_lr = os.environ.get("HLR_BATCHED_LR", "0") == "1"
+        _batched_cache = {}
+        if _batched_lr:
+            _lat_idx = [i for i, s in enumerate(segments) if s.type == "latent"]
+            if _lat_idx:
+                _ks = [segments[i].k for i in _lat_idx]
+                _max_k = max(_ks)
+                _h_list = []
+                for _i in _lat_idx:
+                    _ip = min(max(segments[_i].teacher_input_pos, 0), T_teacher - 1)
+                    _h_list.append(teacher_hidden_states[-1][:, _ip, :].detach())  # [1, H_main]
+                _h_stack = torch.cat(_h_list, dim=0)                                # [n_lat, H_main]
+                _lh_b, _ = latent_reasoner(_h_stack, k=_max_k)                      # num_layers × [n_lat, max_k, H_lr]
+                _inj_b = latent_reasoner.up_proj(_lh_b[-1])                         # [n_lat, max_k, H_main]
+                for _j, _si in enumerate(_lat_idx):
+                    _k = _ks[_j]
+                    _inj = _inj_b[_j:_j + 1, :_k, :]                                # [1, k, H_main] 去 pad
+                    _lh_seg = [lh[_j:_j + 1, :_k, :] for lh in _lh_b]              # 各层 [1, k, H_lr] 去 pad
+                    _batched_cache[_si] = (_inj, _lh_seg)
         for seg_idx, seg in enumerate(segments):
             _hit_stamp = (seg_idx % 20 == 0) or (seg_idx >= _N_SEG - 3)
             if seg.type in ("explicit", "solution"):
@@ -716,14 +743,18 @@ def compute_hlr_loss(
                     _loss_stamp(f"seg {seg_idx}/{_N_SEG} type={seg.type} assembled")
             elif seg.type == "latent":
                 k = seg.k
-                in_pos = seg.teacher_input_pos
-                in_pos = min(max(in_pos, 0), T_teacher - 1)
-                h_input = teacher_hidden_states[-1][:, in_pos, :].detach()
-                # LR forward 是 pure local (LR 不在 ZeRO-3 wrap, 修复后), 不触发 collective.
-                # 段内不逐段 sync (会放大观察者效应); 整段耗时由外层 latent_loop 计。
-                layer_hiddens, _ = latent_reasoner(h_input, k=k)
-                top_hidden = layer_hiddens[-1]
-                latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)
+                if _batched_lr:
+                    # 批量化: 直接取预算好的切片 (与逐段路径数值等价, 见上红线)
+                    latent_inputs_embeds, layer_hiddens = _batched_cache[seg_idx]
+                else:
+                    in_pos = seg.teacher_input_pos
+                    in_pos = min(max(in_pos, 0), T_teacher - 1)
+                    h_input = teacher_hidden_states[-1][:, in_pos, :].detach()
+                    # LR forward 是 pure local (LR 不在 ZeRO-3 wrap, 修复后), 不触发 collective.
+                    # 段内不逐段 sync (会放大观察者效应); 整段耗时由外层 latent_loop 计。
+                    layer_hiddens, _ = latent_reasoner(h_input, k=k)
+                    top_hidden = layer_hiddens[-1]
+                    latent_inputs_embeds = latent_reasoner.up_proj(top_hidden)
                 student_embeds_parts.append(latent_inputs_embeds)
                 student_labels_parts.append(torch.full(
                     (k,), -100, dtype=torch.long, device=device
