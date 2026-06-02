@@ -139,7 +139,14 @@ ZERO_STAGE="${ZERO_STAGE:-3}"
 NUM_TRAIN="${NUM_TRAIN:-1000}"   # 一个 epoch 的 instance 数, 可 env 覆盖。total_steps = NUM_TRAIN×epochs(2)÷(4×训练卡数); 例 1000×2÷(4×6)=83 (6 卡)
 OUTPUT_DIR_BASE="${OUTPUT_DIR_BASE:-$WORK_DIR/output_v5}"   # 可 env 覆盖, 消融实验用独立目录避免与主实验打架
 
-VLLM_PORT=8004
+VLLM_PORT="${VLLM_PORT:-8004}"   # 可 env 覆盖, 多 scheme 并行时错开端口 (v6 用 8006)
+
+# REWARD_SCHEME: env 覆盖 reward_scheme (不设则走 config 默认 v5)。v6 wrapper 用它切 v6。
+REWARD_SCHEME_FLAG=""
+if [ -n "${REWARD_SCHEME:-}" ]; then
+    REWARD_SCHEME_FLAG="--reward_scheme ${REWARD_SCHEME}"
+    echo "[REWARD_SCHEME] 覆盖为 ${REWARD_SCHEME}"
+fi
 # gpu_memory_utilization = 0.80 是 zhihan 24G 卡 + 这个 4B 模型的唯一甜点值。两边都是悬崖:
 #   ▲ 太高(≥0.85): CUDA graph capture 要 ~4.68GiB, 且这块显存在 util 预算之外
 #     (capture 之后才发生)。可用 = 23.69×(1-util): 0.85→3.55GiB < 4.68 → capture_end OOM;
@@ -347,6 +354,7 @@ CUDA_VISIBLE_DEVICES="$TRAIN_GPUS_CSV" \
     python -m accelerate.commands.launch --num_processes "$TRAIN_PROC" "$WORK_DIR/train.py" \
     --problem "$PROBLEM" \
     --problem_size "$SIZE" \
+    $REWARD_SCHEME_FLAG \
     --num_train "$NUM_TRAIN" \
     --model "$MODEL_BASE" \
     --num_gpus "$TRAIN_PROC" \

@@ -168,6 +168,11 @@ if os.environ.get("NUM_GEN") is not None:
 # SAVE_STEPS: 覆盖 checkpoint 保存间隔 (默认 50)。某些实验要更密的存档 (如 noprm 用 20)。
 if os.environ.get("SAVE_STEPS") is not None:
     config.save_steps = int(os.environ.get("SAVE_STEPS"))
+# LR / EPOCHS: 覆盖学习率 / epoch (默认 config 值)。对照实验用 (如 v6 温和: LR=1e-6 EPOCHS=1)。
+if os.environ.get("LR") is not None:
+    config.learning_rate = float(os.environ.get("LR"))
+if os.environ.get("EPOCHS") is not None:
+    config.num_train_epochs = int(os.environ.get("EPOCHS"))
 
 from data.generate import build_dataset, build_mixed_dataset
 from problems import get_problem, SUPPORTED_PROBLEMS
