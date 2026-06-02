@@ -1,6 +1,7 @@
 #!/bin/bash
 # submit_sft_foarl_cvrp.sh — FOARL CVRP Stage-1 SFT (zhuoyi SLURM)
-#   基座: Qwen3-4B-Instruct-2507 (非思维) | 数据: FOARL 原版内容 (无 think) | LoRA r64/α64, lr2e-4, 1ep
+#   基座: Qwen3-4B-Instruct-2507 (非思维) | 数据: FOARL 原版内容 (无 think)
+#   超参: 对齐 UniCOP-Distill 思维臂 (LoRA r64/α128, lr2e-5, 3ep, bs1·ga8, maxlen4864) → 消融只差"有无 think"
 #   流程: (缺数据则先建) build_foarl_cvrp_data.py → accelerate ZeRO-3 多卡 train_sft_foarl.py
 #
 #   ⚠️ 需先在集群放好 Qwen3-4B-Instruct-2507 (paths.sh 现仅有 Thinking-2507):
@@ -81,12 +82,13 @@ accelerate launch --num_processes "$NUM_GPUS" --main_process_port 29610 \
     --model "$MODEL" \
     --data "$DATA" \
     --output_dir "$OUTPUT_DIR" \
-    --lora_rank 64 --lora_alpha 64 \
-    --lr 2e-4 --epochs 1 \
-    --batch_size 4 --grad_accum 4 \
-    --max_length 4096 --max_output_length 1024 \
+    --lora_rank 64 --lora_alpha 128 \
+    --lr 2e-5 --epochs 3 \
+    --batch_size 1 --grad_accum 8 \
+    --warmup_ratio 0.05 \
+    --max_length 4864 --max_output_length 1024 \
     --zero_stage 3 --gradient_checkpointing \
-    --save_steps 200 --logging_steps "$LOG_STEPS" \
+    --save_steps 500 --logging_steps "$LOG_STEPS" \
     $RESUME_FLAG \
     $SANITY_FLAG
 EC=$?

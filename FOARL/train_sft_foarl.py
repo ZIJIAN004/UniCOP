@@ -161,18 +161,18 @@ def main():
     ap.add_argument("--model", required=True, help="Qwen3-4B-Instruct-2507 路径")
     ap.add_argument("--data", nargs="+", default=["data/foarl_cvrp20.jsonl"])
     ap.add_argument("--output_dir", default="./output_sft_foarl_cvrp20")
-    # LoRA: 对齐 FOARL recipe (r=64, alpha=64)
+    # LoRA: 对齐 UniCOP-Distill 思维臂 (r=64, alpha=128), 保证消融只差"有无 think"
     ap.add_argument("--no_lora", action="store_true")
     ap.add_argument("--lora_rank", type=int, default=64)
-    ap.add_argument("--lora_alpha", type=int, default=64)
-    # 训练: 对齐 FOARL (lr=2e-4, 1 epoch)
-    ap.add_argument("--lr", type=float, default=2e-4)
-    ap.add_argument("--epochs", type=int, default=1)
-    ap.add_argument("--batch_size", type=int, default=4)
-    ap.add_argument("--grad_accum", type=int, default=4)
-    ap.add_argument("--warmup_ratio", type=float, default=0.03)
-    ap.add_argument("--max_length", type=int, default=4096,
-                    help="CVRP n=20 prompt 短(~800 tok), 4096 足够; 更大规模再调高")
+    ap.add_argument("--lora_alpha", type=int, default=128)
+    # 训练: 对齐 distill 思维臂超参 (lr=2e-5, 3 epoch, bs1·ga8, warmup0.05), 非 FOARL recipe
+    ap.add_argument("--lr", type=float, default=2e-5)
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--batch_size", type=int, default=1)
+    ap.add_argument("--grad_accum", type=int, default=8)
+    ap.add_argument("--warmup_ratio", type=float, default=0.05)
+    ap.add_argument("--max_length", type=int, default=4864,
+                    help="对齐 distill SFT_MAX_LENGTH=4864 (CVRP n=20 实际只需 ~800 tok)")
     ap.add_argument("--max_output_length", type=int, default=1024)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--max_samples", type=int, default=0, help="只取前 N 条 sanity, 0=全量")
