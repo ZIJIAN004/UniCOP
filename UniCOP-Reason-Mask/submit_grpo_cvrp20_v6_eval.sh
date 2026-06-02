@@ -56,11 +56,14 @@ EVAL_TP="${EVAL_TP:-4}"                   # tensor parallel=4 (Qwen3-4B-Thinking
 EVAL_TEMP="${EVAL_TEMP:-0.6}"            # Qwen3-thinking 推荐 BO8 采样温度
 EVAL_GPU_MEM="${EVAL_GPU_MEM:-0.8}"      # 留余量给 CUDA graph + wave 的 POMO PRM
 
-set -uo pipefail
+# ⚠️ 别在 conda activate 之前开 set -u: conda 的 activate.d/~cuda-nvcc_activate.sh 会引用
+#    未设置的 NVCC_PREPEND_FLAGS, nounset 下直接 "unbound variable" 挂掉。原 v5/v6 submit
+#    全程无 set -u 故无此坑; 这里先宽松 bootstrap, 激活完再开严格模式。
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop
 cd /homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask
+set -uo pipefail
 
 # 复用 v5 launcher 里的 Server酱 key, 给 merge/eval 阶段补通知 (训练阶段 run_grpo 已自带)
 SCKEY="${SCKEY:-SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp}"
