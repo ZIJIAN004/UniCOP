@@ -438,10 +438,20 @@ class GRPOPRMTrainer(GRPOTrainer):
                 batch, completions_text, instances, problem_type_list, num_gen
             )
 
-            # v3 (默认, 原 hardgate+cascade) | v4 (simplified+absolute PRM) |
-            # v5 (v4 + hardgate distance + cov/cons 加权)
-            _scheme = getattr(config, "reward_scheme", "v3")
-            if _scheme == "v5":
+            # v3 (原 hardgate+cascade) | v4 (simplified+absolute PRM) |
+            # v5 (v4 + hardgate distance + cov/cons 加权, 当前默认) |
+            # v6 (v5 + PRM 批级截尾标准化 sigmoid)
+            _scheme = getattr(config, "reward_scheme", "v5")
+            if _scheme == "v6":
+                advantages = self._build_unified_advantages_v6(
+                    completions_text, instances, problem_type_list,
+                    B, num_gen, T, device=completion_ids.device,
+                    prompt_ids=batch["prompt_ids"],
+                    prompt_mask=batch["prompt_mask"],
+                    mask_hits=batch.get("mask_hits"),
+                    completion_mask=completion_mask,
+                )
+            elif _scheme == "v5":
                 advantages = self._build_unified_advantages_v5(
                     completions_text, instances, problem_type_list,
                     B, num_gen, T, device=completion_ids.device,
@@ -1557,6 +1567,382 @@ class GRPOPRMTrainer(GRPOTrainer):
                 # 两个独立维度组合诊断
                 dim_a_ok = mask_hit_rate_g > 0.001  # vLLM 端真触发
                 dim_b_ok = cov1_g >= 0.95            # 输出完全约束
+                if dim_a_ok and dim_b_ok:
+                    print(f"  ✓ Mask 完美生效 (维度 A: server 端在跑; 维度 B: 输出完全约束)")
+                elif dim_a_ok and not dim_b_ok:
+                    print(f"  ⚠️ Mask 在 server 跑但有 fallthrough (cov_eq_1={cov1_g:.2f} < 0.95)")
+                    print(f"     可能原因: max_completion_length 截断 / multi-token customer prefix 共享")
+                    print(f"              resample 后 mask_hits 未更新 (已知 issue, 影响 marginal)")
+                    if zero_dup_g < 0.95 and zero_miss_g >= 0.95:
+                        print(f"     主因疑似: 规则 1 (select 强 mask) 没完全防 dup")
+                    elif zero_miss_g < 0.95 and zero_dup_g >= 0.95:
+                        print(f"     主因疑似: 规则 4/5 (visited<n 禁 all/Verification) 没完全防 miss")
+                elif not dim_a_ok:
+                    print(f"  ❌ Mask 未生效: vLLM server 端 mask 完全没触发 (mask_hit_rate=0)")
+                    print(f"     检查 1: vLLM server 启动命令是否带 --mask_enabled --mask_n N")
+                    print(f"     检查 2: utils/vllm_serve_logprobs.py 启动 log 应有 '[mask] CVRPMaskProcessor 启用'")
+                    print(f"     检查 3: train.py 是否打了 '✓ vLLM mask processor 已就绪' 的 sanity 行")
+                print(f"  =======================================================\n",
+                      flush=True)
+
+        self.log(log_dict)
+        return advantages
+
+    def _build_unified_advantages_v6(self, completions_text, instances,
+                                      problem_type_list,
+                                      B, num_gen, T, device,
+                                      prompt_ids, prompt_mask,
+                                      mask_hits=None, completion_mask=None):
+        """v6 advantage 构造: A_feas + A_outcome (完全复用 v5 _compute_a_out_v5)
+        + PRM 用「批级截尾标准化 + sigmoid」替代 v5 的 absolute base+tanh.
+
+        关键差异 vs v5 (其余完全相同, 整体复制):
+        - A_feas / A_outcome 部分完全复用 v5 (_compute_a_out_v5), 零改动.
+        - PRM a_proc 变换: a_proc = sigmoid((raw_R_step - mu) / s) ∈ (0,1)
+          替代 v5 的 prm_base + tanh(R_step).
+        - 两遍: 先 gather 跨 rank 所有 fully-feasible trajectory 的所有 normal step
+          的原始 R_step (prm_res.raw_step_rewards), 批级截尾标准化算 mu/s (全 rank 一致),
+          再各 rank 用同一份 mu/s 计算 sigmoid 并注入.
+        - 注入沿用 v5 完全相同的 mean 模式: inject_per_tok = proc_alpha_v4 * a_proc / seg_len.
+        - 违例/重复 step 仍游离 (不进 raw_step_rewards, a_proc=0) → 排序天然: 可行 (0,1) > 0.
+
+        mask_hits / completion_mask: 用于 mask_health 计算 vLLM 端真实触发率,
+        作为 cov_eq_1 的独立维度判断 mask 是否在 server 端跑起来.
+        """
+        a_out_pkg = self._compute_a_out_v5(
+            completions_text, instances, problem_type_list, B, num_gen, device,
+            prompt_ids, prompt_mask,
+        )
+        a_out = a_out_pkg["a_out"]
+        components = a_out_pkg["components"]
+        a_feas_norm = a_out_pkg["a_feas_norm"]
+        a_outcome_norm = a_out_pkg["a_outcome_norm"]
+        distances_local = a_out_pkg["distance_local"]
+        dist_std_per_group = a_out_pkg["dist_std_per_group"]
+        dist_cv_per_group = a_out_pkg["dist_cv_per_group"]
+        feas_subset_size_per_group = a_out_pkg["feas_subset_size_per_group"]
+
+        # 初始化 advantage tensor: 所有 token 先赋 A_out
+        advantages = a_out.unsqueeze(-1).expand(-1, T).contiguous()
+
+        # PRM 段广播 (mean 模式, 注入沿用 v5; a_proc 改 sigmoid)
+        prm_base = getattr(config, "prm_base_v4", 1.5)   # v6 不用于 a_proc, 仅保留诊断对齐
+        proc_alpha = getattr(config, "proc_alpha_v4", 50.0)
+
+        # v6 sigmoid 标准化参数
+        trim_frac = getattr(config, "trim_frac_v6", 0.05)
+        s_min = getattr(config, "s_min_v6", 1e-2)
+        s_max = getattr(config, "s_max_v6", 1e3)
+
+        n_segments_total = 0
+        a_proc_sum = 0.0
+        a_proc_min = float("inf")
+        R_step_raw_abs_sum = 0.0
+        R_step_raw_abs_max = 0.0
+        R_step_saturated = 0
+        R_step_total = 0
+        seg_token_count = 0
+        prm_inject_tok_sum = 0.0
+        inject_per_tok_max = 0.0
+
+        prm_only_fully_feas = getattr(config, "prm_only_fully_feas_v5", True)
+        prm_skipped_non_feas = 0
+
+        # v6 诊断: 批级 mu/s, sigmoid 输出分布
+        v6_mu = 0.0
+        v6_s = float(s_min)
+        v6_bulk_size = 0
+        v6_global_rstep_count = 0
+        a_proc_max = 0.0
+
+        if not config.disable_prm and self.pomo_prm is not None:
+            offset_maps = self._build_offset_maps(completions_text, B)
+
+            # ── 第一遍: rank-local 收集所有 fully-feas trajectory 的所有 normal step ──
+            # 同时缓存 prm_res / offset_map, 避免第二遍重复调 compute_think_step_rewards_v4.
+            prm_cache: dict = {}          # i -> (prm_res, om)
+            local_raw_rsteps: list = []   # 本 rank 所有 normal step 的原始 R_step
+            for i in range(B):
+                pt = problem_type_list[i]
+                if pt not in self.pomo_prm.SUPPORTED:
+                    continue
+                if prm_only_fully_feas and not a_out_pkg["is_feasible"][i]:
+                    prm_skipped_non_feas += 1
+                    continue
+                prm_res = self.pomo_prm.compute_think_step_rewards_v4(
+                    completions_text[i], instances[i], pt,
+                )
+                if prm_res is None or offset_maps[i] is None:
+                    continue
+                om = offset_maps[i]
+                prm_cache[i] = (prm_res, om)
+                for step_idx, R_raw in prm_res.raw_step_rewards.items():
+                    local_raw_rsteps.append(float(R_raw))
+
+            # ── 跨 rank gather 所有原始 R_step → 全局 bulk ──
+            # 沿用 v5 的 gather 纪律 (gather_object), 全 rank 同步调用.
+            gathered = gather_object([local_raw_rsteps])
+            flat_rsteps = [r for sub in gathered for r in sub]
+            v6_global_rstep_count = len(flat_rsteps)
+
+            # ── 第二遍前: 批级截尾标准化 (全 rank 用同一份全局数据, mu/s 必一致) ──
+            if v6_global_rstep_count >= 2:
+                arr = np.asarray(flat_rsteps, dtype=np.float64)
+                abs_arr = np.abs(arr)
+                n_arr = arr.shape[0]
+                trim_idx = int(n_arr * trim_frac)
+                sorted_idx = np.argsort(abs_arr)
+                # 按 |R_step| 升序, 剔掉绝对值最大的 trim_idx 个 (尾部).
+                if trim_idx > 0 and trim_idx < n_arr:
+                    bulk_idx = sorted_idx[: n_arr - trim_idx]
+                else:
+                    bulk_idx = sorted_idx
+                if bulk_idx.shape[0] >= 1:
+                    bulk = arr[bulk_idx]
+                    v6_mu = float(np.mean(bulk))
+                    v6_s = float(np.std(bulk))
+                    v6_bulk_size = int(bulk.shape[0])
+                else:
+                    v6_mu, v6_s = 0.0, float(s_min)
+            else:
+                v6_mu, v6_s = 0.0, float(s_min)
+            # clamp 防除零 / 过度放大
+            v6_s = float(np.clip(v6_s, s_min, s_max))
+            if not np.isfinite(v6_mu):
+                v6_mu = 0.0
+            if not np.isfinite(v6_s) or v6_s < s_min:
+                v6_s = float(s_min)
+
+            # ── 第二遍: 各 rank 用同一 mu/s 计算 sigmoid 并注入 ──
+            for i, (prm_res, om) in prm_cache.items():
+                n_segments_total += len(prm_res.step_rewards)
+                for step_idx, R_raw in prm_res.raw_step_rewards.items():
+                    R_step_raw_abs_sum += abs(R_raw)
+                    if abs(R_raw) > R_step_raw_abs_max:
+                        R_step_raw_abs_max = abs(R_raw)
+                    if abs(R_raw) > 2.0:
+                        R_step_saturated += 1
+                    R_step_total += 1
+                # v6: a_proc = sigmoid((raw_R_step - mu) / s); 遍历 raw_step_rewards
+                # (normal step 集合, 跟 step_rewards 同 key; 违例/重复 step 不在其中).
+                for step_idx, R_raw in prm_res.raw_step_rewards.items():
+                    z = (float(R_raw) - v6_mu) / v6_s
+                    # 数值稳健 sigmoid, 避免 exp overflow
+                    if z >= 0:
+                        a_proc = 1.0 / (1.0 + float(np.exp(-z)))
+                    else:
+                        ez = float(np.exp(z))
+                        a_proc = ez / (1.0 + ez)
+                    if not np.isfinite(a_proc):
+                        a_proc = 0.0
+                    a_proc_sum += a_proc
+                    if a_proc < a_proc_min:
+                        a_proc_min = a_proc
+                    if a_proc > a_proc_max:
+                        a_proc_max = a_proc
+                    seg = prm_res.step_ranges.get(step_idx)
+                    if seg is None:
+                        continue
+                    tok_s, tok_e = self._char_to_token_range(seg[0], seg[1], om)
+                    if tok_s is None or tok_e is None:
+                        continue
+                    tok_e = min(tok_e, T)
+                    seg_len = max(tok_e - tok_s, 1)
+                    seg_token_count += seg_len
+                    inject_per_tok = proc_alpha * a_proc / seg_len
+                    advantages[i, tok_s:tok_e] += inject_per_tok
+                    prm_inject_tok_sum += inject_per_tok * seg_len
+                    if inject_per_tok > inject_per_tok_max:
+                        inject_per_tok_max = inject_per_tok
+
+        # 错误类型统计
+        from terminal_reward import route_stats
+        from utils.parse import parse_multi_route
+        miss_list, violate_list, dup_list = [], [], []
+        for i in range(B):
+            pt = problem_type_list[i]
+            inst = instances[i]
+            n_inst = inst["n"]
+            if pt == "cvrp":
+                routes = parse_multi_route(completions_text[i], n_inst)
+                if routes is None:
+                    continue
+                demands = inst.get("demands", [0.0] * (n_inst + 1))
+                cap = inst.get("capacity", 1.0)
+                stats = route_stats(routes, n_inst, demands, cap)
+                miss_list.append(stats["n_missing"])
+                violate_list.append(stats["n_violate_routes"])
+                dup_list.append(stats["n_duplicates"])
+
+        # Log (v6 metric, 跟 v3/v4/v5 解耦)
+        fully_feas_per_traj = [
+            float(c["parse"] == 1.0
+                  and c["coverage"] >= 1.0 - 1e-9
+                  and c["constraint"] == 1.0
+                  and c["format"] == 1.0)
+            for c in components
+        ]
+        coverage_arr = np.array([c["coverage"] for c in components])
+        a_proc_mean = a_proc_sum / max(n_segments_total, 1) if n_segments_total > 0 else 0.0
+        R_step_raw_abs_mean = (R_step_raw_abs_sum / R_step_total) if R_step_total > 0 else 0.0
+        R_step_saturation_rate = (R_step_saturated / R_step_total) if R_step_total > 0 else 0.0
+        a_feas_abs = float(a_feas_norm.abs().mean().item())
+        a_outcome_abs = float(a_outcome_norm.abs().mean().item())
+        feas_dominance = a_feas_abs / max(a_feas_abs + a_outcome_abs, 1e-8)
+        valid_dist = [d for d in distances_local if not (d != d)]
+        distance_mean_local = float(np.mean(valid_dist)) if valid_dist else 0.0
+
+        prm_inject_per_tok_mean = prm_inject_tok_sum / max(seg_token_count, 1)
+        aout_per_tok_abs = float(a_out.abs().mean().item())
+        inject_vs_aout = prm_inject_per_tok_mean / (aout_per_tok_abs + 1e-8)
+
+        log_dict = {
+            "reward_v6/parse_rate":         self._gather_mean(
+                np.mean([c["parse"] for c in components])),
+            "reward_v6/coverage_rate":      self._gather_mean(float(coverage_arr.mean())),
+            "reward_v6/fullcov_rate":       self._gather_mean(
+                float((coverage_arr >= 1.0 - 1e-9).mean())),
+            "reward_v6/fully_feas_rate":    self._gather_mean(np.mean(fully_feas_per_traj)),
+            "reward_v6/R_constraint_mean":  self._gather_mean(
+                np.mean([c["constraint"] for c in components])),
+            "reward_v6/R_format_mean":      self._gather_mean(
+                np.mean([c["format"] for c in components])),
+            "reward_v6/A_abs_mean":         self._gather_mean(advantages.abs().mean()),
+            "reward_v6/A_std":              self._gather_mean(advantages.std()),
+            "stats_v6/miss_per_traj":       self._gather_mean(
+                float(np.mean(miss_list)) if miss_list else 0.0),
+            "stats_v6/violate_per_traj":    self._gather_mean(
+                float(np.mean(violate_list)) if violate_list else 0.0),
+            "stats_v6/dup_per_traj":        self._gather_mean(
+                float(np.mean(dup_list)) if dup_list else 0.0),
+            "outcome_v6/distance_mean":     self._gather_mean(distance_mean_local),
+            "outcome_v6/distance_std_per_group": self._gather_mean(
+                float(np.mean(dist_std_per_group)) if dist_std_per_group else 0.0),
+            "outcome_v6/distance_cv":       self._gather_mean(
+                float(np.mean(dist_cv_per_group)) if dist_cv_per_group else 0.0),
+            "outcome_v6/feas_subset_size":  self._gather_mean(
+                float(np.mean(feas_subset_size_per_group)) if feas_subset_size_per_group else 0.0),
+            "outcome_v6/feas_subset_active_rate": self._gather_mean(
+                float(np.mean([1.0 if s >= 2 else 0.0 for s in feas_subset_size_per_group]))
+                if feas_subset_size_per_group else 0.0),
+            "a_out_v6/a_feas_abs_mean":     self._gather_mean(a_feas_abs),
+            "a_out_v6/a_outcome_abs_mean":  self._gather_mean(a_outcome_abs),
+            "a_out_v6/feas_dominance":      self._gather_mean(feas_dominance),
+            "prm_v6/n_segments_per_traj":   self._gather_mean(
+                float(n_segments_total) / max(B, 1)),
+            "prm_v6/seg_token_ratio":       self._gather_mean(
+                float(seg_token_count) / max(B * T, 1)),
+            # v6: a_proc = sigmoid(...) ∈ (0,1), mean/min/max 诊断分布
+            "prm_v6/a_proc_mean":           self._gather_mean(float(a_proc_mean)),
+            "prm_v6/a_proc_min":            self._gather_mean(
+                float(a_proc_min) if a_proc_min < float("inf") else 0.0),
+            "prm_v6/a_proc_max":            self._gather_mean(float(a_proc_max)),
+            "prm_v6/inject_per_tok_mean":   self._gather_mean(float(prm_inject_per_tok_mean)),
+            "prm_v6/inject_per_tok_max":    self._gather_mean(float(inject_per_tok_max)),
+            "prm_v6/aout_per_tok_abs":      self._gather_mean(float(aout_per_tok_abs)),
+            "prm_v6/inject_vs_aout":        self._gather_mean(float(inject_vs_aout)),
+            "prm_v6/R_step_raw_abs_mean":   self._gather_mean(R_step_raw_abs_mean),
+            "prm_v6/R_step_raw_abs_max":    self._gather_mean(R_step_raw_abs_max),
+            "prm_v6/R_step_saturation_rate": self._gather_mean(R_step_saturation_rate),
+            "prm_v6/skipped_non_feas_rate": self._gather_mean(
+                float(prm_skipped_non_feas) / max(B, 1)),
+            # v6 专属: 批级标准化诊断 (mu/s 已全 rank 一致, 直接 log, 不再 gather_mean)
+            "prm_v6/norm_mu":               float(v6_mu),
+            "prm_v6/norm_s":                float(v6_s),
+            "prm_v6/norm_bulk_size":        float(v6_bulk_size),
+            "prm_v6/norm_global_rstep_count": float(v6_global_rstep_count),
+            "train/use_mask":               1.0 if getattr(config, "use_mask", False) else 0.0,
+        }
+
+        # ── mask 生效指标 (mask 启用时报送, 跟 v5 完全相同逻辑) ─────────
+        if getattr(config, "use_mask", False):
+            mask_miss_full: list[float] = []
+            mask_dup_full: list[float] = []
+            for i in range(B):
+                pt = problem_type_list[i]
+                inst = instances[i]
+                n_inst = inst["n"]
+                if pt != "cvrp":
+                    mask_miss_full.append(0.0)
+                    mask_dup_full.append(0.0)
+                    continue
+                routes = parse_multi_route(completions_text[i], n_inst)
+                if routes is None:
+                    mask_miss_full.append(float(n_inst))
+                    mask_dup_full.append(0.0)
+                    continue
+                demands = inst.get("demands", [0.0] * (n_inst + 1))
+                cap = inst.get("capacity", 1.0)
+                stats = route_stats(routes, n_inst, demands, cap)
+                mask_miss_full.append(float(stats["n_missing"]))
+                mask_dup_full.append(float(stats["n_duplicates"]))
+
+            miss_arr = np.array(mask_miss_full)
+            dup_arr = np.array(mask_dup_full)
+            parse_arr = np.array([c["parse"] for c in components])
+
+            cov1_local      = float((coverage_arr >= 1.0 - 1e-9).mean())
+            zero_miss_local = float((miss_arr == 0).mean())
+            zero_dup_local  = float((dup_arr == 0).mean())
+            parse_local     = float(parse_arr.mean())
+            perfect_local   = float(
+                ((coverage_arr >= 1.0 - 1e-9) & (parse_arr == 1.0)).mean()
+            )
+            avg_miss_local  = float(miss_arr.mean())
+            avg_dup_local   = float(dup_arr.mean())
+
+            if mask_hits is not None and completion_mask is not None:
+                cm_bool = completion_mask.bool()
+                if cm_bool.any():
+                    mh_valid = mask_hits[cm_bool]
+                    mask_hit_rate_local = float(mh_valid.float().mean().item())
+                else:
+                    mask_hit_rate_local = 0.0
+                per_traj_hit = (mask_hits * completion_mask.float()).sum(dim=-1)
+                traj_with_hit = (per_traj_hit > 0).float()
+                traj_hit_rate_local = float(traj_with_hit.mean().item())
+            else:
+                mask_hit_rate_local = 0.0
+                traj_hit_rate_local = 0.0
+
+            cov1_g           = self._gather_mean(cov1_local)
+            zero_miss_g      = self._gather_mean(zero_miss_local)
+            zero_dup_g       = self._gather_mean(zero_dup_local)
+            parse_g          = self._gather_mean(parse_local)
+            perfect_g        = self._gather_mean(perfect_local)
+            avg_miss_g       = self._gather_mean(avg_miss_local)
+            avg_dup_g        = self._gather_mean(avg_dup_local)
+            mask_hit_rate_g  = self._gather_mean(mask_hit_rate_local)
+            traj_hit_rate_g  = self._gather_mean(traj_hit_rate_local)
+
+            log_dict.update({
+                "mask_health/mask_hit_rate_token": mask_hit_rate_g,
+                "mask_health/mask_hit_rate_traj":  traj_hit_rate_g,
+                "mask_health/zero_miss_rate":    zero_miss_g,
+                "mask_health/zero_dup_rate":     zero_dup_g,
+                "mask_health/parse_rate":        parse_g,
+                "mask_health/perfect_rate":      perfect_g,
+                "mask_health/avg_miss_per_traj": avg_miss_g,
+                "mask_health/avg_dup_per_traj":  avg_dup_g,
+            })
+
+            if (not getattr(self, "_mask_health_printed", False)
+                    and self.accelerator.is_main_process):
+                self._mask_health_printed = True
+                print(f"\n[MASK_HEALTH] ===== Mask 生效检查 (第 1 batch, cross-rank) =====")
+                print(f"  [维度 A: vLLM 端 mask 是否真触发]  (跟 cov 输出无关)")
+                print(f"    mask_hit_rate_token        = {mask_hit_rate_g:.4f}   (期望 > 0)")
+                print(f"    mask_hit_rate_traj         = {traj_hit_rate_g:.3f}   (期望 ≈ 1.0)")
+                print(f"  [维度 B: 模型输出是否被完全约束]")
+                print(f"    fullcov_rate (cov=1)         = {cov1_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    zero_miss_rate (全 B 对齐)   = {zero_miss_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    zero_dup_rate                = {zero_dup_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    parse_rate                   = {parse_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    perfect_rate (cov=1 ∧ parse) = {perfect_g:.3f}   (期望 ≈ 1.0)")
+                print(f"    avg miss/traj                = {avg_miss_g:.3f}   (期望 ≈ 0; parse 失败算 n)")
+                print(f"    avg dup/traj                 = {avg_dup_g:.3f}   (期望 ≈ 0)")
+                dim_a_ok = mask_hit_rate_g > 0.001
+                dim_b_ok = cov1_g >= 0.95
                 if dim_a_ok and dim_b_ok:
                     print(f"  ✓ Mask 完美生效 (维度 A: server 端在跑; 维度 B: 输出完全约束)")
                 elif dim_a_ok and not dim_b_ok:

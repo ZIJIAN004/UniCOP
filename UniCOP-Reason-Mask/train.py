@@ -376,10 +376,11 @@ def main():
                         help="奖励模式：prm=三信号解耦+POMO PRM | foarl=FOARL 无 PRM")
     parser.add_argument("--reward_scheme", type=str,
                         default=getattr(config, "reward_scheme", "v5"),
-                        choices=["v3", "v4", "v5"],
+                        choices=["v3", "v4", "v5", "v6"],
                         help="reward_mode=prm 时具体方案: "
                              "v3=hardgate+cascade | v4=simplified absolute PRM | "
-                             "v5=v4+hardgate distance+cov/cons加权 (默认 config 值)")
+                             "v5=v4+hardgate distance+cov/cons加权 (config 默认) | "
+                             "v6=v5+PRM批级截尾标准化sigmoid")
     parser.add_argument("--no_lora",      action="store_true")
     parser.add_argument("--num_gpus",     type=int, default=config.num_gpus,
                         help="使用的 GPU 数量，需与 accelerate launch --num_processes 一致")

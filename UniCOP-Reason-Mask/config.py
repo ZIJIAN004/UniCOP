@@ -152,7 +152,7 @@ class Config:
     #       前期 fully_feasible<2 时全 0, 完全靠 A_feas + PRM 机会成本推可行性.
     #     - PRM 同 v4: absolute base+tanh, 违例/重复 step 之后游离.
     #     - 配 LR 2e-5 + warmup_ratio 0.01 (5 step) 加快收敛.
-    reward_scheme: str             = "v5"   # "v3" | "v4" | "v5"
+    reward_scheme: str             = "v5"   # "v3" | "v4" | "v5" | "v6"
 
     # ── v4 专用参数 (v3 时被忽略) ─────────────────────────────────────
     # prm_base: PRM normal step 基础奖励. 必须 > |tanh(R_step)|_max = 1, 给 margin 取 1.5.
@@ -195,6 +195,21 @@ class Config:
     #   - 跟 outcome (只在 fully_feas subset z-score) 设计对称
     # False: 退回原 v5 行为 (所有 trajectory 都算 PRM)
     prm_only_fully_feas_v5: bool   = True
+
+    # ── v6 专用参数 (v3/v4/v5 时被忽略) ──────────────────────────────────
+    # v6 = v5 的 A_out (A_feas+A_outcome) 完全复用, 只把 PRM per-step a_proc 变换
+    #   从 v5 的 prm_base + tanh(R_step) 换成「批级截尾标准化 + sigmoid」:
+    #     1. gather 跨 rank 所有 fully-feasible trajectory 的所有 normal step 的原始 R_step
+    #     2. 截尾 (按 |R_step| 剔最大的 trim_frac_v6) → mu=mean(bulk), s=clamp(std(bulk),...)
+    #     3. a_proc = sigmoid((raw_R_step - mu) / s) ∈ (0,1), 违例/重复 step 仍游离 (a_proc=0)
+    #   注入沿用 v5 完全相同的 mean 模式 (proc_alpha_v4 * a_proc / seg_len).
+    #   PRM 是否只对 fully_feas 算 / prm_base / proc_alpha 共用 v5/v4 参数.
+    # trim_frac_v6: 批级截尾比例, 按 |R_step| 绝对值剔掉最大的 trim_frac (两侧极端都被剔).
+    trim_frac_v6: float            = 0.05
+    # s_min_v6: 标准差下界, clamp(s, s_min_v6, s_max_v6), 防除零 + 过度放大.
+    s_min_v6: float                = 1e-2
+    # s_max_v6: 标准差上界, 防极端波动.
+    s_max_v6: float                = 1e3
 
     # ── CVRP constrained-decoding mask (跟 reward_scheme 正交) ────────
     # use_mask=True 时:
