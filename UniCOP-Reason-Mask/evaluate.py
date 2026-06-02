@@ -641,7 +641,8 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
 # ── 推理后端：vLLM ─────────────────────────────────────────────────────────────
 
 def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
-                     gpu_mem_util: float = 0.9, max_model_len: int = 8192):
+                     gpu_mem_util: float = 0.9, max_model_len: int = 8192,
+                     enforce_eager: bool = False):
     """
     加载 vLLM 模型。
     如果 model_path 是 LoRA adapter 目录（含 adapter_config.json 但无 config.json），
@@ -699,7 +700,7 @@ def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
         dtype="bfloat16",
         gpu_memory_utilization=gpu_mem_util,
         max_model_len=max_model_len,
-        enforce_eager=True,
+        enforce_eager=enforce_eager,   # 默认 False: CUDA graph + async output 开 (对齐训练端, 快很多)
     )
     tokenizer = model.get_tokenizer()
     return model, tokenizer
@@ -1317,6 +1318,9 @@ def main():
                         help="vLLM tensor parallel 卡数（仅 vllm 模式有效）")
     parser.add_argument("--vllm_gpu_mem_util", type=float, default=0.9,
                         help="vLLM 显存预留比例（仅 vllm）。同 GPU 还要跑 POMO PRM(--wave) 时调低(如 0.8)。")
+    parser.add_argument("--enforce_eager", action="store_true",
+                        help="vLLM 强制 eager（关 CUDA graph）。默认 False=开 CUDA graph+async output(对齐训练端,快)。"
+                             "仅当 graph capture 报错时才加此 flag 回退。")
     parser.add_argument("--prompt_mode",  type=str,   default="think",
                         choices=["think", "structured"],
                         help="提示词模式：think=自由推理 | structured=结构化逐步输出")
@@ -1412,7 +1416,8 @@ def main():
         _vllm_max_len = max_completion_length + 1536
         model, tokenizer = _load_vllm_model(args.model_path, args.tp_size,
                                             gpu_mem_util=args.vllm_gpu_mem_util,
-                                            max_model_len=_vllm_max_len)
+                                            max_model_len=_vllm_max_len,
+                                            enforce_eager=args.enforce_eager)
 
         def generate_fn(prompts, num_samples, temperature, max_length, batch_size):
             return _generate_vllm(

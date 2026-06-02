@@ -4,12 +4,13 @@
 #   - BO8/wave 一次生成 8 条样本, --bestofn 出朴素 best-of-k 曲线, --wave 出波次剪枝
 # 串行(全部模型一张卡):
 #   nohup bash run_eval_matrix.sh > eval_matrix.out 2>&1 &
-# 三卡并行(每模型一张卡):
-#   ONLY=RL   GPU=0 nohup bash run_eval_matrix.sh > eval_RL.out   2>&1 &
-#   ONLY=SFT  GPU=1 nohup bash run_eval_matrix.sh > eval_SFT.out  2>&1 &
-#   ONLY=BASE GPU=2 nohup bash run_eval_matrix.sh > eval_BASE.out 2>&1 &
-# 可调环境变量: NUM_TEST(默认1000) TEMP(0.6) GPU(0) ONLY(空=全部|RL|SFT|BASE)
+# 推荐: 每模型 2 卡 tp(KV翻倍, 减抢占, 提速):
+#   ONLY=RL   GPU=0,1 TP=2 nohup bash run_eval_matrix.sh > eval_RL.out   2>&1 &
+#   ONLY=SFT  GPU=2,3 TP=2 nohup bash run_eval_matrix.sh > eval_SFT.out  2>&1 &
+#   ONLY=BASE GPU=4,5 TP=2 nohup bash run_eval_matrix.sh > eval_BASE.out 2>&1 &
+# 可调环境变量: NUM_TEST(默认1000) TEMP(0.6) GPU(0) TP(1) ONLY(空=全部|RL|SFT|BASE)
 #   每模型长度: MAXLEN_RL/MAXLEN_SFT(默认6144) MAXLEN_BASE(默认10112)
+#   注: evaluate.py 默认已关 enforce_eager(CUDA graph 开). graph capture 若报错, 给 run() 的 evaluate 加 --enforce_eager 回退.
 set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # = MASK_DIR
 source "$(dirname "$SCRIPT_DIR")/paths.sh"                   # 注入 UNICOP_ROOT/MASK_DIR/DISTILL_DIR/POMO_*
@@ -25,7 +26,8 @@ TEMP=${TEMP:-0.6}             # Qwen3-thinking 推荐采样温度 (BO8)
 # 每模型 max_completion_length: base 没学过格式 think 更长 → 10112(=79*128); RL/SFT 短链 6144 足够
 # (evaluate.py 现按此值 +1536 动态设 vllm max_model_len, 不再卡 8192)
 MAXLEN_RL=${MAXLEN_RL:-6144}; MAXLEN_SFT=${MAXLEN_SFT:-6144}; MAXLEN_BASE=${MAXLEN_BASE:-10112}
-GPU=${GPU:-0}
+GPU=${GPU:-0}                # 单卡填 "0"; tp=2 填 "0,1"
+TP=${TP:-1}                  # tensor parallel 卡数; 2 卡 KV 翻倍减抢占
 ONLY=${ONLY:-}               # 空=跑全部三个模型; 或 RL / SFT / BASE (三卡并行用)
 SAVE_DIR="$SCRIPT_DIR/eval_results_matrix"; LOG_DIR="$SCRIPT_DIR/eval_logs_matrix"
 mkdir -p "$SAVE_DIR" "$LOG_DIR"
@@ -43,7 +45,7 @@ run() {  # run <tag> <model> <maxlen> <extra args...>
   local tag="$1"; local model="$2"; local ml="$3"; shift 3
   echo "[$(date '+%F %T')] >>> $tag (maxlen=$ml)"
   CUDA_VISIBLE_DEVICES=$GPU python evaluate.py \
-    --backend vllm --model_path "$model" --tp_size 1 \
+    --backend vllm --model_path "$model" --tp_size "$TP" \
     --problem cvrp --problem_size 20 \
     --num_test "$NUM_TEST" --prompt_mode think --model_type reasoning \
     --max_completion_length "$ml" --save_dir "$SAVE_DIR" \
