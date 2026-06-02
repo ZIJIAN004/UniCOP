@@ -21,7 +21,7 @@ cd "$SCRIPT_DIR"
 # "Cannot re-initialize CUDA in forked subprocess". 对 tp=1 无副作用.
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
-RL_MODEL="$MASK_DIR/output_v5/cvrp_n20/merged_model"
+RL_MODEL="${RL_MODEL:-$MASK_DIR/output_v5/cvrp_n20/merged_model}"   # 可 env 覆盖 (如 v6: output_v6/cvrp_n20/merged_model)
 SFT_MODEL="$DISTILL_DIR/output_sft_qwen3_template_cvrp20/final_model"
 BASE_MODEL="$UNICOP_ROOT/model/Qwen3-4B-Thinking-2507"
 # POMO_BASELINE_DIR / POMO_CKPT_DIR 由 paths.sh 按主机注入
