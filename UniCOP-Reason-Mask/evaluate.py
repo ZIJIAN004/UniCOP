@@ -706,6 +706,39 @@ def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
     return model, tokenizer
 
 
+# ── no-repeat-ngram logits processor (vLLM v0) ────────────────────────────────
+# vLLM 0.7.3 无原生 no_repeat_ngram_size (官方 #7842 标 not planned), 但 v0 引擎支持
+# 自定义 logits_processors。大 n (如 20-40) 只禁"逐字重复的长 n-gram"——灭 thinking 退化
+# 长循环, 而合法的短结构重复("Route""Node"/数字)不形成长 n-gram, 不受影响。
+# 仅作用于已生成 output token (vLLM v0 2-arg 回调: (past_token_ids, logits))。
+_NO_REPEAT_NGRAM_SIZE = 0   # 0=关; 由 main() 从 --no_repeat_ngram_size 设置
+
+
+class NoRepeatNGramLogitsProcessor:
+    """禁止生成会复现"序列中已出现过的 n-gram"的 token (等价 HF no_repeat_ngram_size)。"""
+
+    def __init__(self, ngram_size: int):
+        if ngram_size < 2:
+            raise ValueError("ngram_size 必须 >= 2")
+        self.n = ngram_size
+
+    def __call__(self, past_token_ids, logits):
+        import numpy as np
+        n = self.n
+        L = len(past_token_ids)
+        if L < n:
+            return logits
+        arr = np.asarray(past_token_ids)
+        prefix = arr[L - (n - 1):]                                  # 末尾 n-1 gram
+        win = np.lib.stride_tricks.sliding_window_view(arr, n - 1)[: L - n + 1]
+        match = np.all(win == prefix, axis=1)                        # 过去出现过同样 n-1 gram 的位置
+        if match.any():
+            banned = np.unique(arr[np.nonzero(match)[0] + (n - 1)])  # 其后继 token = 会复现 n-gram 的禁选
+            import torch
+            logits[torch.as_tensor(banned, device=logits.device, dtype=torch.long)] = float("-inf")
+        return logits
+
+
 def _generate_vllm(model, tokenizer, prompts: list[list[dict]],
                    num_samples: int, temperature: float,
                    max_completion_length: int, batch_size: int) -> list[list]:
@@ -724,11 +757,15 @@ def _generate_vllm(model, tokenizer, prompts: list[list[dict]],
 
     # skip_special_tokens=False: 关键! 与 _generate_local 对齐, 保留 <think>/</think>
     # (Qwen3-Thinking 注册为 special token), 否则 </think> 被剥导致下游 rfind 解析错乱。
+    _lps = None
+    if _NO_REPEAT_NGRAM_SIZE and _NO_REPEAT_NGRAM_SIZE >= 2:
+        _lps = [NoRepeatNGramLogitsProcessor(_NO_REPEAT_NGRAM_SIZE)]
     sampling_params = SamplingParams(
         max_tokens=max_completion_length,
         temperature=temperature if num_samples > 1 else 0,
         n=num_samples,
         skip_special_tokens=False,
+        logits_processors=_lps,
     )
 
     outputs = model.generate(chat_texts, sampling_params)
@@ -1307,6 +1344,9 @@ def main():
                         help="每个实例的采样次数，>1 时启用随机采样")
     parser.add_argument("--temperature",  type=float, default=1.0,
                         help="采样温度，仅 num_samples>1 时生效")
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=0,
+                        help="vLLM 后端: 禁止复现长度为 n 的逐字重复 n-gram (灭 thinking 退化长循环)。"
+                             "0=关; 建议 20-40 (大 n 只杀长循环, 不碰短结构重复)。仅 --backend vllm 生效")
     parser.add_argument("--model_type",   type=str,   default="reasoning",
                         choices=["reasoning", "instruct"],
                         help="reasoning=推理模型(10000 tokens)，instruct=指令模型(512 tokens)")
@@ -1411,6 +1451,10 @@ def main():
         ngram_tag = f" | no_repeat_ngram={no_repeat_ngram}" if no_repeat_ngram else ""
         backend_info = f"local | {args.model_path} | rep_penalty={rep_penalty}{ngram_tag}"
     elif args.backend == "vllm":
+        global _NO_REPEAT_NGRAM_SIZE
+        _NO_REPEAT_NGRAM_SIZE = args.no_repeat_ngram_size
+        if _NO_REPEAT_NGRAM_SIZE:
+            print(f"[no-repeat-ngram] 启用 logits processor, n={_NO_REPEAT_NGRAM_SIZE} (禁逐字长循环)")
         # max_model_len 按本次 max_completion_length 动态算 (留 prompt buffer),
         # 取代原写死的 8192——否则长 think (如 base 模型 10112) 会超限报错.
         _vllm_max_len = max_completion_length + 1536
