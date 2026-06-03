@@ -6,7 +6,7 @@
 #     - reward_scheme = v6        (由 run_grpo_cvrp20_v6.sh 设)
 #     - use_mask      = False     (纯净, 不传 --use_mask, 跟纯净 v5 同口径)
 #     - 基座          = qwen3_thinking  (Qwen3-4B SFT 产物)
-#     - LR            = 1e-6      (温和; train.py 经 env 覆盖)
+#     - LR            = 2e-5      (对齐 v5; 1e-6 训练不足; train.py 经 env 覆盖)
 #     - epochs        = 1         (单 epoch)
 #     - 其余 Mask 超参不动: kl_coef=0.0 / clip 0.20-0.28 / num_generations=8 / num_train=1000
 #     - 输出隔离 output_v6, vLLM 端口沿用 v5 默认 8004 (独占节点, 不会与 v5 撞)
@@ -33,10 +33,12 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 
 # ── 本实验覆盖项 ───────────────────────────────────────────────
 export BASE_MODEL_TYPE=qwen3_thinking   # Qwen3-4B SFT 产物作为 RL 起点
-export LR=1e-6                           # 温和学习率 (train.py env 覆盖)
+export LR=2e-5                           # 对齐 v5 (1e-6 训练不足; train.py env 覆盖)
 export EPOCHS=1                          # 单 epoch
 export SAVE_STEPS=20                     # 每 20 step 存档 (~41 步的短跑, 存 step20/40 + final)
-# REWARD_SCHEME=v6 / OUTPUT_DIR_BASE=output_v6 / VLLM_PORT=8006 由 run_grpo_cvrp20_v6.sh 设
+# 输出目录带超参标注 → 不同 lr/epoch 互不覆盖, 也避免误 resume 旧超参的 checkpoint
+export OUTPUT_DIR_BASE="output_v6_lr${LR}_ep${EPOCHS}"   # 如 output_v6_lr2e-5_ep1
+# REWARD_SCHEME=v6 由 run_grpo_cvrp20_v6.sh 设
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"

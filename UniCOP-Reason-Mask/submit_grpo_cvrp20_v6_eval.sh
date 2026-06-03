@@ -3,7 +3,7 @@
 # ── 一个 job 串行: 训练 v6  →  merge LoRA  →  eval(BO1 + BO8 + wave) ──
 #   阶段:
 #     [1/3] 训练  : bash run_grpo_cvrp20_v6.sh (1 vLLM + 6 训练, 占满 7 卡)
-#                   纯净 v6 (PRM 批级截尾标准化+sigmoid) + 温和超参 (LR=1e-6 EPOCHS=1)
+#                   纯净 v6 (PRM 批级截尾标准化+sigmoid), LR=2e-5(对齐v5) EPOCHS=1
 #     [2/3] merge : output_v6/cvrp_n20/final_model (LoRA adapter) → 同级 merged_model
 #                   (镜像 evaluate.py:675-688 的合并逻辑, 提前显式做, 失败早暴露 + 校验权重非空)
 #     [3/3] eval  : 只评 v6 RL 模型 (ONLY=RL), 跑 run_eval_matrix.sh 的 BO1 + BO8/wave
@@ -43,10 +43,12 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 
 # ── 训练阶段覆盖项 (与 submit_grpo_cvrp20_v6.sh 完全一致) ──────────────
 export BASE_MODEL_TYPE=qwen3_thinking   # Qwen3-4B SFT 产物作为 RL 起点
-export LR=1e-6                           # 温和学习率
+export LR=2e-5                           # 对齐 v5 (上次 1e-6 致训练不足: grad_norm~0.03 下更新微乎其微, fully_feas 全程~0.3 不动)
 export EPOCHS=1                          # 单 epoch
 export SAVE_STEPS=20                     # 每 20 step 存档 (供 checkpoint 续跑)
-# REWARD_SCHEME=v6 / OUTPUT_DIR_BASE=output_v6 由 run_grpo_cvrp20_v6.sh 设
+# 输出目录带超参标注 → 不同 lr/epoch 互不覆盖; 也避免误 resume 上次(1e-6)的 checkpoint
+export OUTPUT_DIR_BASE="output_v6_lr${LR}_ep${EPOCHS}"   # 如 output_v6_lr2e-5_ep1
+# REWARD_SCHEME=v6 由 run_grpo_cvrp20_v6.sh 设
 
 # ── eval 阶段参数 (可在 sbatch 前 export 覆盖) ─────────────────────────
 EVAL_NUM_TEST="${EVAL_NUM_TEST:-1000}"   # 1000 = 与 optimal 对齐的冻结集; 勿改小否则不对齐
@@ -73,7 +75,7 @@ notify() {
         --data-urlencode "desp=${2:0:500}" > /dev/null 2>&1 || true
 }
 
-OUT_DIR="output_v6/cvrp_n20"             # = $OUTPUT_DIR_BASE/{run_tag}_n{size} (train.py:436)
+OUT_DIR="${OUTPUT_DIR_BASE}/cvrp_n20"    # = $OUTPUT_DIR_BASE/{run_tag}_n{size} (train.py:436)
 ADAPTER="$OUT_DIR/final_model"           # GRPO LoRA adapter
 MERGED="$OUT_DIR/merged_model"           # 合并后的全量权重 (eval 吃这个)
 
