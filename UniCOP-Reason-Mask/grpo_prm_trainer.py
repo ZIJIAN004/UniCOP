@@ -1049,8 +1049,10 @@ class GRPOPRMTrainer(GRPOTrainer):
         a_feas_abs = float(a_feas_norm.abs().mean().item())
         a_outcome_abs = float(a_outcome_norm.abs().mean().item())
         feas_dominance = a_feas_abs / max(a_feas_abs + a_outcome_abs, 1e-8)
-        # 有效 distance (非 nan) 跨 trajectory 平均
-        valid_dist = [d for d in distances_local if not (d != d)]  # filter nan
+        # distance_mean 只在 fully_feasible 子集上算 (与 reward A_outcome 口径一致, 可比 HGS optimal);
+        # 原先只剔 NaN 会把未全覆盖的短解算进来, 均值结构性低于 optimal, 失去诊断意义。
+        valid_dist = [d for d, ff in zip(distances_local, fully_feas_per_traj)
+                      if ff == 1.0 and not (d != d)]
         distance_mean_local = float(np.mean(valid_dist)) if valid_dist else 0.0
 
         log_dict = {
@@ -1384,7 +1386,11 @@ class GRPOPRMTrainer(GRPOTrainer):
         a_feas_abs = float(a_feas_norm.abs().mean().item())
         a_outcome_abs = float(a_outcome_norm.abs().mean().item())
         feas_dominance = a_feas_abs / max(a_feas_abs + a_outcome_abs, 1e-8)
-        valid_dist = [d for d in distances_local if not (d != d)]
+        # distance_mean 只在 fully_feasible 子集上算 (parse+全访+全合规+format), 与 reward 的
+        # A_outcome 子集口径一致, 也能直接跟 HGS optimal 比。原先只剔 NaN → 把未全覆盖的短解
+        # (raw 距离可低到 ~1.0) 也算进来, 使均值结构性低于 optimal, 失去诊断意义。
+        valid_dist = [d for d, ff in zip(distances_local, fully_feas_per_traj)
+                      if ff == 1.0 and not (d != d)]
         distance_mean_local = float(np.mean(valid_dist)) if valid_dist else 0.0
 
         # 真正注入 advantage 的 per-token PRM 量级 + 与 A_out 的相对大小 (量级诊断)
@@ -1789,7 +1795,11 @@ class GRPOPRMTrainer(GRPOTrainer):
         a_feas_abs = float(a_feas_norm.abs().mean().item())
         a_outcome_abs = float(a_outcome_norm.abs().mean().item())
         feas_dominance = a_feas_abs / max(a_feas_abs + a_outcome_abs, 1e-8)
-        valid_dist = [d for d in distances_local if not (d != d)]
+        # distance_mean 只在 fully_feasible 子集上算 (parse+全访+全合规+format), 与 reward 的
+        # A_outcome 子集口径一致, 也能直接跟 HGS optimal 比。原先只剔 NaN → 把未全覆盖的短解
+        # (raw 距离可低到 ~1.0) 也算进来, 使均值结构性低于 optimal, 失去诊断意义。
+        valid_dist = [d for d, ff in zip(distances_local, fully_feas_per_traj)
+                      if ff == 1.0 and not (d != d)]
         distance_mean_local = float(np.mean(valid_dist)) if valid_dist else 0.0
 
         prm_inject_per_tok_mean = prm_inject_tok_sum / max(seg_token_count, 1)
