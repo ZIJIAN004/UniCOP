@@ -301,17 +301,20 @@ echo "  GPU 拓扑"
 echo "============================================================"
 nvidia-smi topo -m 2>&1 || echo "(nvidia-smi topo unavailable)"
 echo ""
+_SCHEME="${REWARD_SCHEME:-v5}"   # 实际生效的 reward_scheme (v6 wrapper 经 env 设 v6); 不再硬编码 v5
 echo "============================================================"
-echo "  GRPO + POMO PRM · CVRP n=$SIZE · 1 vLLM + $TRAIN_PROC 训练 · reward_scheme=v5"
+echo "  GRPO + POMO PRM · CVRP n=$SIZE · 1 vLLM + $TRAIN_PROC 训练 · reward_scheme=${_SCHEME}"
 echo "  BASE_MODEL_TYPE: $BASE_MODEL_TYPE  (T=$GEN_TEMPERATURE top_p=$GEN_TOP_P top_k=$GEN_TOP_K)"
 echo "  RL 起点:   $MODEL_BASE (SFT 产物, 非原始基座)"
 echo "  GPU:       1 vLLM (GPU $VLLM_GPU) + $TRAIN_PROC 训练 (GPU $TRAIN_GPUS_CSV)"
 echo "  ZeRO:      stage $ZERO_STAGE | gradient_checkpointing on"
-echo "  Reward:    v5 (v4 + hardgate distance + cov/cons 加权)"
-echo "             A_feas = w_p×parse + w_cov×cov + w_cons×cons(gate) + w_f×format"
-echo "                      权重 0.5/2.5/2.0/0.5, cov_gate=1.0 hardgate"
-echo "             A_outcome = z(-raw_distance) on strict fully_feasible 子集 >=2"
-echo "             PRM = absolute base 1.5 + tanh(R_step) (跟 v4 共用)"
+echo "  Reward:    ${_SCHEME}  (A_out=A_feas+A_outcome; v6 复用 v5 的 A_out, 只改 PRM per-step 变换)"
+echo "             A_feas/A_outcome 实际权重以 train.py 的 'Reward scheme:' 打印 + config 为准 (此 banner 不再硬编码)"
+if [ "$_SCHEME" = "v6" ]; then
+echo "             PRM(v6) = 批级截尾标准化 + sigmoid((R-mu)/s) ∈(0,1), proc_alpha_v6=${PROC_ALPHA_V6:-200}"
+else
+echo "             PRM(${_SCHEME}) = absolute base 1.5 + tanh(R_step)"
+fi
 echo "  LR:        2e-5 (v4 加倍, 配 warmup 5 step 快收敛)"
 echo "  Warmup:    0.01 × 500 step = 5 step"
 echo "  输出目录:  $OUTPUT_DIR_BASE"
@@ -331,8 +334,8 @@ if ! check_gpu_idle; then
     exit 1
 fi
 
-notify "🚀 CVRP20 GRPO v5 启动" \
-"reward: v5 (hardgate distance + cov/cons 加权)
+notify "🚀 CVRP20 GRPO ${_SCHEME} 启动" \
+"reward_scheme: ${_SCHEME}
 LR 2e-5, warmup 5 step
 基座: $MODEL_BASE
 GPU: 1 vLLM + $TRAIN_PROC 训练

@@ -14,7 +14,7 @@
 #
 #   为什么 train-only (不接 eval): 先看 Tier-0 训练曲线 (reward / fully_feas_rate /
 #   grad_norm) 选方向 —— 平的直接 scancel, 别浪费 merge+eval。幸存的 pa 再单独跑:
-#       RL_MODEL=$(pwd)/output_v6_lr2e-5_ep1_pa400/cvrp_n20/merged_model \
+#       RL_MODEL=$(pwd)/output_v6_lr2e-5_ep1_pa400_nt500/cvrp_n20/merged_model \
 #       ONLY=RL NUM_TEST=200 DO_BO1=1 DO_BO8WAVE=0 GPU=0,1,2,3 TP=4 bash run_eval_matrix.sh
 #   (注: train-only 不自动 merge; eval 那步用的 run_eval_matrix 吃的是 merged_model,
 #    所以幸存者要先 merge —— 或直接改投 submit_grpo_cvrp20_v6_eval.sh 带 --export=ALL,PROC_ALPHA_V6=<pa>
@@ -22,25 +22,26 @@
 #
 #   用法 (集群登录节点, git pull 之后):
 #       bash sweep_proc_alpha_v6.sh
-#   可覆盖: LR=2e-5 EPOCHS=1 MAX_CONCURRENT=2 PA_LIST="100 200 400 600" bash sweep_proc_alpha_v6.sh
+#   可覆盖: LR=2e-5 EPOCHS=1 NUM_TRAIN=500 MAX_CONCURRENT=2 PA_LIST="100 200 400 600" bash sweep_proc_alpha_v6.sh
 
 set -euo pipefail
 cd "$(cd "$(dirname "$0")" && pwd)"
 
 LR="${LR:-2e-5}"
 EPOCHS="${EPOCHS:-1}"
+NUM_TRAIN="${NUM_TRAIN:-500}"           # 扫参提速: 每 epoch 只用 500 训练样本 (默认全量是 1000)
 PA_LIST="${PA_LIST:-100 200 400 600}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-2}"   # 强制最多同时跑这么多 job (afterany 依赖链节流)
 
 echo "############## sweep proc_alpha_v6 ##############"
-echo "  LR=$LR  EPOCHS=$EPOCHS  PA_LIST=[$PA_LIST]  MAX_CONCURRENT=$MAX_CONCURRENT  (train-only)"
+echo "  LR=$LR  EPOCHS=$EPOCHS  NUM_TRAIN=$NUM_TRAIN  PA_LIST=[$PA_LIST]  MAX_CONCURRENT=$MAX_CONCURRENT  (train-only)"
 echo "  依赖链节流: 第 i 个 job 等第 i-$MAX_CONCURRENT 个跑完才开始, 始终最多并 $MAX_CONCURRENT 个。"
 echo
 
 jobids=()
 i=0
 for PA in $PA_LIST; do
-    OUT="output_v6_lr${LR}_ep${EPOCHS}_pa${PA}"
+    OUT="output_v6_lr${LR}_ep${EPOCHS}_pa${PA}_nt${NUM_TRAIN}"
     dep=""
     if [ "$i" -ge "$MAX_CONCURRENT" ]; then
         prev="${jobids[$((i - MAX_CONCURRENT))]}"
@@ -51,7 +52,7 @@ for PA in $PA_LIST; do
     fi
     out=$(sbatch $dep \
            --job-name="zijia_v6_pa${PA}" \
-           --export="ALL,PROC_ALPHA_V6=${PA},LR=${LR},EPOCHS=${EPOCHS}" \
+           --export="ALL,PROC_ALPHA_V6=${PA},LR=${LR},EPOCHS=${EPOCHS},NUM_TRAIN=${NUM_TRAIN}" \
            submit_grpo_cvrp20_v6.sh)
     echo "    $out"
     jid=$(echo "$out" | awk '{print $NF}')   # "Submitted batch job 8675" → 8675
