@@ -14,22 +14,23 @@
 #
 #   为什么 train-only (不接 eval): 先看 Tier-0 训练曲线 (reward / fully_feas_rate /
 #   grad_norm) 选方向 —— 平的直接 scancel, 别浪费 merge+eval。幸存的 pa 再单独跑:
-#       RL_MODEL=$(pwd)/output_v6_lr2e-5_ep1_pa400_nt500/cvrp_n20/merged_model \
-#       ONLY=RL NUM_TEST=200 DO_BO1=1 DO_BO8WAVE=0 GPU=0,1,2,3 TP=4 bash run_eval_matrix.sh
+#       RL_MODEL=$(pwd)/output_v6_lr2e-5_ep1_pa400_nt1000/cvrp_n20/merged_model \
+#       ONLY=RL NUM_TEST=100 DO_BO1=1 DO_BO8WAVE=0 GPU=0,1,2,3 TP=4 bash run_eval_matrix.sh
+#       (调参默认 eval=100 快排; 正式/论文数字才用全 1000 冻结集)
 #   (注: train-only 不自动 merge; eval 那步用的 run_eval_matrix 吃的是 merged_model,
 #    所以幸存者要先 merge —— 或直接改投 submit_grpo_cvrp20_v6_eval.sh 带 --export=ALL,PROC_ALPHA_V6=<pa>
 #    一条龙 train→merge→eval。)
 #
 #   用法 (集群登录节点, git pull 之后):
 #       bash sweep_proc_alpha_v6.sh
-#   可覆盖: LR=2e-5 EPOCHS=1 NUM_TRAIN=500 MAX_CONCURRENT=2 PA_LIST="100 200 400 600" bash sweep_proc_alpha_v6.sh
+#   可覆盖: LR=2e-5 EPOCHS=1 NUM_TRAIN=1000 MAX_CONCURRENT=2 PA_LIST="100 200 400 600" bash sweep_proc_alpha_v6.sh
 
 set -euo pipefail
 cd "$(cd "$(dirname "$0")" && pwd)"
 
 LR="${LR:-2e-5}"
 EPOCHS="${EPOCHS:-1}"
-NUM_TRAIN="${NUM_TRAIN:-500}"           # 扫参提速: 每 epoch 只用 500 训练样本 (默认全量是 1000)
+NUM_TRAIN="${NUM_TRAIN:-1000}"          # 训练用全量 1000 (用户默认: 训练给足信号; 提速靠 eval=100 + 并发节流, 不砍训练)
 PA_LIST="${PA_LIST:-100 200 400 600}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-2}"   # 强制最多同时跑这么多 job (afterany 依赖链节流)
 
