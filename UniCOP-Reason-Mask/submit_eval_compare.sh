@@ -13,7 +13,6 @@
 #SBATCH --gpus=8
 #SBATCH --job-name=zijia_eval_cmp
 #SBATCH --comment="zijianliu, instruct vs thinking capability eval, do not cancel"
-#SBATCH --exclude=canele1
 #SBATCH --no-requeue
 #SBATCH --open-mode=append
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/eval_cmp_%j.log
@@ -54,9 +53,9 @@ for m in "$INSTRUCT_MODEL" "$THINKING_MODEL"; do
 done
 
 # ── GPU 占用预检 (8 卡全检): 分到的卡被占 → exclude 本节点重投本 job ──
-#    #SBATCH --exclude=canele1 是基线, 重投 CLI --exclude 会覆盖它, 故传 BASE_EXCLUDE。
+#    无默认 exclude (用户决定: 不预排任何节点), 完全靠预检动态排除被占的坏节点。
 export SUBMIT_SCRIPT="$(pwd)/submit_eval_compare.sh"
-export BASE_EXCLUDE="canele1"
+export BASE_EXCLUDE=""
 source "$(pwd)/preflight_gpu.sh"
 preflight_gpu_or_resubmit
 
