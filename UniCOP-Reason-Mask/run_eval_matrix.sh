@@ -51,13 +51,20 @@ fi
 
 run() {  # run <tag> <model> <maxlen> <extra args...>
   local tag="$1"; local model="$2"; local ml="$3"; shift 3
+  # ── 幂等续跑: 该 tag 的确定性结果 JSON 已存在且有效 → 跳过 (重投本 submit 不重跑已成功阶段) ──
+  local out_json="$SAVE_DIR/${tag}.json"
+  if [ -f "$out_json" ] && python -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('results') and d['results'][0].get('n_eval',0)>0 else 1)" "$out_json" 2>/dev/null; then
+    echo "[$(date '+%F %T')] ⏭️  $tag 已完成, 跳过 ($out_json)"
+    return 0
+  fi
   echo "[$(date '+%F %T')] >>> $tag (maxlen=$ml)"
+  # --run_tag 确定性命名: 文件 = $SAVE_DIR/${tag}.json (重跑覆盖未完成的, 完成的被上面跳过保护)
   CUDA_VISIBLE_DEVICES=$GPU python evaluate.py \
     --backend vllm --model_path "$model" --tp_size "$TP" \
     --vllm_gpu_mem_util "$GPU_MEM" \
     --problem cvrp --problem_size 20 \
     --num_test "$NUM_TEST" --prompt_mode think --model_type reasoning \
-    --max_completion_length "$ml" --save_dir "$SAVE_DIR" \
+    --max_completion_length "$ml" --save_dir "$SAVE_DIR" --run_tag "$tag" \
     "$@" > "$LOG_DIR/${tag}.log" 2>&1
   echo "[$(date '+%F %T')] <<< $tag  (exit $?)  log: $LOG_DIR/${tag}.log"
 }

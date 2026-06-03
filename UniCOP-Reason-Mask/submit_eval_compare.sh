@@ -53,6 +53,13 @@ for m in "$INSTRUCT_MODEL" "$THINKING_MODEL"; do
     [ -d "$m" ] || { echo "❌ 模型不存在: $m"; exit 1; }
 done
 
+# ── GPU 占用预检 (8 卡全检): 分到的卡被占 → exclude 本节点重投本 job ──
+#    #SBATCH --exclude=canele1 是基线, 重投 CLI --exclude 会覆盖它, 故传 BASE_EXCLUDE。
+export SUBMIT_SCRIPT="$(pwd)/submit_eval_compare.sh"
+export BASE_EXCLUDE="canele1"
+source "$(pwd)/preflight_gpu.sh"
+preflight_gpu_or_resubmit
+
 # run_sharded <tag> <model> <gpus_csv> <model_type> <prompt_mode> <maxlen> <think_budget> <stage_args...>
 run_sharded() {
     local tag=$1 model=$2 gpus=$3 mtype=$4 pmode=$5 maxlen=$6 tbudget=$7; shift 7
@@ -65,9 +72,16 @@ run_sharded() {
     local pids=()
     local s
     for s in "${!G[@]}"; do
+        # ── shard 级断点续跑: 该 shard 的确定性 JSON 已存在且有效 → 跳过, 不重跑 ──
+        local out_json="$sd/${tag}_shard${s}of${nsh}.json"
+        if [ -f "$out_json" ] && python -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('results') and d['results'][0].get('n_eval',0)>0 else 1)" "$out_json" 2>/dev/null; then
+            echo "[$(date '+%T')] ⏭️  $tag shard$s 已完成, 跳过 ($out_json)"
+            continue
+        fi
+        # --run_tag 确定性命名: 重跑覆盖同名, merge 不会把同 shard 多次时间戳文件重复计数
         CUDA_VISIBLE_DEVICES="${G[$s]}" python evaluate.py \
             --backend vllm --model_path "$model" --tp_size 1 \
-            --num_shards "$nsh" --shard_id "$s" \
+            --num_shards "$nsh" --shard_id "$s" --run_tag "$tag" \
             --problem cvrp --problem_size 20 --num_test "$NUM_TEST" \
             --prompt_mode "$pmode" --model_type "$mtype" \
             --max_completion_length "$maxlen" --vllm_gpu_mem_util 0.8 \
@@ -76,9 +90,13 @@ run_sharded() {
         pids+=($!)
     done
     local ok=0
-    for p in "${pids[@]}"; do wait "$p" || ok=1; done
+    if [ "${#pids[@]}" -gt 0 ]; then
+        for p in "${pids[@]}"; do wait "$p" || ok=1; done
+    else
+        echo "[$(date '+%T')] $tag: 所有 shard 已完成 (全部跳过), 直接合并。"
+    fi
     if [ "$ok" -ne 0 ]; then echo "[$(date '+%T')] ⚠️ $tag 有 shard 非零退出, 详见 $LOG_DIR/${tag}_shard*.log"; fi
-    python merge_shards.py --glob "$sd/*_shard*of${nsh}.json" --out "$sd/MERGED.json" \
+    python merge_shards.py --glob "$sd/${tag}_shard*of${nsh}.json" --out "$sd/MERGED.json" \
         > "$LOG_DIR/${tag}_merge.log" 2>&1 \
         && echo "[$(date '+%T')] <<< $tag 合并完成 → $sd/MERGED.json" \
         || echo "[$(date '+%T')] ⚠️ $tag 合并失败, 详见 $LOG_DIR/${tag}_merge.log"

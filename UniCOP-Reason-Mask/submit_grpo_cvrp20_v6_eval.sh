@@ -76,6 +76,13 @@ notify() {
         --data-urlencode "desp=${2:0:500}" > /dev/null 2>&1 || true
 }
 
+# ── GPU 占用预检: 分到的卡被占 → exclude 本节点重投 (重投后从 checkpoint 续训) ──
+#    #SBATCH --exclude=canele1 是基线, 重投 CLI --exclude 会覆盖它, 故传 BASE_EXCLUDE。
+export SUBMIT_SCRIPT="$(pwd)/submit_grpo_cvrp20_v6_eval.sh"
+export BASE_EXCLUDE="canele1"
+source "$(pwd)/preflight_gpu.sh"
+preflight_gpu_or_resubmit
+
 OUT_DIR="${OUTPUT_DIR_BASE}/cvrp_n20"    # = $OUTPUT_DIR_BASE/{run_tag}_n{size} (train.py:436)
 ADAPTER="$OUT_DIR/final_model"           # GRPO LoRA adapter
 MERGED="$OUT_DIR/merged_model"           # 合并后的全量权重 (eval 吃这个)

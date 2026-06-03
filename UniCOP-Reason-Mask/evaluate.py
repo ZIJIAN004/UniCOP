@@ -1511,6 +1511,10 @@ def main():
                              "1=不分片。所有 shard 仍生成同一批 seed=9999 实例, 只处理自己那份")
     parser.add_argument("--shard_id", type=int, default=0,
                         help="本进程的分片号 (0..num_shards-1)")
+    parser.add_argument("--run_tag", type=str, default=None,
+                        help="确定性输出文件名前缀: 设了则用 {run_tag}{_shardsfx}.json (重跑覆盖同名, "
+                             "支持 shard 级幂等续跑 + 避免 merge 通配符把同 shard 多次时间戳文件重复计数); "
+                             "不设则保持 {模型名}_{时间戳} 命名")
     parser.add_argument("--model_type",   type=str,   default="reasoning",
                         choices=["reasoning", "instruct"],
                         help="reasoning=推理模型(10000 tokens)，instruct=指令模型(512 tokens)")
@@ -1763,7 +1767,11 @@ def main():
     # 输出文件：{模型名}_{时间戳}.json，内含全部超参数 + 各组合结果
     # 分片时带 shard 标签, 避免 N 个进程互相覆盖 (供 merge_shards.py 合并)
     _shard_sfx = f"_shard{args.shard_id}of{args.num_shards}" if args.num_shards > 1 else ""
-    fname = f"{model_label}_{run_timestamp}{_shard_sfx}.json"
+    if args.run_tag:
+        # 确定性命名: 重跑同 (run_tag, shard) 覆盖同名文件 → 幂等续跑 + merge 不会重复计数
+        fname = f"{args.run_tag}{_shard_sfx}.json"
+    else:
+        fname = f"{model_label}_{run_timestamp}{_shard_sfx}.json"
     out_path = os.path.join(out_dir, fname)
 
     output = {

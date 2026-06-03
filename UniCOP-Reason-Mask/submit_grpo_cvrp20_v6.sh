@@ -45,4 +45,12 @@ source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop
 cd /homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask
+
+# ── GPU 占用预检: 分到的卡若被别人占着 → 把本节点 exclude 后重投, 本 job 退出 ──
+#    #SBATCH --exclude=canele2 是基线, 重投用 CLI --exclude 会覆盖它, 故传 BASE_EXCLUDE。
+export SUBMIT_SCRIPT="$(pwd)/submit_grpo_cvrp20_v6.sh"
+export BASE_EXCLUDE="canele2"
+source "$(pwd)/preflight_gpu.sh"
+preflight_gpu_or_resubmit
+
 bash run_grpo_cvrp20_v6.sh
