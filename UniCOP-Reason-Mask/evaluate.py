@@ -1493,8 +1493,9 @@ def main():
     parser.add_argument("--temperature",  type=float, default=1.0,
                         help="采样温度，仅 num_samples>1 时生效")
     parser.add_argument("--no_repeat_ngram_size", type=int, default=0,
-                        help="vLLM 后端: 禁止复现长度为 n 的逐字重复 n-gram (灭 thinking 退化长循环)。"
-                             "0=关; 建议 20-40 (大 n 只杀长循环, 不碰短结构重复)。仅 --backend vllm 生效")
+                        help="禁止复现长度为 n 的逐字重复 n-gram (灭 thinking 退化长循环)。0=关; 建议 20-40。"
+                             "local 后端→HF no_repeat_ngram_size(硬禁); vllm 后端→自定义 logits processor"
+                             "(可配 --no_repeat_ngram_min_repeats 放行合法重复)")
     parser.add_argument("--no_repeat_ngram_min_repeats", type=int, default=1,
                         help="配合 --no_repeat_ngram_size: 仅当 n-gram 已重复 >= 此值次才禁其后继。"
                              "1=第2次即禁(HF原义); 思维模型有'Final routes+</think>后拷贝'的合法2次重复, "
@@ -1530,9 +1531,6 @@ def main():
                              "foarl=FOARL 原版(instruction+kNN, 答案 Routes:[[...]]; 用于 instruct 臂, 仅 CVRP)")
     parser.add_argument("--repetition_penalty", type=float, default=1.0,
                         help="重复惩罚系数，1.0=无惩罚，1.2-1.5=常用范围（仅 local 模式）")
-    parser.add_argument("--no_repeat_ngram_size", type=int, default=0,
-                        help="n-gram 硬禁：任意长度 n 的 n-gram 只要出现过就禁止其下一个 token。"
-                             "0=关闭；推荐 5-7；全局生效（含 Route 输出），不需要 exempt 列表。")
     parser.add_argument("--save_dir", type=str, default=None,
                         help="结果保存目录，不填则保存在 model_path 目录下（local）或当前目录（api）")
     # ── Retry-until-feasible ──────────────────────────────────────────
