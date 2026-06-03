@@ -173,6 +173,17 @@ if os.environ.get("LR") is not None:
     config.learning_rate = float(os.environ.get("LR"))
 if os.environ.get("EPOCHS") is not None:
     config.num_train_epochs = int(os.environ.get("EPOCHS"))
+# ── v6 reward scheme 参数 env 覆盖 (reward_scheme=v6 时生效, 其余 scheme 忽略) ──
+# 扫参用, 不改 config.py 默认值。PROC_ALPHA_V6 是 v6 主轴 (PRM 段注入权重);
+# TRIM/S_MIN/S_MAX 是批级标准化的鲁棒性/数值守卫, 一般留默认。
+if os.environ.get("PROC_ALPHA_V6") is not None:
+    config.proc_alpha_v6 = float(os.environ.get("PROC_ALPHA_V6"))
+if os.environ.get("TRIM_FRAC_V6") is not None:
+    config.trim_frac_v6 = float(os.environ.get("TRIM_FRAC_V6"))
+if os.environ.get("S_MIN_V6") is not None:
+    config.s_min_v6 = float(os.environ.get("S_MIN_V6"))
+if os.environ.get("S_MAX_V6") is not None:
+    config.s_max_v6 = float(os.environ.get("S_MAX_V6"))
 
 from data.generate import build_dataset, build_mixed_dataset
 from problems import get_problem, SUPPORTED_PROBLEMS

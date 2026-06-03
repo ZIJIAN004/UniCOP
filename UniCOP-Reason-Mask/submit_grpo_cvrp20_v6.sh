@@ -33,11 +33,12 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 
 # ── 本实验覆盖项 ───────────────────────────────────────────────
 export BASE_MODEL_TYPE=qwen3_thinking   # Qwen3-4B SFT 产物作为 RL 起点
-export LR=2e-5                           # 对齐 v5 (1e-6 训练不足; train.py env 覆盖)
-export EPOCHS=1                          # 单 epoch
-export SAVE_STEPS=20                     # 每 20 step 存档 (~41 步的短跑, 存 step20/40 + final)
-# 输出目录带超参标注 → 不同 lr/epoch 互不覆盖, 也避免误 resume 旧超参的 checkpoint
-export OUTPUT_DIR_BASE="output_v6_lr${LR}_ep${EPOCHS}"   # 如 output_v6_lr2e-5_ep1
+export LR="${LR:-2e-5}"                   # 对齐 v5 (1e-6 训练不足; train.py env 覆盖); 可被 sbatch --export 覆盖
+export EPOCHS="${EPOCHS:-1}"              # 单 epoch; 可被 sbatch --export 覆盖
+export SAVE_STEPS="${SAVE_STEPS:-20}"     # 每 20 step 存档 (~41 步的短跑, 存 step20/40 + final)
+export PROC_ALPHA_V6="${PROC_ALPHA_V6:-200}"   # v6 PRM 段注入权重 (扫参主轴; train.py:180 用此 env 覆盖 config)
+# 输出目录带超参标注 → 不同 lr/epoch/proc_alpha 互不覆盖, 也避免误 resume 旧超参的 checkpoint
+export OUTPUT_DIR_BASE="output_v6_lr${LR}_ep${EPOCHS}_pa${PROC_ALPHA_V6}"   # 如 output_v6_lr2e-5_ep1_pa400
 # REWARD_SCHEME=v6 由 run_grpo_cvrp20_v6.sh 设
 
 source /homes/zhuoyi/.bashrc
