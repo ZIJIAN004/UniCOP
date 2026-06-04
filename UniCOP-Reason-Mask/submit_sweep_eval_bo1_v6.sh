@@ -8,11 +8,11 @@
 #     ① 定位 adapter (兼容 <dir>/cvrp_n20/final_model | <dir>/final_model | <dir> 三种布局)
 #     ② merge 到 SFT 基座 (UniCOP-Distill/output_sft_qwen3_template_cvrp20/final_model)
 #        → 同级 merged_model (镜像 submit_grpo_cvrp20_v6_eval.sh 的合并逻辑 + 权重非空校验)
-#     ③ BO1 eval (greedy) 重复 3 遍 → 量化 vLLM 批调度/FP 噪声下 greedy 的运行间方差,
-#        比较 pa 时看 3 遍均值, 差距小于运行间方差的结论不可信
+#     ③ BO1 eval (greedy, temp=0 → 每模型 1 遍即可; evaluate.py:855 num_samples=1 时强制 temp=0)
+#        如需量化 vLLM 批调度噪声可 N_REPS=3 重投, 已完成的 r1 幂等跳过, 只补 r2/r3
 #
-#   结果 (每 pa × 每遍独立 tag, 不撞名):
-#     eval_results_matrix/v6_lr2e-5_ep1_pa100_r1_RL_BO1.json  (r1/r2/r3)
+#   结果 (每 pa 独立 tag, 不撞名):
+#     eval_results_matrix/v6_lr2e-5_ep1_pa100_r1_RL_BO1.json
 #     eval_logs_matrix/v6_lr2e-5_ep1_pa100_r1_RL_BO1.log
 #   幂等: merged_model 已存在跳 merge; 结果 JSON 有效跳 eval → 崩了/超时直接重投本 submit
 #
@@ -21,7 +21,7 @@
 #   可覆盖 (sbatch --export=ALL,KEY=VAL,... ):
 #     DIRS="output_v6_xxx output_v6_yyy"  默认 glob output_v6_*pa*
 #     EVAL_NUM_TEST=1000 (默认; 与 optimal 冻结集 seed=9999 逐一对齐, 勿改小否则 gap 不对齐)
-#     N_REPS=3  EVAL_GPU=0,1,2,3  EVAL_TP=4  EVAL_GPU_MEM=0.8
+#     N_REPS=1  EVAL_GPU=0,1,2,3  EVAL_TP=4  EVAL_GPU_MEM=0.8
 
 #SBATCH --qos=large
 #SBATCH --gpus=4
@@ -51,7 +51,7 @@ source ../paths.sh   # 注入 DISTILL_DIR 等 (本机 = astar-zhuoyi)
 DIRS="${DIRS:-$(ls -d output_v6_*pa* 2>/dev/null | tr '\n' ' ')}"
 SFT_BASE="${SFT_BASE:-$DISTILL_DIR/output_sft_qwen3_template_cvrp20/final_model}"
 EVAL_NUM_TEST="${EVAL_NUM_TEST:-1000}"
-N_REPS="${N_REPS:-3}"            # BO1 每模型重复遍数 (greedy 的运行间噪声量化)
+N_REPS="${N_REPS:-1}"            # BO1 greedy 1 遍即可; 要量化 vLLM 运行间噪声再 N_REPS=3 重投(幂等补跑)
 EVAL_GPU="${EVAL_GPU:-0,1,2,3}"
 EVAL_TP="${EVAL_TP:-4}"          # Qwen3-4B-Thinking kv_heads 可整除 4
 EVAL_GPU_MEM="${EVAL_GPU_MEM:-0.8}"
@@ -139,7 +139,7 @@ PY
         FAILED="$FAILED $tag(empty-weights)"; continue
     fi
 
-    # ③ BO1 eval × N_REPS (每遍独立 tag _r1/_r2/_r3; run_eval_matrix 幂等跳过已完成遍)
+    # ③ BO1 eval × N_REPS (默认 1; tag 带 _rN 后缀, 将来加测重复遍时幂等跳过已完成的)
     ok=1
     for rep in $(seq 1 "$N_REPS"); do
         echo "[$tag] >>> BO1 rep $rep/$N_REPS  $(date '+%F %T')"
