@@ -9,6 +9,7 @@
 #   ONLY=SFT  GPU=2,3 TP=2 nohup bash run_eval_matrix.sh > eval_SFT.out  2>&1 &
 #   ONLY=BASE GPU=4,5 TP=2 nohup bash run_eval_matrix.sh > eval_BASE.out 2>&1 &
 # 可调环境变量: NUM_TEST(默认1000) TEMP(0.6) GPU(0) TP(1) ONLY(空=全部|RL|SFT|BASE)
+#   RUN_PREFIX(空): tag 前缀, 扫参时区分超参 (如 RUN_PREFIX=v6_pa100_r1_ → v6_pa100_r1_RL_BO1.json)
 #   DO_BO1(1) DO_BO8WAVE(1): 设 0 跳过对应阶段 (如 BO1 已跑完 → DO_BO1=0)
 #   每模型长度: MAXLEN_RL/MAXLEN_SFT(默认6144) MAXLEN_BASE(默认10112)
 #   注: evaluate.py 默认已关 enforce_eager(CUDA graph 开). graph capture 若报错, 给 run() 的 evaluate 加 --enforce_eager 回退.
@@ -37,16 +38,20 @@ DO_BO1=${DO_BO1:-1}          # 0=跳过 BO1(已跑完时用)
 DO_BO8WAVE=${DO_BO8WAVE:-1}  # 0=跳过 BO8/wave
 GPU_MEM=${GPU_MEM:-0.8}      # vLLM 显存比例; 0.8 留余量给 CUDA graph 捕获 + wave 的 POMO; 仍 OOM 再降
 ONLY=${ONLY:-}               # 空=跑全部三个模型; 或 RL / SFT / BASE (三卡并行用)
+RUN_PREFIX=${RUN_PREFIX:-}   # tag 前缀 (如 "v6_pa100_"): 扫参时区分不同超参的结果, 防撞名+防幂等误跳过
 SAVE_DIR="$SCRIPT_DIR/eval_results_matrix"; LOG_DIR="$SCRIPT_DIR/eval_logs_matrix"
 mkdir -p "$SAVE_DIR" "$LOG_DIR"
 
-# POMO ckpt 守卫: POMOPRM glob "*POMO_CVRP_n20" 取最新, 优先加载 MODEL_BEST.pt (回退 FINAL)
-POMO_CVRP_DIR=$(ls -d "$POMO_CKPT_DIR"/*POMO_CVRP_n20 2>/dev/null | tail -1)
-if [ -z "$POMO_CVRP_DIR" ] || { [ ! -f "$POMO_CVRP_DIR/MODEL_BEST.pt" ] && [ ! -f "$POMO_CVRP_DIR/MODEL_FINAL.pt" ]; }; then
-  echo "❌ POMO ckpt 问题: 需要 $POMO_CKPT_DIR/*POMO_CVRP_n20/{MODEL_BEST,MODEL_FINAL}.pt (wave 剪枝必需)"
-  echo "   匹配到目录: ${POMO_CVRP_DIR:-<无>}"
-  [ -n "$POMO_CVRP_DIR" ] && { echo "   目录内容:"; ls -la "$POMO_CVRP_DIR"; }
-  exit 1
+# POMO ckpt 守卫: 仅 wave 剪枝需要 (BO1-only 在没有 POMO-Baseline 的主机也能跑)
+if [ "$DO_BO8WAVE" = "1" ]; then
+  # POMOPRM glob "*POMO_CVRP_n20" 取最新, 优先加载 MODEL_BEST.pt (回退 FINAL)
+  POMO_CVRP_DIR=$(ls -d "$POMO_CKPT_DIR"/*POMO_CVRP_n20 2>/dev/null | tail -1)
+  if [ -z "$POMO_CVRP_DIR" ] || { [ ! -f "$POMO_CVRP_DIR/MODEL_BEST.pt" ] && [ ! -f "$POMO_CVRP_DIR/MODEL_FINAL.pt" ]; }; then
+    echo "❌ POMO ckpt 问题: 需要 $POMO_CKPT_DIR/*POMO_CVRP_n20/{MODEL_BEST,MODEL_FINAL}.pt (wave 剪枝必需)"
+    echo "   匹配到目录: ${POMO_CVRP_DIR:-<无>}"
+    [ -n "$POMO_CVRP_DIR" ] && { echo "   目录内容:"; ls -la "$POMO_CVRP_DIR"; }
+    exit 1
+  fi
 fi
 
 run() {  # run <tag> <model> <maxlen> <extra args...>
@@ -74,7 +79,7 @@ WAVE=(--wave --bestofn --pomo_ckpt_dir "$POMO_CKPT_DIR" --pomo_baseline_dir "$PO
 for spec in "RL:$RL_MODEL:$MAXLEN_RL" "SFT:$SFT_MODEL:$MAXLEN_SFT" "BASE:$BASE_MODEL:$MAXLEN_BASE"; do
   name="${spec%%:*}"; rest="${spec#*:}"; model="${rest%:*}"; ml="${rest##*:}"
   if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then continue; fi
-  [ "$DO_BO1" = "1" ]     && run "${name}_BO1"     "$model" "$ml" --num_samples 1
-  [ "$DO_BO8WAVE" = "1" ] && run "${name}_BO8wave" "$model" "$ml" --num_samples 8 --temperature "$TEMP" "${WAVE[@]}"
+  [ "$DO_BO1" = "1" ]     && run "${RUN_PREFIX}${name}_BO1"     "$model" "$ml" --num_samples 1
+  [ "$DO_BO8WAVE" = "1" ] && run "${RUN_PREFIX}${name}_BO8wave" "$model" "$ml" --num_samples 8 --temperature "$TEMP" "${WAVE[@]}"
 done
 echo "[$(date '+%F %T')] 完成 (ONLY=${ONLY:-ALL}). 结果 JSON: $SAVE_DIR  日志: $LOG_DIR"
