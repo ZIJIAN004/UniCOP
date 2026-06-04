@@ -9,6 +9,10 @@
 #   阶段 (可 DO_BO1/DO_BO8WAVE=0 跳过):
 #     BO1     : --num_samples 1 (evaluate.py:855 强制 temp=0 → 纯 greedy)
 #     BO8wave : --num_samples 8 + --bestofn (朴素 best-of-k 曲线) + --wave (POMO PRM 波次剪枝)
+#               ⚠️ instruct 自动降为 BO8 (不带 wave): wave 靠解析 think 链 [R,step] 步数进度,
+#               instruct 无 step 链 → 全轨迹 25% 检查点被杀光, wave 数字全 None 无意义
+#   prompt 口径: instruct 走对齐臂 (--prompt_mode think --model_type instruct, 与 thinking
+#               同 user 消息/同输出格式, 仅剥 think 指令) — 不是 FOARL 原版 (--prompt_mode foarl)
 #
 #   thinking 特殊逻辑: budget forcing (evaluate.py 两段式生成):
 #     --think_budget 10112 (=79×128, 10000 以上最接近的 128 倍数): think 段到此预算还没出
@@ -74,6 +78,7 @@ case "$MODEL_KIND" in
     ML="$THINK_BUDGET"
     EXTRA_GEN=(--think_budget "$THINK_BUDGET" --answer_budget "$ANSWER_BUDGET")
     EXPECT_TB="$THINK_BUDGET"             # json_ok 幂等校验: 旧 budget 的结果不复用
+    USE_WAVE=1
     ;;
   instruct)
     MODEL="$INSTRUCT_MODEL"
@@ -82,6 +87,10 @@ case "$MODEL_KIND" in
     ML="$MAXLEN_INSTRUCT"
     EXTRA_GEN=()                          # instruct 不开 budget forcing
     EXPECT_TB=""
+    # wave 剪枝靠解析 think 链的 [R,step] 客户步数检查点进度 (wave_replay.py:214-218);
+    # instruct 输出没有 step 链 → 全轨迹在 25% 检查点被硬过滤杀光, wave 全 None。
+    # 故 instruct 默认只跑朴素 BO8 (--bestofn); 真要试 wave 可 INSTRUCT_WAVE=1。
+    USE_WAVE="${INSTRUCT_WAVE:-0}"
     ;;
   *) echo "[FATAL] MODEL_KIND='$MODEL_KIND' 应为 thinking 或 instruct"; exit 1;;
 esac
@@ -98,7 +107,7 @@ echo "MODEL_KIND=$MODEL_KIND  模型=$MODEL"
 echo "NUM_TEST=$NUM_TEST  TEMP=$TEMP  maxlen=$ML  分片=${NSHARD}×TP1  BO1=$DO_BO1 BO8wave=$DO_BO8WAVE"
 
 # POMO ckpt 守卫 (仅 wave 需要; 与 run_eval_matrix.sh 同逻辑)
-if [ "$DO_BO8WAVE" = "1" ]; then
+if [ "$DO_BO8WAVE" = "1" ] && [ "$USE_WAVE" = "1" ]; then
   POMO_CVRP_DIR=$(ls -d "$POMO_CKPT_DIR"/*POMO_CVRP_n20 2>/dev/null | tail -1)
   if [ -z "$POMO_CVRP_DIR" ] || { [ ! -f "$POMO_CVRP_DIR/MODEL_BEST.pt" ] && [ ! -f "$POMO_CVRP_DIR/MODEL_FINAL.pt" ]; }; then
     echo "❌ POMO ckpt 缺失: 需要 $POMO_CKPT_DIR/*POMO_CVRP_n20/{MODEL_BEST,MODEL_FINAL}.pt (wave 必需)"
@@ -176,14 +185,22 @@ if [ "$DO_BO1" = "1" ]; then
         || FAILED="$FAILED ${KIND_TAG}_BO1"
 fi
 if [ "$DO_BO8WAVE" = "1" ]; then
-    run_stage "${KIND_TAG}_BO8wave" --num_samples 8 --temperature "$TEMP" \
-        ${EXTRA_GEN[@]+"${EXTRA_GEN[@]}"} "${WAVE_ARGS[@]}" \
-        || FAILED="$FAILED ${KIND_TAG}_BO8wave"
+    if [ "$USE_WAVE" = "1" ]; then
+        run_stage "${KIND_TAG}_BO8wave" --num_samples 8 --temperature "$TEMP" \
+            ${EXTRA_GEN[@]+"${EXTRA_GEN[@]}"} "${WAVE_ARGS[@]}" \
+            || FAILED="$FAILED ${KIND_TAG}_BO8wave"
+    else
+        # instruct: 朴素 BO8 (best-of-k 曲线), 不带 wave (无 think 步链可剪)
+        run_stage "${KIND_TAG}_BO8" --num_samples 8 --temperature "$TEMP" \
+            ${EXTRA_GEN[@]+"${EXTRA_GEN[@]}"} --bestofn \
+            || FAILED="$FAILED ${KIND_TAG}_BO8"
+    fi
 fi
 
 echo "============================================================"
+BO8_TAG=$([ "$USE_WAVE" = "1" ] && echo "${KIND_TAG}_BO8wave" || echo "${KIND_TAG}_BO8")
 if [ -z "$FAILED" ]; then
-    echo "  ✅ $KIND_TAG 全部完成: $SAVE_DIR/${KIND_TAG}_BO1.json + ${KIND_TAG}_BO8wave.json"
+    echo "  ✅ $KIND_TAG 全部完成: $SAVE_DIR/${KIND_TAG}_BO1.json + ${BO8_TAG}.json"
     notify "✅ $KIND_TAG base eval 完成" "BO1+BO8wave 已合并  $(date '+%F %T')"
 else
     echo "  ⚠️ 失败阶段:$FAILED (重投本 submit 幂等补跑)"
