@@ -56,10 +56,12 @@ fi
 
 run() {  # run <tag> <model> <maxlen> <extra args...>
   local tag="$1"; local model="$2"; local ml="$3"; shift 3
-  # ── 幂等续跑: 该 tag 的确定性结果 JSON 已存在且有效 → 跳过 (重投本 submit 不重跑已成功阶段) ──
+  # ── 幂等续跑: 该 tag 的结果 JSON 已存在、有效【且 n_eval == 当前 NUM_TEST】→ 跳过 ──
+  # (文件名不含 NUM_TEST, 只查 n_eval>0 会把 NUM_TEST=100 的 smoke 结果当 1000 的正式结果
+  #  silently 复用 → 必须核对实例数一致; 不一致则重跑覆盖)
   local out_json="$SAVE_DIR/${tag}.json"
-  if [ -f "$out_json" ] && python -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('results') and d['results'][0].get('n_eval',0)>0 else 1)" "$out_json" 2>/dev/null; then
-    echo "[$(date '+%F %T')] ⏭️  $tag 已完成, 跳过 ($out_json)"
+  if [ -f "$out_json" ] && python -c "import json,sys;d=json.load(open(sys.argv[1]));r=(d.get('results') or [{}])[0];sys.exit(0 if r.get('n_eval',0)==int(sys.argv[2]) else 1)" "$out_json" "$NUM_TEST" 2>/dev/null; then
+    echo "[$(date '+%F %T')] ⏭️  $tag 已完成 (n_eval=$NUM_TEST 一致), 跳过 ($out_json)"
     return 0
   fi
   echo "[$(date '+%F %T')] >>> $tag (maxlen=$ml)"
@@ -71,7 +73,9 @@ run() {  # run <tag> <model> <maxlen> <extra args...>
     --num_test "$NUM_TEST" --prompt_mode think --model_type reasoning \
     --max_completion_length "$ml" --save_dir "$SAVE_DIR" --run_tag "$tag" \
     "$@" > "$LOG_DIR/${tag}.log" 2>&1
-  echo "[$(date '+%F %T')] <<< $tag  (exit $?)  log: $LOG_DIR/${tag}.log"
+  local ec=$?   # 必须立刻接住: 下一行的 $(date) 命令替换会把 $? 重置为 0, 不能在 echo 里直接用
+  echo "[$(date '+%F %T')] <<< $tag  (exit $ec)  log: $LOG_DIR/${tag}.log"
+  return $ec
 }
 
 WAVE=(--wave --bestofn --pomo_ckpt_dir "$POMO_CKPT_DIR" --pomo_baseline_dir "$POMO_BASELINE_DIR")

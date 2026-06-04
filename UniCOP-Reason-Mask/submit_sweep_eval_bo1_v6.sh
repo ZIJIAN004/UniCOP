@@ -195,7 +195,8 @@ for tag in "${TAGS[@]}"; do
     ok=1
     for rep in $(seq 1 "$N_REPS"); do
         out_json="eval_results_matrix/${tag}_r${rep}_RL_BO1.json"
-        if [ ! -f "$out_json" ] || ! python -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('results') and d['results'][0].get('n_eval',0)>0 else 1)" "$out_json" 2>/dev/null; then
+        # 校验 n_eval == EVAL_NUM_TEST (只查 >0 会把旧 NUM_TEST 的 smoke 结果误判为有效)
+        if [ ! -f "$out_json" ] || ! python -c "import json,sys;d=json.load(open(sys.argv[1]));r=(d.get('results') or [{}])[0];sys.exit(0 if r.get('n_eval',0)==int(sys.argv[2]) else 1)" "$out_json" "$EVAL_NUM_TEST" 2>/dev/null; then
             echo "[$tag] ❌ rep $rep 结果 JSON 无效: $out_json (详见 eval_logs_matrix/${tag}_r${rep}_RL_BO1.log)"
             ok=0
         fi

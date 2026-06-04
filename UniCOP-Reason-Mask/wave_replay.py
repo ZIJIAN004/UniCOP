@@ -318,6 +318,14 @@ def wave_replay(
     def _mean(xs):
         return sum(xs) / len(xs) if xs else None
 
+    # ── 对齐口径: wave 与 baseline@同算力 各自的 None 过滤是独立的 (wave 可能把某实例的
+    # 可行轨迹全剪没→只缺 wave 值; baseline 预算内没可行→只缺 baseline 值), 上面三个均值
+    # 因此跑在不同实例子集上, 直接相减可能纯因子集不同而翻号。这里补一组只在
+    # 两边都有值的实例交集上算的均值, 论文对比用对齐版。
+    aligned = [(p["wave_best"], p["baseline_best_at_wave_C"])
+               for p in per_instance
+               if p["wave_best"] is not None and p["baseline_best_at_wave_C"] is not None]
+
     return {
         "config": cfg,
         "n_instances": len(instances),
@@ -327,6 +335,9 @@ def wave_replay(
         "wave_avg_best_dist": _mean(wave_dists),
         "baseline_avg_best_dist": _mean(base_dists),
         "baseline_avg_best_dist_at_wave_C": _mean(base_at_C_dists),
+        "n_aligned": len(aligned),                                        # 交集实例数
+        "wave_avg_best_dist_aligned": _mean([a[0] for a in aligned]),
+        "baseline_avg_best_dist_at_wave_C_aligned": _mean([a[1] for a in aligned]),
         "per_instance": per_instance,
     }
 

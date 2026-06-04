@@ -300,13 +300,32 @@ def _retry_loop_one(
 
 
 def _strip_think_instructions(system: str) -> str:
-    """从 system prompt 中剥离 <think> 推理指令（instruct 模型不需要）。"""
+    """从 system prompt 中剥离 <think> 推理指令（instruct 模型不需要）。
+
+    匹配当前各 problem _SYSTEM 的真实措辞: 从 "Before answering, reason step by step
+    inside <think>" 到 "After </think>, output" 的整块 think 指令删除, 保留输出格式要求
+    ("Output ONLY the final routes: ...")。旧版措辞 ("think through the problem") 也兼容。
+    末尾守卫: 如果什么都没剥掉/残留 <think>, 直接抛错 —— 防止 prompt 措辞变更后本函数
+    silent no-op, 把完整 think 链指令喂给 instruct 模型 (会烧光短 maxlen, 偏置对比)。
+    """
+    orig = system
+    # 当前措辞: 整块删 think 指令 (含四段式要求), "After </think>, output" → "Output"
+    system = re.sub(
+        r'Before answering, reason step by step inside <think>.*?After </think>,\s*o',
+        'O', system, flags=re.S,
+    )
+    system = system.replace(" (copied from think)", "")
+    # 旧版措辞兼容
     system = re.sub(
         r'Before answering, think through the problem in <think>\.\.\.</think>\.[^\n]*\n?',
         '', system,
     )
     system = system.replace("After completing your analysis, output", "Output")
     system = re.sub(r'\n{3,}', '\n\n', system).strip()
+    if system == orig.strip() or "<think>" in system:
+        raise ValueError(
+            "_strip_think_instructions 未能剥离 think 指令 (system prompt 措辞变了?). "
+            "拒绝继续: instruct 模型不能拿到 think 链指令。请同步更新本函数的匹配模式。")
     return system
 
 
@@ -882,7 +901,8 @@ def _generate_vllm(model, tokenizer, prompts: list[list[dict]],
                 if (i, s) in ans_map:                                  # 强制出了答案
                     ans_txt, ans_ntok = ans_map[(i, s)]
                     full = _clean(txt) + "</think>\n\n" + _clean(ans_txt)
-                    all_completions[i].append((full, False, ntok + ans_ntok))
+                    # 答案段自身也可能撞 _ANSWER_BUDGET 被截断 → 如实标 truncated
+                    all_completions[i].append((full, ans_ntok >= _ANSWER_BUDGET, ntok + ans_ntok))
                 else:                                                  # 自然收尾
                     all_completions[i].append((_clean(txt), ntok >= _THINK_BUDGET, ntok))
         return all_completions
@@ -1194,7 +1214,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
     print(f"  覆盖率:       {coverage_rate:.2%}")
     print(f"  约束满足率:   {constraint_rate:.4f}")
     print(f"  全局可行率:   {global_feas_rate:.2%}  ({total_feasible}/{total_samples})")
-    print(f"  实例可行率:   {instance_feas_rate:.2%}  ({instance_has_feas}/{num_test})")
+    print(f"  实例可行率:   {instance_feas_rate:.2%}  ({instance_has_feas}/{n_eval})")
     print(f"  最优距离均值: {avg_best_dist:.4f}  ({len(best_dists)} 个可行实例)")
     print(f"  {'─'*55}")
 
@@ -1324,12 +1344,14 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
         "examples":             example_records,
     }
 
+    # per-instance best (全局下标对齐, 供下游与 optimal 冻结集逐实例对齐算 gap; None=无可行)
+    # 不分片也要存: 单进程全量跑同样是 gap 对齐的合法入口
+    results["per_instance_best"] = [[gi, (round(d, 6) if d is not None else None)]
+                                    for gi, d in per_instance_best]
+
     # ── 分片元数据 + 合并所需原始量 (num_shards>1 时; merge_shards.py 据此合并) ──
     if num_shards > 1:
         results["shard"] = {"shard_id": shard_id, "num_shards": num_shards, "num_test_full": num_test}
-        # per-instance best (全局下标对齐); 原始计数供精确重算聚合
-        results["per_instance_best"] = [[gi, (round(d, 6) if d is not None else None)]
-                                        for gi, d in per_instance_best]
         results["_raw"] = {
             "n_eval": n_eval, "total_samples": total_samples, "total_parsed": total_parsed,
             "total_feasible": total_feasible, "total_truncated": total_truncated,
@@ -1430,6 +1452,10 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             "wave_avg_best_dist":     wave_out["wave_avg_best_dist"],
             "baseline_avg_best_dist": wave_out["baseline_avg_best_dist"],
             "baseline_avg_best_dist_at_wave_C": wave_out["baseline_avg_best_dist_at_wave_C"],
+            # 对齐口径 (两边都有值的实例交集; 论文对比用这组, 见 wave_replay.py)
+            "n_aligned":              wave_out["n_aligned"],
+            "wave_avg_best_dist_aligned": wave_out["wave_avg_best_dist_aligned"],
+            "baseline_avg_best_dist_at_wave_C_aligned": wave_out["baseline_avg_best_dist_at_wave_C_aligned"],
             "per_instance":           wave_out["per_instance"],
         }
         w = results["wave"]
@@ -1447,7 +1473,10 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
         print(f"    最优距离:    wave={_f(w['wave_avg_best_dist'])}  "
               f"baseline(全量)={_f(w['baseline_avg_best_dist'])}  "
               f"baseline@同算力={_f(w['baseline_avg_best_dist_at_wave_C'])}")
-        print(f"    → 同算力对比: wave 的距离应 ≤ baseline@同算力 才算赢")
+        print(f"    对齐口径({w['n_aligned']}实例交集): "
+              f"wave={_f(w['wave_avg_best_dist_aligned'])}  "
+              f"baseline@同算力={_f(w['baseline_avg_best_dist_at_wave_C_aligned'])}")
+        print(f"    → 同算力对比看对齐口径: wave ≤ baseline@同算力 才算赢")
         print(f"  {'─'*55}")
 
     return results
@@ -1709,6 +1738,8 @@ def main():
         "batch_size":           args.batch_size,
         "retry_until_feasible": args.retry_until_feasible,
         "max_retry_rounds":     args.max_retry_rounds if args.retry_until_feasible else None,
+        "think_budget":         args.think_budget,    # 配置溯源: 幂等跳过前可校验是否同配置
+        "answer_budget":        args.answer_budget,
     }
     if args.backend == "local":
         hyperparams["model_path"] = args.model_path

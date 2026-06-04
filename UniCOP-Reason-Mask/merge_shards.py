@@ -22,19 +22,31 @@ import numpy as np
 def _merge_bestofn(combos):
     n_evals = [c["_raw"]["n_eval"] for c in combos]
     tot_ne = sum(n_evals)
+    # 每分片曲线点 avg_best_dist@k 的真实分母 = 该分片"有≥1可行样本的实例数"
+    # (bestofn_eval.expected_best_of_k 对 m≥1 的实例在所有 k 都返回非 None, 与 k 无关)
+    # = _raw.instance_has_feas → 用它加权可【精确】还原全量单跑的池化均值。
+    # ⚠️ 旧实现用 feas_rate*n_eval = Σ p_feas (概率和): k<N 时 p_feas<1 的部分可行实例
+    #    权重被低估 → 合并曲线偏向高可行分片, 与单跑系统性不一致 (workflow 审查确认)。
+    w_feas = [c["_raw"]["instance_has_feas"] for c in combos]
     curves = [c["bestofn"]["scaling_curve"] for c in combos]
     out = []
     for pts in zip(*curves):                      # 同一 k 的各分片点
         compute = sum(p["compute"] for p in pts)
-        fc = [p["feas_rate"] * ne for p, ne in zip(pts, n_evals)]   # feas 数@k
-        vals = [(p["avg_best_dist"], w) for p, w in zip(pts, fc)
+        vals = [(p["avg_best_dist"], w) for p, w in zip(pts, w_feas)
                 if p["avg_best_dist"] is not None and w > 0]
         abd = (sum(v * w for v, w in vals) / sum(w for _, w in vals)) if vals else None
+        fr = sum(p["feas_rate"] * ne for p, ne in zip(pts, n_evals))   # P(≥1可行) 按实例数池化
         out.append({"k": pts[0]["k"], "compute": compute,
                     "avg_best_dist": round(abd, 4) if abd is not None else None,
-                    "feas_rate": round(sum(fc) / tot_ne, 4) if tot_ne else 0.0})
+                    "feas_rate": round(fr / tot_ne, 4) if tot_ne else 0.0})
     base = dict(combos[0]["bestofn"])
     base["scaling_curve"] = out
+    # 这些汇总量不能抄 shard0: 重算
+    base["n_instances"] = sum(c["bestofn"]["n_instances"] for c in combos)
+    base["total_tokens"] = sum(c["bestofn"]["total_tokens"] for c in combos)
+    _N = base.get("N") or 1
+    _n_samp = base["n_instances"] * _N
+    base["mean_tokens_per_sample"] = round(base["total_tokens"] / _n_samp, 1) if _n_samp else 0.0
     return base
 
 
@@ -50,6 +62,13 @@ def _merge_wave(combos):
         xs = [p[key] for p in per if p.get(key) is not None]
         return round(float(np.mean(xs)), 4) if xs else None
 
+    # 对齐口径: 与 wave_replay.py 一致, 在两边都有值的实例交集上算
+    pairs = [(p["wave_best"], p["baseline_best_at_wave_C"]) for p in per
+             if p.get("wave_best") is not None and p.get("baseline_best_at_wave_C") is not None]
+
+    def _pm(i):
+        return round(float(np.mean([t[i] for t in pairs])), 4) if pairs else None
+
     out = dict(waves[0])                       # 配置字段(checkpoint_fracs 等)取第一个分片
     out.update({
         "n_instances": sum(w["n_instances"] for w in waves),
@@ -59,6 +78,9 @@ def _merge_wave(combos):
         "wave_avg_best_dist": _m("wave_best"),
         "baseline_avg_best_dist": _m("baseline_best"),
         "baseline_avg_best_dist_at_wave_C": _m("baseline_best_at_wave_C"),
+        "n_aligned": len(pairs),
+        "wave_avg_best_dist_aligned": _pm(0),
+        "baseline_avg_best_dist_at_wave_C_aligned": _pm(1),
         "per_instance": per,
     })
     return out
@@ -87,6 +109,9 @@ def merge_combo(combos):
         "coverage_rate": round(sum(r["sum_coverage"] for r in raws) / ts, 4) if ts else 0.0,
         "constraint_rate": round(sum(r["sum_constraint"] for r in raws) / ts, 4) if ts else 0.0,
         "avg_completion_tokens": round(sum(r["sum_comp_len"] for r in raws) / ts, 1) if ts else 0.0,
+        # min/max 不能抄 shard0 (最长/最短 completion 可能在别的分片): 各分片 min/max 再聚合 = 精确
+        "min_completion_tokens": min(c["min_completion_tokens"] for c in combos),
+        "max_completion_tokens": max(c["max_completion_tokens"] for c in combos),
         "instance_feasibility_rate": round(feas_inst / n_eval, 4) if n_eval else 0.0,
         "feasible_instances": feas_inst,
         "avg_best_dist": round(float(np.mean(best_dists)), 4) if best_dists else None,

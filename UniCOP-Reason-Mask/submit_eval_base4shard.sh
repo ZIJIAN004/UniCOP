@@ -73,6 +73,7 @@ case "$MODEL_KIND" in
     TEMP="${TEMP:-0.6}"                   # Qwen3-Thinking-2507 官方推荐
     ML="$THINK_BUDGET"
     EXTRA_GEN=(--think_budget "$THINK_BUDGET" --answer_budget "$ANSWER_BUDGET")
+    EXPECT_TB="$THINK_BUDGET"             # json_ok 幂等校验: 旧 budget 的结果不复用
     ;;
   instruct)
     MODEL="$INSTRUCT_MODEL"
@@ -80,6 +81,7 @@ case "$MODEL_KIND" in
     TEMP="${TEMP:-0.7}"                   # Qwen3-Instruct-2507 官方推荐
     ML="$MAXLEN_INSTRUCT"
     EXTRA_GEN=()                          # instruct 不开 budget forcing
+    EXPECT_TB=""
     ;;
   *) echo "[FATAL] MODEL_KIND='$MODEL_KIND' 应为 thinking 或 instruct"; exit 1;;
 esac
@@ -118,8 +120,18 @@ export BASE_EXCLUDE=""
 source "$(pwd)/preflight_gpu.sh"
 preflight_gpu_or_resubmit
 
-json_ok() {  # json_ok <file> → 0 当 JSON 有效且 n_eval>0
-    [ -f "$1" ] && python -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if d.get('results') and d['results'][0].get('n_eval',0)>0 else 1)" "$1" 2>/dev/null
+json_ok() {  # json_ok <file> → 0 当 JSON 有效、n_eval>0 且 num_test/think_budget 与当前配置一致
+    # (只查 n_eval>0 会把旧配置结果 — 别的 NUM_TEST / 别的 THINK_BUDGET — silently 当新结果复用)
+    # 分片 JSON 与合并 JSON 都存 num_test=全量数; thinking 时再核 hyperparams.think_budget
+    [ -f "$1" ] && EXPECT_NT="$NUM_TEST" EXPECT_TB="$EXPECT_TB" python -c "
+import json, sys, os
+d = json.load(open(sys.argv[1]))
+r = (d.get('results') or [{}])[0]
+ok = r.get('n_eval', 0) > 0 and r.get('num_test') == int(os.environ['EXPECT_NT'])
+tb = os.environ.get('EXPECT_TB')
+if ok and tb:
+    ok = d.get('hyperparams', {}).get('think_budget') == int(tb)
+sys.exit(0 if ok else 1)" "$1" 2>/dev/null
 }
 
 run_stage() {  # run_stage <tag> <extra evaluate args...>  — 4 分片并行 + 合并
