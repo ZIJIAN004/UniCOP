@@ -11,8 +11,10 @@
 #     BO8wave : --num_samples 8 + --bestofn (朴素 best-of-k 曲线) + --wave (POMO PRM 波次剪枝)
 #               ⚠️ instruct 自动降为 BO8 (不带 wave): wave 靠解析 think 链 [R,step] 步数进度,
 #               instruct 无 step 链 → 全轨迹 25% 检查点被杀光, wave 数字全 None 无意义
-#   prompt 口径: instruct 走对齐臂 (--prompt_mode think --model_type instruct, 与 thinking
-#               同 user 消息/同输出格式, 仅剥 think 指令) — 不是 FOARL 原版 (--prompt_mode foarl)
+#   prompt 口径: instruct 臂默认 = FOARL 原版构造 (--prompt_mode foarl: preamble +
+#               instruction + kNN 近邻提示, 答案 Routes:[[...]] 自动转 Route 行解析);
+#               thinking 臂 = 项目 prompt (--prompt_mode think)。如要 instruct 跑对齐臂
+#               (与 thinking 同 prompt 仅剥 think 指令) 可 INSTRUCT_PROMPT=think 覆盖。
 #
 #   thinking 特殊逻辑: budget forcing (evaluate.py 两段式生成):
 #     --think_budget 10112 (=79×128, 10000 以上最接近的 128 倍数): think 段到此预算还没出
@@ -78,6 +80,7 @@ case "$MODEL_KIND" in
     ML="$THINK_BUDGET"
     EXTRA_GEN=(--think_budget "$THINK_BUDGET" --answer_budget "$ANSWER_BUDGET")
     EXPECT_TB="$THINK_BUDGET"             # json_ok 幂等校验: 旧 budget 的结果不复用
+    PROMPT_MODE="think"
     USE_WAVE=1
     ;;
   instruct)
@@ -87,9 +90,12 @@ case "$MODEL_KIND" in
     ML="$MAXLEN_INSTRUCT"
     EXTRA_GEN=()                          # instruct 不开 budget forcing
     EXPECT_TB=""
+    # instruct 臂默认 FOARL 原版 prompt (项目口径: foarl=instruct 臂的标准构造);
+    # 答案 'Routes: [[...]]' 由 evaluate.py:1161/1410 自动转 Route 行后走同一套指标。
+    PROMPT_MODE="${INSTRUCT_PROMPT:-foarl}"
     # wave 剪枝靠解析 think 链的 [R,step] 客户步数检查点进度 (wave_replay.py:214-218);
-    # instruct 输出没有 step 链 → 全轨迹在 25% 检查点被硬过滤杀光, wave 全 None。
-    # 故 instruct 默认只跑朴素 BO8 (--bestofn); 真要试 wave 可 INSTRUCT_WAVE=1。
+    # instruct 输出 (FOARL 或对齐臂) 都没有 step 链 → 全轨迹在 25% 检查点被硬过滤杀光,
+    # wave 全 None。故 instruct 默认只跑朴素 BO8 (--bestofn); 真要试 wave 可 INSTRUCT_WAVE=1。
     USE_WAVE="${INSTRUCT_WAVE:-0}"
     ;;
   *) echo "[FATAL] MODEL_KIND='$MODEL_KIND' 应为 thinking 或 instruct"; exit 1;;
@@ -104,7 +110,7 @@ if [ ! -f "$MODEL/config.json" ]; then
     exit 1
 fi
 echo "MODEL_KIND=$MODEL_KIND  模型=$MODEL"
-echo "NUM_TEST=$NUM_TEST  TEMP=$TEMP  maxlen=$ML  分片=${NSHARD}×TP1  BO1=$DO_BO1 BO8wave=$DO_BO8WAVE"
+echo "NUM_TEST=$NUM_TEST  TEMP=$TEMP  maxlen=$ML  prompt_mode=$PROMPT_MODE  分片=${NSHARD}×TP1  BO1=$DO_BO1 BO8wave=$DO_BO8WAVE wave=$USE_WAVE"
 
 # POMO ckpt 守卫 (仅 wave 需要; 与 run_eval_matrix.sh 同逻辑)
 if [ "$DO_BO8WAVE" = "1" ] && [ "$USE_WAVE" = "1" ]; then
@@ -132,11 +138,13 @@ preflight_gpu_or_resubmit
 json_ok() {  # json_ok <file> → 0 当 JSON 有效、n_eval>0 且 num_test/think_budget 与当前配置一致
     # (只查 n_eval>0 会把旧配置结果 — 别的 NUM_TEST / 别的 THINK_BUDGET — silently 当新结果复用)
     # 分片 JSON 与合并 JSON 都存 num_test=全量数; thinking 时再核 hyperparams.think_budget
-    [ -f "$1" ] && EXPECT_NT="$NUM_TEST" EXPECT_TB="$EXPECT_TB" python -c "
+    [ -f "$1" ] && EXPECT_NT="$NUM_TEST" EXPECT_TB="$EXPECT_TB" EXPECT_PM="$PROMPT_MODE" python -c "
 import json, sys, os
 d = json.load(open(sys.argv[1]))
 r = (d.get('results') or [{}])[0]
 ok = r.get('n_eval', 0) > 0 and r.get('num_test') == int(os.environ['EXPECT_NT'])
+if ok:
+    ok = d.get('hyperparams', {}).get('prompt_mode') == os.environ['EXPECT_PM']
 tb = os.environ.get('EXPECT_TB')
 if ok and tb:
     ok = d.get('hyperparams', {}).get('think_budget') == int(tb)
@@ -160,7 +168,7 @@ run_stage() {  # run_stage <tag> <extra evaluate args...>  — 4 分片并行 + 
             --backend vllm --model_path "$MODEL" --tp_size 1 \
             --vllm_gpu_mem_util "$GPU_MEM" \
             --problem cvrp --problem_size 20 \
-            --num_test "$NUM_TEST" --prompt_mode think --model_type "$MTYPE" \
+            --num_test "$NUM_TEST" --prompt_mode "$PROMPT_MODE" --model_type "$MTYPE" \
             --max_completion_length "$ML" \
             --save_dir "$SAVE_DIR" --run_tag "$tag" \
             --num_shards "$NSHARD" --shard_id "$s" \
