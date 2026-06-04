@@ -38,6 +38,32 @@ def _merge_bestofn(combos):
     return base
 
 
+def _merge_wave(combos):
+    """精确合并 wave 指标: per_instance 拼接, C 求和, 均值在非 None 的实例上重算。
+    (与 wave_replay.py:318-330 的聚合口径一致 — 无可行解的实例不参与平均。)"""
+    waves = [c["wave"] for c in combos]
+    per = [pi for w in waves for pi in w["per_instance"]]
+    wave_C = sum(w["wave_C_total"] for w in waves)
+    base_C = sum(w["baseline_C_total"] for w in waves)
+
+    def _m(key):
+        xs = [p[key] for p in per if p.get(key) is not None]
+        return round(float(np.mean(xs)), 4) if xs else None
+
+    out = dict(waves[0])                       # 配置字段(checkpoint_fracs 等)取第一个分片
+    out.update({
+        "n_instances": sum(w["n_instances"] for w in waves),
+        "wave_C_total": wave_C,
+        "baseline_C_total": base_C,
+        "compute_saving_ratio": round(1 - wave_C / base_C, 4) if base_C else None,
+        "wave_avg_best_dist": _m("wave_best"),
+        "baseline_avg_best_dist": _m("baseline_best"),
+        "baseline_avg_best_dist_at_wave_C": _m("baseline_best_at_wave_C"),
+        "per_instance": per,
+    })
+    return out
+
+
 def merge_combo(combos):
     """合并同一 (problem,size) 的各分片 result dict → 全量等价 result dict。"""
     raws = [c["_raw"] for c in combos]
@@ -52,7 +78,7 @@ def merge_combo(combos):
         return sum(r[key] for r in raws) / ts if ts else 0.0
 
     merged = {k: v for k, v in combos[0].items()
-              if k not in ("shard", "_raw", "per_instance_best", "bestofn")}
+              if k not in ("shard", "_raw", "per_instance_best", "bestofn", "wave")}
     merged.update({
         "num_test": n_eval, "n_eval": n_eval, "total_samples": ts,
         "truncation_rate": round(rate("total_truncated"), 4),
@@ -76,6 +102,12 @@ def merge_combo(combos):
             merged["bestofn"] = _merge_bestofn(combos)
     except Exception as e:
         merged["bestofn_merge_error"] = repr(e)
+    # wave 指标精确合并 (之前直接抄第一个分片的, 分片跑 --wave 时合并结果只含 1/N 实例 → bug)
+    try:
+        if all("wave" in c for c in combos):
+            merged["wave"] = _merge_wave(combos)
+    except Exception as e:
+        merged["wave_merge_error"] = repr(e)
     return merged
 
 
