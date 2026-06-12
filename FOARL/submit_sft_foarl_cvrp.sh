@@ -36,9 +36,14 @@ SANITY="${SANITY:-0}"   # 1 = 只取 256 条做 sanity
 
 # ⚠️ 先 conda activate 再 set -u: conda activate.d/~cuda-nvcc_activate.sh 引用未设的
 #    NVCC_PREPEND_FLAGS, nounset 下会 "unbound variable" 挂掉 (见 vLLM踩坑/主机配置库)。
-source /homes/zhuoyi/.bashrc
-eval "$(conda shell.bash hook)"
-conda activate unicop
+# ⚠️ 不能靠 source ~/.bashrc 激活: 非交互 sbatch shell 下 .bashrc 会提前 return,
+#    conda hook 不生效 → conda/accelerate 全 command not found。直接 source miniforge 的
+#    conda.sh (zhuoyi 是 miniforge3, 见 address.md/paths.sh)。
+__CONDA_SH="/homes/zhuoyi/miniforge3/etc/profile.d/conda.sh"
+[ -f "$__CONDA_SH" ] || { echo "[FATAL] 找不到 conda.sh: $__CONDA_SH (确认 zhuoyi conda 安装路径)"; exit 1; }
+source "$__CONDA_SH"
+conda activate /homes/zhuoyi/miniforge3/envs/unicop
+command -v accelerate >/dev/null 2>&1 || { echo "[FATAL] accelerate 不在 PATH, unicop 环境未激活成功"; exit 1; }
 cd /homes/zhuoyi/zijianliu/UniCOP/FOARL
 set -uo pipefail
 
