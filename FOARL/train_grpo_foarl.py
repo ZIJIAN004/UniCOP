@@ -184,8 +184,9 @@ def build_reward_func(reward_kwargs, log_every=50):
                 vals = [c[k] for c in comps if c.get(k) is not None]
                 return sum(vals) / len(vals) if vals else float("nan")
             print(f"  [reward#{state['calls']}] R̄={sum(rewards)/len(rewards):.3f} "
-                  f"ζ={_mean('parse'):.2f} cov={_mean('coverage'):.2f} cap={_mean('capacity'):.2f} "
-                  f"feas={_mean('feasible'):.2f} R_o={_mean('R_o'):.3f} gap={_mean('gap'):.3f}")
+                  f"ζ={_mean('parse'):.2f} depot={_mean('depot'):.2f} cov={_mean('coverage'):.2f} "
+                  f"cap={_mean('capacity'):.2f} feas={_mean('feasible'):.2f} "
+                  f"R_o={_mean('R_o'):.3f} gap={_mean('gap'):.3f}")
         return rewards
 
     reward_func.__name__ = "foarl_reward"
@@ -202,26 +203,27 @@ def main():
     ap.add_argument("--lora_rank", type=int, default=64)
     ap.add_argument("--lora_alpha", type=int, default=128)
     # ── GRPO 超参 ────────────────────────────────────────────────────────
-    ap.add_argument("--num_generations", type=int, default=8, help="组大小 S (论文 BoN N=8)")
-    ap.add_argument("--lr", type=float, default=1e-6, help="RL 学习率 (远小于 SFT)")
-    ap.add_argument("--epochs", type=int, default=1)
+    # ── GRPO 超参: 默认对齐官方 rl_train.py (Summer142857/LLMCoSolver), 仅 lr 按用户改 2e-5 ──
+    ap.add_argument("--num_generations", type=int, default=8, help="组大小 S (官方默认 8)")
+    ap.add_argument("--lr", type=float, default=2e-5, help="RL 学习率 (用户指定 2e-5; 官方默认是 1e-6)")
+    ap.add_argument("--epochs", type=int, default=1, help="官方 num_train_epochs=1")
     ap.add_argument("--max_steps", type=int, default=-1, help=">0 时按步数停, 覆盖 epochs")
-    ap.add_argument("--batch_size", type=int, default=8, help="per-device prompt 数; 须使全局批被 S 整除")
-    ap.add_argument("--grad_accum", type=int, default=4)
-    ap.add_argument("--warmup_ratio", type=float, default=0.03)
-    ap.add_argument("--beta", type=float, default=0.04, help="KL 系数 β (论文目标里的 β·D_KL)")
-    ap.add_argument("--epsilon", type=float, default=0.2, help="PPO/GRPO 裁剪下界 ε")
-    ap.add_argument("--epsilon_high", type=float, default=0.28, help="裁剪上界 (DAPO 非对称, =ε 则对称)")
-    ap.add_argument("--temperature", type=float, default=1.0)
-    ap.add_argument("--top_p", type=float, default=1.0)
-    ap.add_argument("--max_prompt_length", type=int, default=1536)
-    ap.add_argument("--max_completion_length", type=int, default=1024)
-    # ── FOARL 奖励权重 (默认沿用本团队既有 FOARL 配置, 可对齐论文附录 A) ──
-    ap.add_argument("--alpha", type=float, default=0.5, help="最优性奖励权重 α")
-    ap.add_argument("--omega_parse", type=float, default=0.2)
-    ap.add_argument("--omega_coverage", type=float, default=0.3)
-    ap.add_argument("--omega_capacity", type=float, default=0.3)
-    ap.add_argument("--omega_format", type=float, default=0.2, help="本数据无 'Route N:' 编号, 默认并入 parse")
+    ap.add_argument("--batch_size", type=int, default=8, help="per-device prompt 数 (官方 8); 须使全局批被 S 整除")
+    ap.add_argument("--grad_accum", type=int, default=8, help="官方 gradient_accumulation_steps=8")
+    ap.add_argument("--warmup_ratio", type=float, default=0.05, help="官方 warmup_ratio=0.05")
+    ap.add_argument("--beta", type=float, default=0.05, help="KL 系数 β (官方 0.05)")
+    ap.add_argument("--epsilon", type=float, default=0.1, help="GRPO 裁剪下界 ε (官方 0.1)")
+    ap.add_argument("--epsilon_high", type=float, default=0.28, help="裁剪上界 (官方 0.28, DAPO 非对称)")
+    ap.add_argument("--temperature", type=float, default=1.0, help="rollout 温度 (官方 RL 未设→TRL 默认; BoN 推理才用 0.7)")
+    ap.add_argument("--top_p", type=float, default=1.0, help="rollout top_p (官方 RL 未设)")
+    ap.add_argument("--max_prompt_length", type=int, default=20000, help="官方 20000 (CVRP20 实际 prompt 很短, 仅作上限)")
+    ap.add_argument("--max_completion_length", type=int, default=1000, help="官方 1000")
+    # ── FOARL 奖励权重: 对齐官方 rewards.py 的 CVRP weights (论文附录 A.3.3 同值) ──
+    ap.add_argument("--alpha", type=float, default=1.0, help="最优性奖励权重 α (官方 1/(1+gap) → α=1.0)")
+    ap.add_argument("--omega_parse", type=float, default=0.2, help="官方 parse=0.2")
+    ap.add_argument("--omega_depot", type=float, default=0.1, help="官方 depot_constraint=0.1")
+    ap.add_argument("--omega_coverage", type=float, default=0.1, help="官方 coverage=0.1")
+    ap.add_argument("--omega_capacity", type=float, default=0.6, help="官方 capacity=0.6")
     # 生成后端
     ap.add_argument("--use_vllm", action="store_true", help="走 TRL vLLM server 模式 (需另起 trl vllm-serve)")
     ap.add_argument("--vllm_server_host", default="0.0.0.0")
@@ -244,8 +246,8 @@ def main():
     print(f"  数据: {args.data}")
     print(f"  GRPO: S={args.num_generations} lr={args.lr} β={args.beta} ε=[{args.epsilon},{args.epsilon_high}] "
           f"ZeRO={args.zero_stage} vLLM={args.use_vllm}")
-    print(f"  奖励: α={args.alpha} ω(parse={args.omega_parse},cov={args.omega_coverage},"
-          f"cap={args.omega_capacity},fmt={args.omega_format})")
+    print(f"  奖励: α={args.alpha} ω(parse={args.omega_parse},depot={args.omega_depot},"
+          f"cov={args.omega_coverage},cap={args.omega_capacity})")
     print(f"  输出: {args.output_dir}")
     print("=" * 60)
 
@@ -323,15 +325,16 @@ def main():
         deepspeed=make_deepspeed_config(args.zero_stage),
         gradient_checkpointing=args.gradient_checkpointing,
         gradient_checkpointing_kwargs={"use_reentrant": args.zero_stage == 3},
-        lr_scheduler_type="cosine", weight_decay=0.0,
+        # 官方: lr_scheduler='linear', weight_decay=0.02 (官方 optim='adamw_8bit' 是 Unsloth 专用,
+        # 本栈走 DeepSpeed ZeRO-3, 优化器由 ds_config 的 AdamW 接管, weight_decay 经 'auto' 透传)
+        lr_scheduler_type="linear", weight_decay=0.02,
         use_vllm=args.use_vllm,
         vllm_server_host=args.vllm_server_host,
         vllm_server_port=args.vllm_server_port,
     )
 
-    reward_kwargs = dict(alpha=args.alpha, omega_parse=args.omega_parse,
-                         omega_coverage=args.omega_coverage, omega_capacity=args.omega_capacity,
-                         omega_format=args.omega_format)
+    reward_kwargs = dict(alpha=args.alpha, omega_parse=args.omega_parse, omega_depot=args.omega_depot,
+                         omega_coverage=args.omega_coverage, omega_capacity=args.omega_capacity)
     reward_func = build_reward_func(reward_kwargs, log_every=args.logging_steps)
 
     # ── reward 自检 (rank0): 用首条样本的金标准答案喂 reward, 应拿满 R_f 且 gap≈0 ──

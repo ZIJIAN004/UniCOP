@@ -35,22 +35,22 @@ MODEL="${MODEL:-}"
 NUM_GPUS="${NUM_GPUS:-4}"
 DATA="${DATA:-data/foarl_cvrp20.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-./output_grpo_foarl_cvrp20}"
-# GRPO 超参 (可 export 覆盖)
-S="${S:-8}"                       # 组大小 num_generations
-LR="${LR:-1e-6}"
-BETA="${BETA:-0.04}"              # KL 系数
-EPS="${EPS:-0.2}"
-EPS_HIGH="${EPS_HIGH:-0.28}"
-PDTB="${PDTB:-8}"                 # per-device prompt 数; 全局批=PDTB×NUM_GPUS×GA 须被 S 整除
-GA="${GA:-4}"
-EPOCHS="${EPOCHS:-1}"
+# GRPO 超参 (默认对齐官方 rl_train.py: Summer142857/LLMCoSolver, 仅 LR 按用户改 2e-5; 可 export 覆盖)
+S="${S:-8}"                       # 组大小 num_generations (官方 8)
+LR="${LR:-2e-5}"                  # 用户指定 (官方默认 1e-6)
+BETA="${BETA:-0.05}"              # KL 系数 (官方 0.05)
+EPS="${EPS:-0.1}"                 # 裁剪下界 (官方 0.1)
+EPS_HIGH="${EPS_HIGH:-0.28}"      # 裁剪上界 (官方 0.28)
+PDTB="${PDTB:-8}"                 # per-device prompt 数 (官方 8); 全局批=PDTB×NUM_GPUS×GA 须被 S 整除
+GA="${GA:-8}"                     # 梯度累积 (官方 8)
+EPOCHS="${EPOCHS:-1}"             # 官方 1
 MAX_STEPS="${MAX_STEPS:--1}"
-# FOARL 奖励权重 (默认沿用既有配置, 对齐论文附录 A 时改这里)
-ALPHA="${ALPHA:-0.5}"
-W_PARSE="${W_PARSE:-0.2}"
-W_COV="${W_COV:-0.3}"
-W_CAP="${W_CAP:-0.3}"
-W_FMT="${W_FMT:-0.2}"
+# FOARL 奖励权重 (官方 rewards.py CVRP weights, 论文附录 A.3.3 同值)
+ALPHA="${ALPHA:-1.0}"             # 最优性权重 (官方 1/(1+gap) → α=1.0)
+W_PARSE="${W_PARSE:-0.2}"         # 官方 parse=0.2
+W_DEPOT="${W_DEPOT:-0.1}"         # 官方 depot=0.1
+W_COV="${W_COV:-0.1}"             # 官方 coverage=0.1
+W_CAP="${W_CAP:-0.6}"             # 官方 capacity=0.6
 SANITY="${SANITY:-0}"             # 1 = 只取 64 条做 sanity
 
 # ⚠️ 先 conda activate 再 set -u (cuda-nvcc_activate.sh 引用未设的 NVCC_PREPEND_FLAGS,
@@ -73,7 +73,7 @@ export NCCL_SHM_DISABLE=1
 echo "############## FOARL CVRP GRPO RL ##############  $(date '+%F %T')"
 echo "  MODEL=$MODEL | NUM_GPUS=$NUM_GPUS | DATA=$DATA | OUT=$OUTPUT_DIR"
 echo "  GRPO: S=$S LR=$LR BETA=$BETA EPS=[$EPS,$EPS_HIGH] PDTB=$PDTB GA=$GA EPOCHS=$EPOCHS"
-echo "  奖励: ALPHA=$ALPHA W(parse=$W_PARSE cov=$W_COV cap=$W_CAP fmt=$W_FMT) | SANITY=$SANITY"
+echo "  奖励: ALPHA=$ALPHA W(parse=$W_PARSE depot=$W_DEPOT cov=$W_COV cap=$W_CAP) | SANITY=$SANITY"
 
 if [ -z "$MODEL" ]; then
     echo "[FATAL] MODEL 为空。请 export MODEL=<merged SFT 模型目录> 后重投。"
@@ -118,10 +118,10 @@ accelerate launch --num_processes "$NUM_GPUS" --main_process_port 29611 \
     --lr "$LR" --beta "$BETA" --epsilon "$EPS" --epsilon_high "$EPS_HIGH" \
     --batch_size "$PDTB" --grad_accum "$GA" \
     --epochs "$EPOCHS" --max_steps "$MAX_STEPS" \
-    --max_prompt_length 1536 --max_completion_length 1024 \
+    --max_prompt_length 20000 --max_completion_length 1000 \
     --alpha "$ALPHA" \
-    --omega_parse "$W_PARSE" --omega_coverage "$W_COV" \
-    --omega_capacity "$W_CAP" --omega_format "$W_FMT" \
+    --omega_parse "$W_PARSE" --omega_depot "$W_DEPOT" \
+    --omega_coverage "$W_COV" --omega_capacity "$W_CAP" \
     --zero_stage 3 --gradient_checkpointing \
     --save_steps 200 --logging_steps "$LOG_STEPS" \
     $RESUME_FLAG \
