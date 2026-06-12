@@ -1,20 +1,27 @@
 #!/bin/bash
-# submit_grpo_foarl_cvrp.sh — FOARL CVRP Stage-2 GRPO RL (zhuoyi SLURM)
+# submit_grpo_foarl_cvrp.sh — FOARL CVRP Stage-2 GRPO RL (zhuoyi SLURM, 1 vLLM + 6 训练)
 #   基座: Stage-1 SFT 的 **merged** 模型 (LoRA 须先 merge 回基座)
 #   奖励: foarl_reward_cvrp 规则奖励 R^P = R_f(可行性) + R_o(最优性), 无 reward model/PRM
-#   栈:   accelerate ZeRO-3 多卡 + TRL GRPOTrainer + LoRA (与 SFT 同规格)
+#   栈:   trl vllm-serve(1卡生成) + accelerate ZeRO-3(6卡训练) + TRL GRPOTrainer + LoRA
 #
-#   ⚠️ 必填: MODEL = merged SFT 模型目录 (脚本里留空, 提交前 export 或改下面默认值)。
-#        LoRA 合并示例 (SFT 产物是 adapter):
-#          python -c "from peft import AutoPeftModelForCausalLM; \
-#            m=AutoPeftModelForCausalLM.from_pretrained('<SFT_OUT>/final_model'); \
-#            m.merge_and_unload().save_pretrained('<MERGED_DIR>')"
-#        再把 tokenizer 一并拷到 <MERGED_DIR>。
-#   sanity 先跑: SANITY=1 MODEL=<merged> sbatch submit_grpo_foarl_cvrp.sh  (只取 64 条 + 看 reward 探针)
-#   提交:        MODEL=<merged> sbatch submit_grpo_foarl_cvrp.sh
+#   ★ 受控对比 (vs UniCOP-Reason-Mask): 三处与 Mask 逐一对齐, 只留"方法"这一变量:
+#     · 拓扑   = 1 vLLM + 6 训练 (qos=large, --gpus=7)
+#     · batch  = per_device 4 × 6 卡 × grad_accum 8 = 192 completions / 24 prompts 每次更新
+#                (与 Mask v6 完全相同; num_generations=8 一致)
+#     · 数据   = Mask 同一批 1000 条实例 (seed=42, build_foarl_cvrp_data_mask1000.py 产出)
+#     · 采样   = Qwen3-Instruct-2507 官方 temperature=0.7 top_p=0.8 top_k=20
+#     方法差异(各自固有): FOARL=Instruct 非思维 + 规则奖励; Mask=Thinking + POMO-PRM。
+#
+#   ⚠️ 必填: MODEL = merged SFT 模型目录, 提交前 export MODEL=<路径>。
+#   ⚠️ 数据须先预生成 (PyVRP 求参考解, 在 login 节点跑即可, 纯 CPU, 别占 GPU 作业):
+#        python build_foarl_cvrp_data_mask1000.py \
+#          --mask_dir ../UniCOP-Reason-Mask --distill_dir ../UniCOP-Distill \
+#          --out data/foarl_cvrp20_mask1000.jsonl --num 1000 --seed 42 --n 20 --timeout 5
+#   sanity: SANITY=1 MODEL=<merged> sbatch submit_grpo_foarl_cvrp.sh  (只取 64 条 + 看 reward 探针)
+#   提交:   MODEL=<merged> sbatch submit_grpo_foarl_cvrp.sh
 
-#SBATCH --qos=normal
-#SBATCH --gpus=4
+#SBATCH --qos=large
+#SBATCH --gpus=7
 #SBATCH --job-name=zijia_foarl_grpo_cvrp
 #SBATCH --comment="zijianliu, FOARL CVRP stage2 GRPO RL, do not cancel"
 #SBATCH --exclude=canele1
@@ -32,19 +39,32 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 # ── 可覆盖参数 ─────────────────────────────────────────────────────────
 # ⚠️ MODEL 留空: 必须指向 Stage-1 SFT 的 merged 模型目录, 提交前 export MODEL=<路径>
 MODEL="${MODEL:-}"
-NUM_GPUS="${NUM_GPUS:-4}"
-DATA="${DATA:-data/foarl_cvrp20.jsonl}"
+DATA="${DATA:-data/foarl_cvrp20_mask1000.jsonl}"   # Mask 同 1000 实例
 OUTPUT_DIR="${OUTPUT_DIR:-./output_grpo_foarl_cvrp20}"
-# GRPO 超参 (默认对齐官方 rl_train.py: Summer142857/LLMCoSolver, 仅 LR 按用户改 2e-5; 可 export 覆盖)
-S="${S:-8}"                       # 组大小 num_generations (官方 8)
+
+# ── GPU 拓扑 (sbatch --gpus=7 下 SLURM 暴露逻辑卡 0..6) ──────────────────
+NUM_TRAIN_GPUS="${NUM_TRAIN_GPUS:-6}"          # 训练进程数 (= Mask 训练卡数)
+TRAIN_GPUS_CSV="${TRAIN_GPUS_CSV:-0,1,2,3,4,5}"# 前 6 张做训练
+VLLM_GPU_IDX="${VLLM_GPU_IDX:-6}"              # 第 7 张做 vLLM 生成
+VLLM_PORT="${VLLM_PORT:-8005}"                 # 错开 Mask 的 8004
+VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.85}"
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-4096}"  # ≥ prompt(~<1k) + completion(1000) + overhead
+VLLM_STARTUP_TIMEOUT="${VLLM_STARTUP_TIMEOUT:-360}"
+
+# ── GRPO 超参 (对齐 Mask: 4×6×8 = 192 completions / 24 prompts 每次更新) ──
+S="${S:-8}"                       # num_generations (官方=Mask=8)
 LR="${LR:-2e-5}"                  # 用户指定 (官方默认 1e-6)
 BETA="${BETA:-0.05}"              # KL 系数 (官方 0.05)
 EPS="${EPS:-0.1}"                 # 裁剪下界 (官方 0.1)
 EPS_HIGH="${EPS_HIGH:-0.28}"      # 裁剪上界 (官方 0.28)
-PDTB="${PDTB:-8}"                 # per-device prompt 数 (官方 8); 全局批=PDTB×NUM_GPUS×GA 须被 S 整除
-GA="${GA:-8}"                     # 梯度累积 (官方 8)
-EPOCHS="${EPOCHS:-1}"             # 官方 1
+PDTB="${PDTB:-4}"                 # per-device completions (对齐 Mask=4); 全局批=PDTB×卡×GA 须被 S 整除
+GA="${GA:-8}"                     # 梯度累积 (官方=Mask=8)
+EPOCHS="${EPOCHS:-1}"             # 官方=Mask sweep=1
 MAX_STEPS="${MAX_STEPS:--1}"
+# 采样 (Qwen3-Instruct-2507 官方)
+TEMP="${TEMP:-0.7}"
+TOP_P="${TOP_P:-0.8}"
+TOP_K="${TOP_K:-20}"
 # FOARL 奖励权重 (官方 rewards.py CVRP weights, 论文附录 A.3.3 同值)
 ALPHA="${ALPHA:-1.0}"             # 最优性权重 (官方 1/(1+gap) → α=1.0)
 W_PARSE="${W_PARSE:-0.2}"         # 官方 parse=0.2
@@ -54,15 +74,15 @@ W_CAP="${W_CAP:-0.6}"             # 官方 capacity=0.6
 SANITY="${SANITY:-0}"             # 1 = 只取 64 条做 sanity
 
 # ⚠️ 先 conda activate 再 set -u (cuda-nvcc_activate.sh 引用未设的 NVCC_PREPEND_FLAGS,
-#    nounset 下会 unbound variable 挂掉, 见主机配置库/vLLM踩坑)
-# ⚠️ 不能靠 source ~/.bashrc 激活: 非交互 sbatch shell 下 .bashrc 会提前 return,
-#    conda hook 不生效 → conda/accelerate 全 command not found。直接 source miniforge 的
-#    conda.sh (zhuoyi 是 miniforge3, 见 address.md/paths.sh)。
+#    nounset 下会 unbound variable 挂掉)。不能靠 source ~/.bashrc 激活: 非交互 sbatch shell
+#    下 .bashrc 提前 return, conda hook 不生效 → conda/accelerate/trl 全 command not found。
+#    直接 source miniforge 的 conda.sh (zhuoyi 是 miniforge3, 见 address.md/paths.sh)。
 __CONDA_SH="/homes/zhuoyi/miniforge3/etc/profile.d/conda.sh"
-[ -f "$__CONDA_SH" ] || { echo "[FATAL] 找不到 conda.sh: $__CONDA_SH (确认 zhuoyi conda 安装路径)"; exit 1; }
+[ -f "$__CONDA_SH" ] || { echo "[FATAL] 找不到 conda.sh: $__CONDA_SH"; exit 1; }
 source "$__CONDA_SH"
 conda activate /homes/zhuoyi/miniforge3/envs/unicop
-command -v accelerate >/dev/null 2>&1 || { echo "[FATAL] accelerate 不在 PATH, unicop 环境未激活成功"; exit 1; }
+command -v accelerate >/dev/null 2>&1 || { echo "[FATAL] accelerate 不在 PATH, unicop 未激活"; exit 1; }
+command -v trl >/dev/null 2>&1 || { echo "[FATAL] trl CLI 不在 PATH (vllm-serve 需要); 确认 trl 已装"; exit 1; }
 cd /homes/zhuoyi/zijianliu/UniCOP/FOARL
 set -uo pipefail
 
@@ -70,24 +90,35 @@ set -uo pipefail
 export NCCL_P2P_DISABLE=1
 export NCCL_SHM_DISABLE=1
 
-echo "############## FOARL CVRP GRPO RL ##############  $(date '+%F %T')"
-echo "  MODEL=$MODEL | NUM_GPUS=$NUM_GPUS | DATA=$DATA | OUT=$OUTPUT_DIR"
+echo "############## FOARL CVRP GRPO RL (1 vLLM + ${NUM_TRAIN_GPUS} 训练) ##############  $(date '+%F %T')"
+echo "  MODEL=$MODEL"
+echo "  DATA=$DATA | OUT=$OUTPUT_DIR"
+echo "  拓扑: vLLM=GPU $VLLM_GPU_IDX(port $VLLM_PORT) | 训练=GPU $TRAIN_GPUS_CSV ($NUM_TRAIN_GPUS 进程)"
 echo "  GRPO: S=$S LR=$LR BETA=$BETA EPS=[$EPS,$EPS_HIGH] PDTB=$PDTB GA=$GA EPOCHS=$EPOCHS"
-echo "  奖励: ALPHA=$ALPHA W(parse=$W_PARSE depot=$W_DEPOT cov=$W_COV cap=$W_CAP) | SANITY=$SANITY"
+echo "  采样: T=$TEMP top_p=$TOP_P top_k=$TOP_K | 奖励: ALPHA=$ALPHA W(p=$W_PARSE d=$W_DEPOT cov=$W_COV cap=$W_CAP) | SANITY=$SANITY"
 
+# ── 前置检查 ──────────────────────────────────────────────────────────
 if [ -z "$MODEL" ]; then
-    echo "[FATAL] MODEL 为空。请 export MODEL=<merged SFT 模型目录> 后重投。"
-    echo "        (Stage-1 SFT 产物是 LoRA adapter, 须先 merge_and_unload 再喂 RL)"
+    echo "[FATAL] MODEL 为空。export MODEL=<merged SFT 模型目录> 后重投 (SFT 产物是 adapter, 须先 merge)。"
     exit 1
 fi
-if [ ! -d "$MODEL" ]; then
-    echo "[FATAL] 基座不存在: $MODEL"
-    exit 1
-fi
+[ -d "$MODEL" ] || { echo "[FATAL] 基座不存在: $MODEL"; exit 1; }
 if [ ! -f "$DATA" ]; then
-    echo "[FATAL] 数据不存在: $DATA (先跑 build_foarl_cvrp_data.py 生成, 须含 instance 字段)"
+    echo "[FATAL] 数据不存在: $DATA"
+    echo "  先在 login 节点(纯 CPU, 别占 GPU)预生成 Mask 同 1000 实例数据:"
+    echo "    python build_foarl_cvrp_data_mask1000.py \\"
+    echo "      --mask_dir ../UniCOP-Reason-Mask --distill_dir ../UniCOP-Distill \\"
+    echo "      --out $DATA --num 1000 --seed 42 --n 20 --timeout 5"
     exit 1
 fi
+
+# 全局批可整除性自检 (TRL 硬约束: 全局生成批 % num_generations == 0)
+GLOBAL_BATCH=$(( PDTB * NUM_TRAIN_GPUS * GA ))
+if [ $(( GLOBAL_BATCH % S )) -ne 0 ]; then
+    echo "[FATAL] 全局批 $GLOBAL_BATCH (=PDTB$PDTB×卡$NUM_TRAIN_GPUS×GA$GA) 不能被 S=$S 整除, 调参后重投。"
+    exit 1
+fi
+echo "[批检查] 全局生成批=$GLOBAL_BATCH completions = $(( GLOBAL_BATCH / S )) prompts/更新, S=$S → OK"
 
 SANITY_FLAG=""
 LOG_STEPS=5
@@ -100,15 +131,48 @@ if [ "$SANITY" = "1" ]; then
     echo "[sanity] 输出改到独立目录: $OUTPUT_DIR (不续 ckpt)"
 fi
 
-# 全局批可整除性自检 (train_grpo_foarl.py 内部也会 assert, 这里提前拦截省排队时间)
-GLOBAL_BATCH=$(( PDTB * NUM_GPUS * GA ))
-if [ $(( GLOBAL_BATCH % S )) -ne 0 ]; then
-    echo "[FATAL] 全局批 $GLOBAL_BATCH (=PDTB$PDTB×GPU$NUM_GPUS×GA$GA) 不能被 S=$S 整除, 调参后重投。"
-    exit 1
-fi
-echo "[批检查] 全局生成批=$GLOBAL_BATCH, S=$S → OK"
+# ── vLLM server 生命周期 ───────────────────────────────────────────────
+VLLM_LOG="/homes/zhuoyi/zijianliu/UniCOP/FOARL/foarl_vllm_${SLURM_JOB_ID:-manual}.log"
+VLLM_PID=""
 
-accelerate launch --num_processes "$NUM_GPUS" --main_process_port 29611 \
+stop_vllm() {
+    if [ -n "${VLLM_PID:-}" ] && kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "[$(date '+%H:%M:%S')] 关闭 vLLM (pid=$VLLM_PID)"
+        kill "$VLLM_PID" 2>/dev/null || true
+        wait "$VLLM_PID" 2>/dev/null || true
+    fi
+    VLLM_PID=""
+}
+trap 'stop_vllm' EXIT INT TERM
+
+echo "[$(date '+%H:%M:%S')] 启动 vLLM server | GPU=$VLLM_GPU_IDX port=$VLLM_PORT (log: $VLLM_LOG)"
+CUDA_VISIBLE_DEVICES="$VLLM_GPU_IDX" \
+    trl vllm-serve --model "$MODEL" \
+        --port "$VLLM_PORT" \
+        --gpu_memory_utilization "$VLLM_GPU_MEM_UTIL" \
+        --max_model_len "$VLLM_MAX_MODEL_LEN" \
+        --dtype bfloat16 \
+        > "$VLLM_LOG" 2>&1 &
+VLLM_PID=$!
+
+# 健康等待: 进程存活 + /health/ 就绪
+_waited=0
+while [ "$_waited" -lt "$VLLM_STARTUP_TIMEOUT" ]; do
+    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "[FATAL] vLLM 进程退出, 见 $VLLM_LOG"; tail -n 60 "$VLLM_LOG" || true; exit 1
+    fi
+    if curl -s "http://localhost:${VLLM_PORT}/health/" >/dev/null 2>&1; then
+        echo "[$(date '+%H:%M:%S')] ✓ vLLM 就绪 (用时 ${_waited}s)"; break
+    fi
+    sleep 5; _waited=$(( _waited + 5 ))
+done
+if [ "$_waited" -ge "$VLLM_STARTUP_TIMEOUT" ]; then
+    echo "[FATAL] vLLM 启动超时 ${VLLM_STARTUP_TIMEOUT}s, 见 $VLLM_LOG"; tail -n 60 "$VLLM_LOG" || true; exit 1
+fi
+
+# ── 训练 (6 卡, 连 vLLM server 生成) ────────────────────────────────────
+CUDA_VISIBLE_DEVICES="$TRAIN_GPUS_CSV" \
+accelerate launch --num_processes "$NUM_TRAIN_GPUS" --main_process_port 29611 \
     train_grpo_foarl.py \
     --model "$MODEL" \
     --data "$DATA" \
@@ -119,19 +183,23 @@ accelerate launch --num_processes "$NUM_GPUS" --main_process_port 29611 \
     --batch_size "$PDTB" --grad_accum "$GA" \
     --epochs "$EPOCHS" --max_steps "$MAX_STEPS" \
     --max_prompt_length 20000 --max_completion_length 1000 \
+    --temperature "$TEMP" --top_p "$TOP_P" --top_k "$TOP_K" \
     --alpha "$ALPHA" \
     --omega_parse "$W_PARSE" --omega_depot "$W_DEPOT" \
     --omega_coverage "$W_COV" --omega_capacity "$W_CAP" \
+    --use_vllm --vllm_server_host localhost --vllm_server_port "$VLLM_PORT" \
     --zero_stage 3 --gradient_checkpointing \
     --save_steps 200 --logging_steps "$LOG_STEPS" \
     $RESUME_FLAG \
     $SANITY_FLAG
 EC=$?
 
+stop_vllm
+
 echo "============================================================"
 if [ "$EC" -eq 0 ]; then
     echo "  ✅ FOARL GRPO 完成  $(date '+%F %T')  →  $OUTPUT_DIR/final_model"
-    echo "  下一步: merge LoRA → eval (可行率/gap) 对比 SFT-only baseline"
+    echo "  下一步: merge LoRA → eval (可行率/gap) 对比 Mask"
 else
     echo "  ⚠️ GRPO 非零退出 (exit=$EC)"
 fi

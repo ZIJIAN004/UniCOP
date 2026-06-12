@@ -196,26 +196,29 @@ def build_reward_func(reward_kwargs, log_every=50):
 def main():
     ap = argparse.ArgumentParser(description="FOARL CVRP Stage-2 GRPO RL (规则奖励)")
     ap.add_argument("--model", required=True, help="merged SFT 模型路径 (Stage-1 产物, LoRA 须先 merge)")
-    ap.add_argument("--data", nargs="+", default=["data/foarl_cvrp20.jsonl"])
+    ap.add_argument("--data", nargs="+", default=["data/foarl_cvrp20_mask1000.jsonl"],
+                    help="默认 = Mask 同 1000 实例 (build_foarl_cvrp_data_mask1000.py 产出)")
     ap.add_argument("--output_dir", default="./output_grpo_foarl_cvrp20")
     # LoRA (RL 也用 LoRA, 与 SFT 同规格)
     ap.add_argument("--no_lora", action="store_true")
     ap.add_argument("--lora_rank", type=int, default=64)
     ap.add_argument("--lora_alpha", type=int, default=128)
     # ── GRPO 超参 ────────────────────────────────────────────────────────
-    # ── GRPO 超参: 默认对齐官方 rl_train.py (Summer142857/LLMCoSolver), 仅 lr 按用户改 2e-5 ──
-    ap.add_argument("--num_generations", type=int, default=8, help="组大小 S (官方默认 8)")
+    # ── GRPO 超参: 默认对齐官方 rl_train.py; batch/卡数/采样改为对齐 Mask 做受控对比, lr 用户指定 2e-5 ──
+    # 受控对比关键: 与 Mask 每次 optimizer 更新一致 = batch4 × 6卡 × ga8 = 192 completions / 24 prompts。
+    ap.add_argument("--num_generations", type=int, default=8, help="组大小 S (官方=Mask=8)")
     ap.add_argument("--lr", type=float, default=2e-5, help="RL 学习率 (用户指定 2e-5; 官方默认是 1e-6)")
-    ap.add_argument("--epochs", type=int, default=1, help="官方 num_train_epochs=1")
+    ap.add_argument("--epochs", type=int, default=1, help="官方 num_train_epochs=1 (= Mask sweep EPOCHS=1)")
     ap.add_argument("--max_steps", type=int, default=-1, help=">0 时按步数停, 覆盖 epochs")
-    ap.add_argument("--batch_size", type=int, default=8, help="per-device prompt 数 (官方 8); 须使全局批被 S 整除")
-    ap.add_argument("--grad_accum", type=int, default=8, help="官方 gradient_accumulation_steps=8")
+    ap.add_argument("--batch_size", type=int, default=4, help="per-device completions 数 (对齐 Mask=4, 官方 FOARL=8); 全局批 batch×卡×ga 须被 S 整除")
+    ap.add_argument("--grad_accum", type=int, default=8, help="gradient_accumulation_steps=8 (官方=Mask=8)")
     ap.add_argument("--warmup_ratio", type=float, default=0.05, help="官方 warmup_ratio=0.05")
     ap.add_argument("--beta", type=float, default=0.05, help="KL 系数 β (官方 0.05)")
     ap.add_argument("--epsilon", type=float, default=0.1, help="GRPO 裁剪下界 ε (官方 0.1)")
     ap.add_argument("--epsilon_high", type=float, default=0.28, help="裁剪上界 (官方 0.28, DAPO 非对称)")
-    ap.add_argument("--temperature", type=float, default=1.0, help="rollout 温度 (官方 RL 未设→TRL 默认; BoN 推理才用 0.7)")
-    ap.add_argument("--top_p", type=float, default=1.0, help="rollout top_p (官方 RL 未设)")
+    ap.add_argument("--temperature", type=float, default=0.7, help="rollout 温度 (Qwen3-Instruct-2507 官方 0.7)")
+    ap.add_argument("--top_p", type=float, default=0.8, help="rollout top_p (Qwen3-Instruct-2507 官方 0.8)")
+    ap.add_argument("--top_k", type=int, default=20, help="rollout top_k (Qwen3-Instruct-2507 官方 20)")
     ap.add_argument("--max_prompt_length", type=int, default=20000, help="官方 20000 (CVRP20 实际 prompt 很短, 仅作上限)")
     ap.add_argument("--max_completion_length", type=int, default=1000, help="官方 1000")
     # ── FOARL 奖励权重: 对齐官方 rewards.py 的 CVRP weights (论文附录 A.3.3 同值) ──
@@ -225,7 +228,8 @@ def main():
     ap.add_argument("--omega_coverage", type=float, default=0.1, help="官方 coverage=0.1")
     ap.add_argument("--omega_capacity", type=float, default=0.6, help="官方 capacity=0.6")
     # 生成后端
-    ap.add_argument("--use_vllm", action="store_true", help="走 TRL vLLM server 模式 (需另起 trl vllm-serve)")
+    ap.add_argument("--use_vllm", action=argparse.BooleanOptionalAction, default=True,
+                    help="TRL vLLM server 模式 (默认开, 对齐 Mask 用 vLLM 生成; --no-use_vllm 退回 HF 原生)")
     ap.add_argument("--vllm_server_host", default="0.0.0.0")
     ap.add_argument("--vllm_server_port", type=int, default=8000)
     # 多卡 / 通用
@@ -316,6 +320,7 @@ def main():
         epsilon_high=args.epsilon_high,
         temperature=args.temperature,
         top_p=args.top_p,
+        top_k=args.top_k,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps, save_total_limit=3,
         save_strategy="steps", eval_strategy="no",
