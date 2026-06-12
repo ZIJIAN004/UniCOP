@@ -80,7 +80,9 @@ def main():
     mask_dir = os.path.abspath(args.mask_dir)
     distill_dir = os.path.abspath(args.distill_dir)
     self_dir = os.path.dirname(os.path.abspath(__file__))
-    for p in (mask_dir, distill_dir, self_dir):
+    # 逆序 insert(0) → 最终前缀顺序 = [mask, distill, self]: 让 `import config`(若 problems
+    #   触发) 命中 Mask 的 config 而非 Distill 的同名文件; lkh_solver 仍能从 distill 找到。
+    for p in (self_dir, distill_dir, mask_dir):
         if p not in sys.path:
             sys.path.insert(0, p)
 
