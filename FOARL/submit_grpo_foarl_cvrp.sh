@@ -3,6 +3,9 @@
 #   基座: Stage-1 SFT 的 **merged** 模型 (LoRA 须先 merge 回基座)
 #   奖励: foarl_reward_cvrp 规则奖励 R^P = R_f(可行性) + R_o(最优性), 无 reward model/PRM
 #   栈:   trl vllm-serve(1卡生成) + accelerate ZeRO-3(6卡训练) + TRL GRPOTrainer + LoRA
+#   流程: [1/3] 训练 → [2/3] merge RL LoRA(tools/merge_lora.py, 校验非空) → [3/3] BO1 eval
+#         (evaluate.py --prompt_mode foarl --model_type instruct, seed=9999 1000 实例,
+#          与 Mask RL_BO1 同一批可比)。DO_EVAL=0 只训练; SANITY=1 也跳过 merge+eval。
 #
 #   ★ 受控对比 (vs UniCOP-Reason-Mask): 三处与 Mask 逐一对齐, 只留"方法"这一变量:
 #     · 拓扑   = 1 vLLM + 6 训练 (qos=large, --gpus=7)
@@ -83,6 +86,13 @@ W_DEPOT="${W_DEPOT:-0.1}"         # 官方 depot=0.1
 W_COV="${W_COV:-0.1}"             # 官方 coverage=0.1
 W_CAP="${W_CAP:-0.6}"             # 官方 capacity=0.6
 SANITY="${SANITY:-0}"             # 1 = 只取 64 条做 sanity
+# ── 训练后 merge + BO1 eval (镜像 Mask submit_grpo_cvrp20_v6_eval.sh; 训练成功才跑) ──
+DO_EVAL="${DO_EVAL:-1}"           # 1 = 训练后自动 merge + BO1 eval; 0 = 只训练
+EVAL_GPU="${EVAL_GPU:-0,1,2,3}"   # 训练完腾空的卡给 eval 的 vLLM
+EVAL_TP="${EVAL_TP:-4}"           # Qwen3-4B kv_heads 可整除 4
+EVAL_NUM_TEST="${EVAL_NUM_TEST:-1000}"  # seed=9999 冻结测试集; 与 Mask RL_BO1 同一批 → 可比, 勿改小
+EVAL_MAXLEN="${EVAL_MAXLEN:-1024}"      # FOARL 答案短(~百 tok); 1024 足够 (instruct 默认仅 512)
+EVAL_GPU_MEM="${EVAL_GPU_MEM:-0.8}"
 
 # ⚠️ 先 conda activate 再 set -u (cuda-nvcc_activate.sh 引用未设的 NVCC_PREPEND_FLAGS,
 #    nounset 下会 unbound variable 挂掉)。不能靠 source ~/.bashrc 激活: 非交互 sbatch shell
@@ -215,15 +225,66 @@ accelerate launch --num_processes "$NUM_TRAIN_GPUS" --main_process_port 29611 \
     $RESUME_FLAG \
     $SANITY_FLAG
 EC=$?
+stop_vllm   # 训练用的 trl vllm-serve 关掉, 腾出 7 卡给 eval
 
-stop_vllm
+# ====================================================================
+if [ "$EC" -ne 0 ]; then
+    echo "[FATAL] 训练非零退出 (exit=$EC), 跳过 merge + eval"
+    exit "$EC"
+fi
+echo "############## [1/3] ✓ 训练完成: $OUTPUT_DIR/final_model ##############  $(date '+%F %T')"
+
+if [ "$DO_EVAL" != "1" ] || [ "$SANITY" = "1" ]; then
+    echo "(DO_EVAL=$DO_EVAL SANITY=$SANITY) 跳过 merge+eval, 结束。"
+    exit 0
+fi
+
+ADAPTER="$OUTPUT_DIR/final_model"
+MERGED="$OUTPUT_DIR/merged_model"
+if [ ! -f "$ADAPTER/adapter_config.json" ]; then
+    echo "[FATAL] 找不到 RL LoRA adapter: $ADAPTER/adapter_config.json"; exit 1
+fi
+
+# ── [2/3] merge RL LoRA → merged_model (团队 canonical 脚本, 含 vocab resize) ──
+echo "############## [2/3] merge RL LoRA → merged_model ##############  $(date '+%F %T')"
+if [ -d "$MERGED" ] && [ -f "$MERGED/config.json" ]; then
+    echo "[2/3] merged_model 已存在, 跳过: $MERGED"
+else
+    python ../tools/merge_lora.py --adapter "$ADAPTER" --output "$MERGED" --device cpu \
+        || { echo "[FATAL] merge 失败"; exit 1; }
+fi
+# 校验非空权重 (防 ZeRO-3+LoRA 空壳, 见 CLAUDE.md 代码自审)
+_W=$(find "$MERGED" -maxdepth 1 -name '*.safetensors' -size +0c 2>/dev/null | head -1)
+if [ ! -f "$MERGED/config.json" ] || [ -z "$_W" ]; then
+    echo "[FATAL] merged_model 校验失败 (缺 config.json 或权重为空): $MERGED"; ls -la "$MERGED" || true; exit 1
+fi
+echo "[2/3] ✓ merge 完成且权重非空: $MERGED"
+
+# ── [3/3] BO1 eval (FOARL 臂: prompt_mode=foarl, model_type=instruct, num_samples=1) ──
+#    复用 Mask 的 evaluate.py: seed=9999 的 1000 实例冻结测试集, 与 Mask RL_BO1 同一批 → 可比。
+#    evaluate.py 在 Mask 目录 (import 它的 config/problems), 故 cd 过去跑; 用绝对路径喂模型/存档。
+echo "############## [3/3] BO1 eval ##############  $(date '+%F %T')"
+MERGED_ABS="$(readlink -f "$MERGED")"
+EVAL_SAVE="$(readlink -f "$OUTPUT_DIR")/eval_bo1"
+mkdir -p "$EVAL_SAVE"
+export VLLM_WORKER_MULTIPROC_METHOD=spawn   # tp>1 vLLM worker 必须 spawn (evaluate.py 已 init CUDA)
+cd /homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask
+CUDA_VISIBLE_DEVICES="$EVAL_GPU" python evaluate.py \
+    --backend vllm --model_path "$MERGED_ABS" --tp_size "$EVAL_TP" \
+    --vllm_gpu_mem_util "$EVAL_GPU_MEM" \
+    --problem cvrp --problem_size 20 --num_test "$EVAL_NUM_TEST" \
+    --prompt_mode foarl --model_type instruct \
+    --num_samples 1 --max_completion_length "$EVAL_MAXLEN" \
+    --save_dir "$EVAL_SAVE" --run_tag foarl_RL_BO1
+EVAL_EC=$?
 
 echo "============================================================"
-if [ "$EC" -eq 0 ]; then
-    echo "  ✅ FOARL GRPO 完成  $(date '+%F %T')  →  $OUTPUT_DIR/final_model"
-    echo "  下一步: merge LoRA → eval (可行率/gap) 对比 Mask"
+if [ "$EVAL_EC" -eq 0 ]; then
+    echo "  ✅ FOARL train→merge→BO1 eval 全部完成  $(date '+%F %T')"
+    echo "  RL 模型:  $MERGED_ABS"
+    echo "  BO1 结果: $EVAL_SAVE/foarl_RL_BO1.json  (对比 Mask RL_BO1, 同 seed=9999 1000 实例)"
 else
-    echo "  ⚠️ GRPO 非零退出 (exit=$EC)"
+    echo "  ⚠️ eval 非零退出 (exit=$EVAL_EC), 见日志"
 fi
 echo "============================================================"
-exit "$EC"
+exit "$EVAL_EC"
