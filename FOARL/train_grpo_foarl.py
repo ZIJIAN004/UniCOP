@@ -219,7 +219,8 @@ def main():
     ap.add_argument("--temperature", type=float, default=0.7, help="rollout 温度 (Qwen3-Instruct-2507 官方 0.7)")
     ap.add_argument("--top_p", type=float, default=0.8, help="rollout top_p (Qwen3-Instruct-2507 官方 0.8)")
     ap.add_argument("--top_k", type=int, default=20, help="rollout top_k (Qwen3-Instruct-2507 官方 20)")
-    ap.add_argument("--max_prompt_length", type=int, default=20000, help="官方 20000 (CVRP20 实际 prompt 很短, 仅作上限)")
+    ap.add_argument("--max_prompt_length", type=int, default=1536,
+                    help="CVRP20 FOARL prompt ~<1k tok; vLLM max_model_len 须 ≥ 本值+max_completion (官方 20000 仅适配大实例, 这里收紧避免撑爆 vLLM)")
     ap.add_argument("--max_completion_length", type=int, default=1000, help="官方 1000")
     # ── FOARL 奖励权重: 对齐官方 rewards.py 的 CVRP weights (论文附录 A.3.3 同值) ──
     ap.add_argument("--alpha", type=float, default=1.0, help="最优性奖励权重 α (官方 1/(1+gap) → α=1.0)")

@@ -24,17 +24,20 @@
 #SBATCH --gpus=7
 #SBATCH --job-name=zijia_foarl_grpo_cvrp
 #SBATCH --comment="zijianliu, FOARL CVRP stage2 GRPO RL, do not cancel"
-#SBATCH --exclude=canele1
 #SBATCH --no-requeue
 #SBATCH --open-mode=append
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/FOARL/foarl_grpo_cvrp_%j.log
 #SBATCH --error=/homes/zhuoyi/zijianliu/UniCOP/FOARL/foarl_grpo_cvrp_%j.err
+#   注: 不加静态 --exclude, 改用 preflight_gpu.sh 动态排除被占节点 (与 Mask 同口径,
+#       见 reference_zhuoyi_flaky_node)。
 
 export HOME=/homes/zhuoyi
 export PIP_CACHE_DIR=/homes/zhuoyi/.pip_cache
 export TMPDIR=/homes/zhuoyi/tmp
 export XDG_CACHE_HOME=/homes/zhuoyi/.cache
 export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTHONUNBUFFERED=1
 
 # ── 可覆盖参数 ─────────────────────────────────────────────────────────
 # ⚠️ MODEL 留空: 必须指向 Stage-1 SFT 的 merged 模型目录, 提交前 export MODEL=<路径>
@@ -46,9 +49,17 @@ OUTPUT_DIR="${OUTPUT_DIR:-./output_grpo_foarl_cvrp20}"
 NUM_TRAIN_GPUS="${NUM_TRAIN_GPUS:-6}"          # 训练进程数 (= Mask 训练卡数)
 TRAIN_GPUS_CSV="${TRAIN_GPUS_CSV:-0,1,2,3,4,5}"# 前 6 张做训练
 VLLM_GPU_IDX="${VLLM_GPU_IDX:-6}"              # 第 7 张做 vLLM 生成
-VLLM_PORT="${VLLM_PORT:-8005}"                 # 错开 Mask 的 8004
-VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.85}"
-VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-4096}"  # ≥ prompt(~<1k) + completion(1000) + overhead
+# 端口走低位 (< ip_local_port_range 起点): Mask 实测高端口(8006/826x)会被 vLLM init 那 ~19s
+#   里的 outgoing socket(NCCL/torch.dist) 当临时端口抢占 → uvicorn LISTEN 时 address in use。
+#   8005 与 Mask 的 8004 错开 (本 job 独占整节点, 本不会撞, 仅图保险)。
+VLLM_PORT="${VLLM_PORT:-8005}"
+# gpu_memory_utilization=0.80 是 Mask 在 4B 模型上踩出来的甜点: 0.85 → CUDA graph capture
+#   阶段 OOM (capture 的 ~4.7GiB 在 util 预算之外); 0.60 → KV cache 砍半使并发 < num_gen=8
+#   触发 RECOMPUTE 抢占损坏 rollout。OOM 别靠降 util 绕 (会跌破并发), 降 PDTB 或 num_gen。
+VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.80}"
+# max_model_len 必须 ≥ max_prompt_length + max_completion_length (+overhead), 否则 vLLM 拒绝;
+#   且越小并发越高。CVRP20 FOARL prompt ~<1k tok, 故 1536(prompt)+1000(completion)+overhead ≈ 3072。
+VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-3072}"
 VLLM_STARTUP_TIMEOUT="${VLLM_STARTUP_TIMEOUT:-360}"
 
 # ── GRPO 超参 (对齐 Mask: 4×6×8 = 192 completions / 24 prompts 每次更新) ──
@@ -131,6 +142,13 @@ if [ "$SANITY" = "1" ]; then
     echo "[sanity] 输出改到独立目录: $OUTPUT_DIR (不续 ckpt)"
 fi
 
+# ── GPU 占用预检: 分到的卡若被别人占着 → 排除本节点重投, 本 job 退出 (与 Mask 同口径) ──
+#    起 vLLM/CUDA 之前查一遍, 避免落到 flaky/被占节点上 vLLM CUDA graph capture OOM。
+export SUBMIT_SCRIPT="$(pwd)/submit_grpo_foarl_cvrp.sh"
+export BASE_EXCLUDE=""
+source "$(pwd)/preflight_gpu.sh"
+preflight_gpu_or_resubmit
+
 # ── vLLM server 生命周期 ───────────────────────────────────────────────
 VLLM_LOG="/homes/zhuoyi/zijianliu/UniCOP/FOARL/foarl_vllm_${SLURM_JOB_ID:-manual}.log"
 VLLM_PID=""
@@ -146,12 +164,16 @@ stop_vllm() {
 trap 'stop_vllm' EXIT INT TERM
 
 echo "[$(date '+%H:%M:%S')] 启动 vLLM server | GPU=$VLLM_GPU_IDX port=$VLLM_PORT (log: $VLLM_LOG)"
+# flag 名沿用 Mask 实测可用的那套 (其 vllm_serve_logprobs.py 即转发给 trl vllm-serve):
+#   --tensor_parallel_size / --gpu_memory_utilization / --max_model_len / --dtype / --enable_prefix_caching
 CUDA_VISIBLE_DEVICES="$VLLM_GPU_IDX" \
     trl vllm-serve --model "$MODEL" \
+        --tensor_parallel_size 1 \
         --port "$VLLM_PORT" \
         --gpu_memory_utilization "$VLLM_GPU_MEM_UTIL" \
         --max_model_len "$VLLM_MAX_MODEL_LEN" \
         --dtype bfloat16 \
+        --enable_prefix_caching True \
         > "$VLLM_LOG" 2>&1 &
 VLLM_PID=$!
 
@@ -182,7 +204,7 @@ accelerate launch --num_processes "$NUM_TRAIN_GPUS" --main_process_port 29611 \
     --lr "$LR" --beta "$BETA" --epsilon "$EPS" --epsilon_high "$EPS_HIGH" \
     --batch_size "$PDTB" --grad_accum "$GA" \
     --epochs "$EPOCHS" --max_steps "$MAX_STEPS" \
-    --max_prompt_length 20000 --max_completion_length 1000 \
+    --max_prompt_length 1536 --max_completion_length 1000 \
     --temperature "$TEMP" --top_p "$TOP_P" --top_k "$TOP_K" \
     --alpha "$ALPHA" \
     --omega_parse "$W_PARSE" --omega_depot "$W_DEPOT" \
