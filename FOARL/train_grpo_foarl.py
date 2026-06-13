@@ -42,6 +42,16 @@ from peft import LoraConfig
 
 from foarl_reward_cvrp import compute_foarl_reward_cvrp
 
+
+class FOARLGRPOTrainer(GRPOTrainer):
+    """兼容 shim: 本 env 的 transformers(get_train_dataloader→_get_dataloader)用
+    self._get_train_sampler(dataset) 传 dataset 实参, 而装的 trl GRPOTrainer._get_train_sampler(self)
+    不收该参数 → 'takes 1 positional argument but 2 were given'。吃掉 dataset 再转调父类
+    (trl 内部用 self.train_dataset, 不需要这个参数)。对齐 Mask grpo_prm_trainer.py:229。"""
+
+    def _get_train_sampler(self, dataset=None):
+        return super()._get_train_sampler()
+
 # 与 SFT 完全一致的开场白 (放进 system role), 保证 RL 的 prompt 分布 == SFT 训练分布
 FOARL_PREAMBLE = (
     "Below is an instruction describing a combinatorial optimization problem. "
@@ -355,7 +365,7 @@ def main():
         if _c["parse"] == 0.0:
             print("  [FAIL] 占位补全 ζ=0, 正则没命中, 检查 foarl_reward_cvrp 的解析或输出格式!")
 
-    trainer = GRPOTrainer(
+    trainer = FOARLGRPOTrainer(
         model=model, args=grpo_config,
         reward_funcs=reward_func, train_dataset=dataset,
         processing_class=tokenizer, peft_config=peft_config,
