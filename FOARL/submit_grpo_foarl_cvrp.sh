@@ -50,7 +50,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-./output_grpo_foarl_cvrp20}"
 
 # ── GPU 拓扑 (sbatch --gpus=7 下 SLURM 暴露逻辑卡 0..6) ──────────────────
 NUM_TRAIN_GPUS="${NUM_TRAIN_GPUS:-6}"          # 训练进程数 (= Mask 训练卡数)
-TRAIN_GPUS_CSV="${TRAIN_GPUS_CSV:-0,1,2,3,4,5}"# 前 6 张做训练
+TRAIN_GPUS_CSV="${TRAIN_GPUS_CSV:-0,1,2,3,4,5}"   # 前 6 张做训练
 VLLM_GPU_IDX="${VLLM_GPU_IDX:-6}"              # 第 7 张做 vLLM 生成
 # 端口走低位 (< ip_local_port_range 起点): Mask 实测高端口(8006/826x)会被 vLLM init 那 ~19s
 #   里的 outgoing socket(NCCL/torch.dist) 当临时端口抢占 → uvicorn LISTEN 时 address in use。
