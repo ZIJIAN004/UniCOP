@@ -55,6 +55,7 @@ SFT_NUM_GPUS=4
 # bo1 eval 配置
 EVAL_NUM_TEST=100
 EVAL_NUM_SAMPLES=1                 # bo1 = best-of-1
+EVAL_TEMPERATURE=0                 # bo1 用贪心解码 (deterministic, 完全可复现)
 EVAL_MAX_COMPLETION=4096
 EVAL_BATCH_SIZE=4
 
@@ -124,6 +125,19 @@ echo "  时间:     $(date)"
 echo "============================================================"
 
 # ══════════════════════════════════════════════════════════════════
+# Step 0: think mask preflight —— 确认 <think> 格式能被正确识别和训练
+#   (collator 找不到 response_template 会静默全 mask 白训, 必须先验证)
+# ══════════════════════════════════════════════════════════════════
+echo ""
+echo ">>> Step 0: think mask preflight (CPU, 不占 GPU)..."
+python check_sft_think_masking.py \
+    --model "$BASE_MODEL" \
+    --data "$CHAINS_FILE" \
+    --filter_problems $PROBLEM --filter_sizes $SIZE \
+    --n_samples 3
+echo "  ✓ preflight 通过, think 格式 mask 正确"
+
+# ══════════════════════════════════════════════════════════════════
 # Step 1: Stage2 SFT 训练
 # ══════════════════════════════════════════════════════════════════
 echo ""
@@ -186,9 +200,10 @@ notify "Step2 完成: adapter 合并"
 # Step 3: bo1 评估 (best-of-1) —— 与 thinking 跑同一 eval 集 (seed=9999)
 # ══════════════════════════════════════════════════════════════════
 echo ""
-echo ">>> Step 3: bo1 评估 (num_samples=1)..."
+echo ">>> Step 3: bo1 评估 (num_samples=1, 贪心 temperature=0)..."
 echo "  模型:     $OUTPUT_DIR/final_model"
 echo "  测试数:   $EVAL_NUM_TEST (seed=9999 固定, 与 thinking 同一批实例)"
+echo "  解码:     greedy (temperature=$EVAL_TEMPERATURE), deterministic 可复现"
 echo "  保存:     $EVAL_SAVE_DIR"
 
 mkdir -p "$EVAL_SAVE_DIR"
@@ -209,7 +224,7 @@ CUDA_VISIBLE_DEVICES=${EVAL_GPU[0]} python evaluate.py \
     --num_test $EVAL_NUM_TEST \
     --num_samples $EVAL_NUM_SAMPLES \
     --batch_size $EVAL_BATCH_SIZE \
-    --temperature "$GEN_TEMPERATURE" \
+    --temperature $EVAL_TEMPERATURE \
     --save_dir "$EVAL_SAVE_DIR"
 cd "$DISTILL_DIR"
 

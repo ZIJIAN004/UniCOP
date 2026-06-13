@@ -45,7 +45,7 @@ elif [ -d "/Data04/yangzhihan/lzj" ]; then
     # ── 模型路径（两套候选） ──
     BASE_MODEL_R1="/Data04/yangzhihan/lzj/UniCOP-Reason.bak_/model/deepseek-reasoning/deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
     BASE_MODEL_QWEN3="/Data04/yangzhihan/lzj/model/Qwen3-4B-Thinking-2507"
-    BASE_MODEL_QWEN3_INSTRUCT="/Data04/yangzhihan/lzj/model/Qwen3-4B-Instruct-2507"
+    BASE_MODEL_QWEN3_INSTRUCT="/Data04/yangzhihan/lzj/UniCOP/model/Qwen3-4B-Instruct-2507"
 
 elif [ -d "/homes/zhuoyi/zijianliu" ]; then
     HOST_ID="astar-zhuoyi"
