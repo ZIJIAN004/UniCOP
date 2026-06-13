@@ -66,9 +66,11 @@ def make_deepspeed_config(zero_stage: int):
         "steps_per_print": 50,
         "optimizer": {"type": "AdamW",
                       "params": {"lr": "auto", "betas": "auto", "eps": "auto", "weight_decay": "auto"}},
-        "scheduler": {"type": "WarmupDecayLR",
-                      "params": {"warmup_min_lr": 0, "warmup_max_lr": "auto",
-                                 "warmup_num_steps": "auto", "total_num_steps": "auto"}},
+        # ⚠️ 不放 scheduler 段 (对齐 Mask train.py): scheduler 的 warmup_num_steps/total_num_steps
+        #   依赖总步数, 要等 train() 时 trainer_config_finalize 才把 "auto" 填实; 但 TRL 对 ref_model
+        #   调 prepare_deepspeed 发生在 GRPOTrainer.__init__ 阶段(早于 finalize), 那时 "auto" 仍是
+        #   字符串 → WarmupDecayLR 的 max(2,"auto") 报 TypeError。lr_scheduler_type='linear' 交给
+        #   HF 侧建 scheduler 即可, DeepSpeed 只包 HF optimizer, 无需 ds_config 内的 scheduler。
     }
     if zero_stage == 2:
         base["zero_optimization"] = {"stage": 2, "overlap_comm": True, "contiguous_gradients": True,
