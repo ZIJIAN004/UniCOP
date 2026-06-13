@@ -103,6 +103,22 @@ __CONDA_SH="/homes/zhuoyi/miniforge3/etc/profile.d/conda.sh"
 [ -f "$__CONDA_SH" ] || { echo "[FATAL] 找不到 conda.sh: $__CONDA_SH"; exit 1; }
 source "$__CONDA_SH"
 conda activate /homes/zhuoyi/miniforge3/envs/unicop
+
+# ── DeepSpeed CUDA 扩展(CPUAdam, ZeRO-3 offload_optimizer 用)JIT 编译需 CUDA_HOME + dev 头 ──
+#   缺失会在主模型 deepspeed.initialize 阶段报 "cuda_runtime.h: No such file or directory"。
+#   复刻 paths.sh:142-155 的 zhuoyi 配置: conda env 把头/库放在 targets/x86_64-linux/{include,lib},
+#   torch 默认只看 $CUDA_HOME/include → 须把真目录加进 CPATH/LIBRARY_PATH/LD_LIBRARY_PATH。
+#   (Mask run_v5 经 source paths.sh 拿到这些; 本 submit 自包含故内联, 与 paths.sh 同值。)
+export CUDA_HOME="/homes/zhuoyi/miniforge3/envs/unicop"
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib:${LD_LIBRARY_PATH:-}"
+_CUDA_TARGETS="$CUDA_HOME/targets/x86_64-linux"
+if [ -d "$_CUDA_TARGETS/include" ]; then
+    export CPATH="$_CUDA_TARGETS/include:${CPATH:-}"
+    export LIBRARY_PATH="$_CUDA_TARGETS/lib:${LIBRARY_PATH:-}"
+    export LD_LIBRARY_PATH="$_CUDA_TARGETS/lib:$LD_LIBRARY_PATH"
+fi
+
 command -v accelerate >/dev/null 2>&1 || { echo "[FATAL] accelerate 不在 PATH, unicop 未激活"; exit 1; }
 command -v trl >/dev/null 2>&1 || { echo "[FATAL] trl CLI 不在 PATH (vllm-serve 需要); 确认 trl 已装"; exit 1; }
 cd /homes/zhuoyi/zijianliu/UniCOP/FOARL
