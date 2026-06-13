@@ -76,7 +76,8 @@ GA="${GA:-8}"                     # 梯度累积 (官方=Mask=8)
 EPOCHS="${EPOCHS:-1}"             # 官方=Mask sweep=1
 MAX_STEPS="${MAX_STEPS:--1}"
 # 采样 (Qwen3-Instruct-2507 官方)
-TEMP="${TEMP:-0.7}"
+# ⚠️ 不能叫 TEMP: 系统/conda 常把 TEMP 设成临时目录, ${TEMP:-0.7} 会拿到该路径而非默认值
+GEN_TEMP="${GEN_TEMP:-0.7}"
 TOP_P="${TOP_P:-0.8}"
 TOP_K="${TOP_K:-20}"
 # FOARL 奖励权重 (官方 rewards.py CVRP weights, 论文附录 A.3.3 同值)
@@ -116,7 +117,7 @@ echo "  MODEL=$MODEL"
 echo "  DATA=$DATA | OUT=$OUTPUT_DIR"
 echo "  拓扑: vLLM=GPU $VLLM_GPU_IDX(port $VLLM_PORT) | 训练=GPU $TRAIN_GPUS_CSV ($NUM_TRAIN_GPUS 进程)"
 echo "  GRPO: S=$S LR=$LR BETA=$BETA EPS=[$EPS,$EPS_HIGH] PDTB=$PDTB GA=$GA EPOCHS=$EPOCHS"
-echo "  采样: T=$TEMP top_p=$TOP_P top_k=$TOP_K | 奖励: ALPHA=$ALPHA W(p=$W_PARSE d=$W_DEPOT cov=$W_COV cap=$W_CAP) | SANITY=$SANITY"
+echo "  采样: T=$GEN_TEMP top_p=$TOP_P top_k=$TOP_K | 奖励: ALPHA=$ALPHA W(p=$W_PARSE d=$W_DEPOT cov=$W_COV cap=$W_CAP) | SANITY=$SANITY"
 
 # ── 前置检查 ──────────────────────────────────────────────────────────
 if [ -z "$MODEL" ]; then
@@ -215,7 +216,7 @@ accelerate launch --num_processes "$NUM_TRAIN_GPUS" --main_process_port 29611 \
     --batch_size "$PDTB" --grad_accum "$GA" \
     --epochs "$EPOCHS" --max_steps "$MAX_STEPS" \
     --max_prompt_length 1536 --max_completion_length 1000 \
-    --temperature "$TEMP" --top_p "$TOP_P" --top_k "$TOP_K" \
+    --temperature "$GEN_TEMP" --top_p "$TOP_P" --top_k "$TOP_K" \
     --alpha "$ALPHA" \
     --omega_parse "$W_PARSE" --omega_depot "$W_DEPOT" \
     --omega_coverage "$W_COV" --omega_capacity "$W_CAP" \

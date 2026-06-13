@@ -38,7 +38,8 @@ DATA="${DATA:-data/foarl_cvrp20_mask1000.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-./output_grpo_foarl_cvrp20}"
 S="${S:-8}"; LR="${LR:-2e-5}"; BETA="${BETA:-0.05}"; EPS="${EPS:-0.1}"; EPS_HIGH="${EPS_HIGH:-0.28}"
 PDTB="${PDTB:-4}"; GA="${GA:-8}"; EPOCHS="${EPOCHS:-1}"; MAX_STEPS="${MAX_STEPS:--1}"
-TEMP="${TEMP:-0.7}"; TOP_P="${TOP_P:-0.8}"; TOP_K="${TOP_K:-20}"
+# ⚠️ 不能叫 TEMP: 系统/conda 常把 TEMP 设成临时目录, ${TEMP:-0.7} 会拿到路径而非默认
+GEN_TEMP="${GEN_TEMP:-0.7}"; TOP_P="${TOP_P:-0.8}"; TOP_K="${TOP_K:-20}"
 ALPHA="${ALPHA:-1.0}"; W_PARSE="${W_PARSE:-0.2}"; W_DEPOT="${W_DEPOT:-0.1}"; W_COV="${W_COV:-0.1}"; W_CAP="${W_CAP:-0.6}"
 SANITY="${SANITY:-0}"
 VLLM_PORT="${VLLM_PORT:-8005}"
@@ -109,7 +110,7 @@ trap 'stop_vllm' EXIT INT TERM
 
 echo "############## FOARL CVRP GRPO RL (zhihan, 1 vLLM + $TRAIN_PROC 训练) ##############  $(date '+%F %T')"
 echo "  MODEL=$MODEL | DATA=$DATA | OUT=$OUTPUT_DIR"
-echo "  GRPO: S=$S LR=$LR BETA=$BETA EPS=[$EPS,$EPS_HIGH] PDTB=$PDTB GA=$GA EPOCHS=$EPOCHS | 采样 T=$TEMP p=$TOP_P k=$TOP_K"
+echo "  GRPO: S=$S LR=$LR BETA=$BETA EPS=[$EPS,$EPS_HIGH] PDTB=$PDTB GA=$GA EPOCHS=$EPOCHS | 采样 T=$GEN_TEMP p=$TOP_P k=$TOP_K"
 
 echo "[$(date '+%H:%M:%S')] 启动 vLLM | GPU=$VLLM_GPU port=$VLLM_PORT (log: $VLLM_LOG)"
 CUDA_VISIBLE_DEVICES="$VLLM_GPU" \
@@ -135,7 +136,7 @@ accelerate launch --num_processes "$TRAIN_PROC" --main_process_port 29611 \
     --lr "$LR" --beta "$BETA" --epsilon "$EPS" --epsilon_high "$EPS_HIGH" \
     --batch_size "$PDTB" --grad_accum "$GA" --epochs "$EPOCHS" --max_steps "$MAX_STEPS" \
     --max_prompt_length 1536 --max_completion_length 1000 \
-    --temperature "$TEMP" --top_p "$TOP_P" --top_k "$TOP_K" \
+    --temperature "$GEN_TEMP" --top_p "$TOP_P" --top_k "$TOP_K" \
     --alpha "$ALPHA" --omega_parse "$W_PARSE" --omega_depot "$W_DEPOT" \
     --omega_coverage "$W_COV" --omega_capacity "$W_CAP" \
     --use_vllm --vllm_server_host localhost --vllm_server_port "$VLLM_PORT" \
