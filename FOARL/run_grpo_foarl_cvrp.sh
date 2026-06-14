@@ -47,7 +47,11 @@ VLLM_GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.80}"
 VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-3072}"
 VLLM_STARTUP_TIMEOUT="${VLLM_STARTUP_TIMEOUT:-360}"
 # merge + BO1 eval
-DO_EVAL="${DO_EVAL:-1}"; EVAL_TP="${EVAL_TP:-4}"; EVAL_NUM_TEST="${EVAL_NUM_TEST:-1000}"
+# ⚠️ EVAL_TP 默认=1: vLLM 0.7.3 无 Qwen3 原生实现→回退 Transformers backend, 该 backend 在
+#    tensor_parallel>1 多 worker 下生成期崩 (Worker died exit -15, issue #17630/#39774)。
+#    单卡 tp=1 不起 worker 子进程, 整类问题消失; 4B 模型单卡 KV cache 足够, 贪心结果不受 tp 影响。
+#    (原默认=4 抄自 Mask v6_eval 的提速覆盖值, 但 Mask 经 run_eval_matrix 包装, 此处直调 evaluate.py 没那层防护)
+DO_EVAL="${DO_EVAL:-1}"; EVAL_TP="${EVAL_TP:-1}"; EVAL_NUM_TEST="${EVAL_NUM_TEST:-1000}"
 EVAL_MAXLEN="${EVAL_MAXLEN:-1024}"; EVAL_GPU_MEM="${EVAL_GPU_MEM:-0.8}"
 # GPU 动态挑选
 GPU_MIN_FREE_MIB="${GPU_MIN_FREE_MIB:-22528}"   # 单卡 free ≥ 此值才算空闲

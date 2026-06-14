@@ -89,8 +89,12 @@ W_CAP="${W_CAP:-0.6}"             # 官方 capacity=0.6
 SANITY="${SANITY:-0}"             # 1 = 只取 64 条做 sanity
 # ── 训练后 merge + BO1 eval (镜像 Mask submit_grpo_cvrp20_v6_eval.sh; 训练成功才跑) ──
 DO_EVAL="${DO_EVAL:-1}"           # 1 = 训练后自动 merge + BO1 eval; 0 = 只训练
-EVAL_GPU="${EVAL_GPU:-0,1,2,3}"   # 训练完腾空的卡给 eval 的 vLLM
-EVAL_TP="${EVAL_TP:-4}"           # Qwen3-4B kv_heads 可整除 4
+EVAL_GPU="${EVAL_GPU:-0}"         # eval 单卡即可 (tp=1); 训练完腾空的任一卡
+# ⚠️ EVAL_TP 默认=1 (原=4 致崩): vLLM 0.7.3 无 Qwen3 原生实现→回退 Transformers backend,
+#    该 backend 在 tensor_parallel>1 多 worker 下生成期崩 (Worker died exit -15, issue
+#    #17630/#39774)。单卡 tp=1 不起 worker, 整类问题消失; 4B 单卡 KV cache 足够, 贪心结果不受 tp 影响。
+#    Mask v6_eval 用 tp=4 是因为经 run_eval_matrix 包装, 此处直调 evaluate.py 无那层防护, 故回退默认 tp=1。
+EVAL_TP="${EVAL_TP:-1}"
 EVAL_NUM_TEST="${EVAL_NUM_TEST:-1000}"  # seed=9999 冻结测试集; 与 Mask RL_BO1 同一批 → 可比, 勿改小
 EVAL_MAXLEN="${EVAL_MAXLEN:-1024}"      # FOARL 答案短(~百 tok); 1024 足够 (instruct 默认仅 512)
 EVAL_GPU_MEM="${EVAL_GPU_MEM:-0.8}"
