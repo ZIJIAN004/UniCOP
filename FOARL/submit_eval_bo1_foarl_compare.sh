@@ -39,10 +39,17 @@ export TMPDIR=/homes/zhuoyi/tmp
 export XDG_CACHE_HOME=/homes/zhuoyi/.cache
 export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 
-# ⚠️ conda activate 前别开 set -u (activate.d/cuda-nvcc_activate.sh 引用未设变量, nounset 下挂)
-source /homes/zhuoyi/.bashrc
-eval "$(conda shell.bash hook)"
-conda activate unicop
+# ⚠️ conda 激活: 必须直接 source miniforge 的 conda.sh, 不能靠 source ~/.bashrc + conda hook
+#    (非交互 sbatch shell 下 .bashrc 提前 return → conda hook 不生效 → conda: command not found,
+#     与 submit_grpo_foarl_cvrp.sh 同款; 实测 09590 job 就栽在 .bashrc 方式上)。
+#    在 conda activate 之前别开 set -u (activate.d 引用未设变量, nounset 下挂)。
+__CONDA_SH="/homes/zhuoyi/miniforge3/etc/profile.d/conda.sh"
+[ -f "$__CONDA_SH" ] || { echo "[FATAL] 找不到 conda.sh: $__CONDA_SH"; exit 1; }
+source "$__CONDA_SH"
+conda activate /homes/zhuoyi/miniforge3/envs/unicop
+# fail-fast: 激活没成功就立刻退出, 不再静默"假完成" (上次 conda not found 但脚本仍跑到结束)
+command -v python >/dev/null 2>&1 || { echo "[FATAL] python 不在 PATH, conda 未激活"; exit 1; }
+python -c "import vllm" 2>/dev/null || { echo "[FATAL] import vllm 失败, unicop 环境未正确激活"; exit 1; }
 FOARL_DIR=/homes/zhuoyi/zijianliu/UniCOP/FOARL
 cd "$FOARL_DIR"
 set -uo pipefail
