@@ -40,9 +40,18 @@ class Config:
     #   max_prompt_length:     768 → 1280 (CVRP-20 prompt 留 buffer, 实测 max~1201, 保持 1280 已够)
     #   max_completion_length: 6144 → 3584 (token-probe 实测 completion max~3215/p95~3196,
     #     6144 过度配置; 收紧到 3584(~11% headroom)大幅省激活/hidden/logp/KV 显存, 适配 ZeRO-2)
-    # ⚠️ RL 训练中 completion 长度可能随训练增长 → 盯 stats/truncation_rate, 若 >1~2% 说明被截断
-    #     伤推理/parse, 应调回更大(如 4096)。
-    # vLLM 端 max_model_len 同步 8192 → 5248 (run script VLLM_MAX_MODEL_LEN, ≥1280+3584+overhead).
+    # 🔴 已知坑 (2026-06-15): 这个 3584 是按【5 条 thinking 样本】拍的, 比 SFT 的 completion
+    #     上限【max_output_length=4096】(train_sft_stage2.py:305) 还小!! → RL cap < SFT cap 时,
+    #     模型在 SFT 里合法学到的 [3584,4096] 区间长 completion 会被 RL 一刀切, 写不到 </think>+答案,
+    #     parse 直接腰斩 (instruct 实测 ~0.5)。thinking 输出简洁(~3200)落在 3584 内侥幸没爆,
+    #     instruct 输出更长(伸进 [3584,4096])就爆 → 同一过紧设置只在 instruct 上现形。
+    #   ✅ 铁律: RL max_completion_length 必须 ≥ SFT max_output_length(=4096), 否则截断 instruct。
+    #     instruct run 经 launcher 的 MAX_COMPLETION env 覆盖到 4096(= SFT cap, 覆盖模型合法输出全范围);
+    #     >4096 是 SFT 没见过的 OOD 退化尾巴, 不必追(且 util=0.80 并发墙在 ~4200, 踩坑 #32)。
+    #     全局默认保 3584 不动是为 thinking 基线对照(thinking 不受影响)。
+    # ⚠️ 仍盯 stats/truncation_rate / completion/p95: 若 p95≈max≈cap 顶格 = 正被截断。
+    # vLLM 端 max_model_len 同步 8192 → 5248 (run script VLLM_MAX_MODEL_LEN, ≥1280+3584+overhead;
+    #     instruct 跑 4096 时 launcher 同步设 VLLM_MAX_MODEL_LEN=5632)。
     max_prompt_length: int             = 1280
     max_completion_length: int         = 3584
     learning_rate: float               = 1e-5   # v5 用 2e-5 第 1 step grad_norm explode (3.87 clip→1.0,
