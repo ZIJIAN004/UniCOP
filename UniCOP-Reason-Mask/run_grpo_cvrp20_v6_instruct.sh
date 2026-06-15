@@ -46,6 +46,19 @@ export SAVE_STEPS="${SAVE_STEPS:-20}"           # 每 20 step 存档 (短跑存 
 export NUM_TRAIN="${NUM_TRAIN:-1000}"           # 一个 epoch 的训练实例数; 扫参可降到 500 提速
 export PROC_ALPHA_V6="${PROC_ALPHA_V6:-1000}"   # v6 PRM 段注入权重 (扫参主轴); 默认 1000 (用户决定 2026-06-15, 同 config.py 默认)
 
+# ── completion 长度: instruct think 比 thinking 长, config 默认 3584(为 thinking 调)截断 ──
+#   症状: 训练 log stats/truncation_rate 高 + completion/p95≈max≈3584 顶格 → parse 腰斩 (2026-06-15 实测)。
+#   MAX_COMPLETION 经 train.py env 覆盖 config.max_completion_length (不动全局默认, 保 thinking 基线)。
+#   ⚠️ 三旋钮耦合, 调长度必须连带改 VLLM_MAX_MODEL_LEN, 并守住并发约束 (踩坑 #32):
+#     VLLM_MAX_MODEL_LEN ≥ max_prompt(1280) + MAX_COMPLETION + overhead(~256)
+#     vLLM "Maximum concurrency" 必须 ≥ num_generations(8), 否则 prefix-cache 重算损坏 → parse 再次腰斩。
+#   并发上限 (util=0.80, 当前 KV 预算 ~46.5k tok): max_model_len ≤ ~5800 → MAX_COMPLETION ≤ ~4200。
+#   4096 是"既扩长度又保并发≥8"的安全甜点 (config.py:44 也建议 4096); 6144→5632(1280+4096+256), 并发≈8.3x。
+#   若 diag_parse_rate.py 实测 6144 下 p95 仍 >4200: 必须靠 enforce_eager(省 ~4.68G capture→升 util 夺回 KV)
+#     或关 --enable_prefix_caching(重算退回正确 full-prefill) 才能再扩, 否则跌破并发触发踩坑 #32。
+export MAX_COMPLETION="${MAX_COMPLETION:-4096}"
+export VLLM_MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-5632}"   # = 1280 + 4096 + 256; 并发≈8.3x ≥ num_gen=8
+
 # ── A_feas 权重对齐 FOARL 设计 (capacity 主导), 保 v5 总量 5.5 → PRM/A_outcome 标定无需变 ──
 #   FOARL CVRP R_f 比例 parse:depot:cov:cap = 0.2:0.1:0.1:0.6 (你的 FOARL/foarl_reward_cvrp.py:75-79)。
 #   Mask 无独立 depot 分量、但有 format → 把 depot 的 0.1 位给 format; 按 5.5 总量缩放:
@@ -59,7 +72,7 @@ export W_F_V5="${W_F_V5:-0.55}"                 # format
 # 输出目录带 instruct + FOARL 权重(fw) 标识 + 超参标注 → 与 thinking v6 / 默认权重 v6 互不覆盖, 避免误 resume
 export OUTPUT_DIR_BASE="${OUTPUT_DIR_BASE:-$_D/output_v6_instruct_fw_lr${LR}_ep${EPOCHS}_pa${PROC_ALPHA_V6}_nt${NUM_TRAIN}}"
 
-echo "[v6-instruct] BASE_MODEL_TYPE=$BASE_MODEL_TYPE REWARD_SCHEME=$REWARD_SCHEME LR=$LR EPOCHS=$EPOCHS PROC_ALPHA_V6=$PROC_ALPHA_V6 NUM_TRAIN=$NUM_TRAIN"
+echo "[v6-instruct] BASE_MODEL_TYPE=$BASE_MODEL_TYPE REWARD_SCHEME=$REWARD_SCHEME LR=$LR EPOCHS=$EPOCHS PROC_ALPHA_V6=$PROC_ALPHA_V6 NUM_TRAIN=$NUM_TRAIN MAX_COMPLETION=$MAX_COMPLETION VLLM_MAX_MODEL_LEN=$VLLM_MAX_MODEL_LEN"
 echo "[v6-instruct] A_feas(FOARL对齐) parse=$W_P_V5 cov=$W_COV_V5 cap/cons=$W_CONS_V5 format=$W_F_V5 (总量 $(awk "BEGIN{print $W_P_V5+$W_COV_V5+$W_CONS_V5+$W_F_V5}"))"
 echo "[v6-instruct] OUTPUT_DIR_BASE=$OUTPUT_DIR_BASE"
 

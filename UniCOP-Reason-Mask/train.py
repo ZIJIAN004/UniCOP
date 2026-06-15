@@ -173,6 +173,15 @@ if os.environ.get("LR") is not None:
     config.learning_rate = float(os.environ.get("LR"))
 if os.environ.get("EPOCHS") is not None:
     config.num_train_epochs = int(os.environ.get("EPOCHS"))
+# MAX_COMPLETION / MAX_PROMPT: 覆盖序列长度上限 (默认 config 3584 / 1280)。
+# instruct 基座 think 更长, 3584(为 thinking 调)会截断 → 看到 stats/truncation_rate 高 +
+# completion/p95≈max 顶格时调大。⚠️ 调大 MAX_COMPLETION 必须同步 launcher 的
+# VLLM_MAX_MODEL_LEN(≥max_prompt+max_completion+overhead), 且核对 vLLM
+# "Maximum concurrency ≥ num_generations"(踩坑 #32: 并发<8 → prefix-cache 重算损坏 parse 腰斩)。
+if os.environ.get("MAX_COMPLETION") is not None:
+    config.max_completion_length = int(os.environ.get("MAX_COMPLETION"))
+if os.environ.get("MAX_PROMPT") is not None:
+    config.max_prompt_length = int(os.environ.get("MAX_PROMPT"))
 # ── v6 reward scheme 参数 env 覆盖 (reward_scheme=v6 时生效, 其余 scheme 忽略) ──
 # 扫参用, 不改 config.py 默认值。PROC_ALPHA_V6 是 v6 主轴 (PRM 段注入权重);
 # TRIM/S_MIN/S_MAX 是批级标准化的鲁棒性/数值守卫, 一般留默认。
