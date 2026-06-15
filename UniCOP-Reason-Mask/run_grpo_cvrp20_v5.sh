@@ -313,7 +313,7 @@ echo "  ZeRO:      stage $ZERO_STAGE | gradient_checkpointing on"
 echo "  Reward:    ${_SCHEME}  (A_out=A_feas+A_outcome; v6 复用 v5 的 A_out, 只改 PRM per-step 变换)"
 echo "             A_feas/A_outcome 实际权重以 train.py 的 'Reward scheme:' 打印 + config 为准 (此 banner 不再硬编码)"
 if [ "$_SCHEME" = "v6" ]; then
-echo "             PRM(v6) = 批级截尾标准化 + sigmoid((R-mu)/s) ∈(0,1), proc_alpha_v6=${PROC_ALPHA_V6:-200}"
+echo "             PRM(v6) = 批级截尾标准化 + sigmoid((R-mu)/s) ∈(0,1), proc_alpha_v6=${PROC_ALPHA_V6:-1000}"
 else
 echo "             PRM(${_SCHEME}) = absolute base 1.5 + tanh(R_step)"
 fi

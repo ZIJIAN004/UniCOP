@@ -212,9 +212,11 @@ class Config:
     s_max_v6: float                = 1e3
     # proc_alpha_v6: v6 段注入权重 (独立于 v5 的 proc_alpha_v4=50).
     #   v6 的 a_proc=sigmoid()∈(0,1) 均值~0.5, 仅为 v5 a_proc(均值~1.43)的 ~1/2.86;
-    #   同 proc_alpha 下 v6 的 PRM footprint 会缩到 ~1/3. 设 200 把 per-step 信号
-    #   提到偏强档 (≈ v5 footprint 的 ~1.5x, 测更强 PRM 是否压 gap).
-    proc_alpha_v6: float           = 200.0
+    #   同 proc_alpha 下 v6 的 PRM footprint 会缩到 ~1/3.
+    #   默认改为 1000 (用户决定 2026-06-15): 把 PRM per-step 信号提到强档,
+    #   测更强 PRM 是否压 CVRP gap。早期实验用 200 (≈ v5 footprint ~1.5x); 历史 pin 200 的脚本
+    #   (如 zhuoyi submit_grpo_cvrp20_v6.sh) 显式覆盖, 不受此默认变更影响。
+    proc_alpha_v6: float           = 1000.0
 
     # ── CVRP constrained-decoding mask (跟 reward_scheme 正交) ────────
     # use_mask=True 时:

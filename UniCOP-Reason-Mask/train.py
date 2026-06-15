@@ -184,6 +184,18 @@ if os.environ.get("S_MIN_V6") is not None:
     config.s_min_v6 = float(os.environ.get("S_MIN_V6"))
 if os.environ.get("S_MAX_V6") is not None:
     config.s_max_v6 = float(os.environ.get("S_MAX_V6"))
+# ── A_feas 权重 env 覆盖 (v5/v6 共用; v6 经 _build_unified_advantages_v6 → _compute_a_out_v5
+#    读 config.w_*_v5, grpo_prm_trainer.py:1990-1994)。扫参/对齐 FOARL 用, 不改 config.py 全局默认。
+#    ⚠️ 改这些只改 A_feas 各分量相对主导地位; 若改了 A_feas 总量, 需同步核对
+#       proc_alpha_v6 / A_outcome 标定 (它们按 A_feas≈5.5 量级设计)。
+if os.environ.get("W_P_V5") is not None:
+    config.w_p_v5 = float(os.environ.get("W_P_V5"))
+if os.environ.get("W_COV_V5") is not None:
+    config.w_cov_v5 = float(os.environ.get("W_COV_V5"))
+if os.environ.get("W_CONS_V5") is not None:
+    config.w_cons_v5 = float(os.environ.get("W_CONS_V5"))
+if os.environ.get("W_F_V5") is not None:
+    config.w_f_v5 = float(os.environ.get("W_F_V5"))
 
 from data.generate import build_dataset, build_mixed_dataset
 from problems import get_problem, SUPPORTED_PROBLEMS

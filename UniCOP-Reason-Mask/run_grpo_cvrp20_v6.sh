@@ -1,5 +1,5 @@
 #!/bin/bash
-# run_grpo_cvrp20_v6.sh — 纯净 v6 (PRM 批级截尾标准化 + sigmoid, proc_alpha_v6=200)
+# run_grpo_cvrp20_v6.sh — 纯净 v6 (PRM 批级截尾标准化 + sigmoid, proc_alpha_v6 默认 1000)
 #
 # v6 vs v5: A_out (A_feas+A_outcome) 完全复用 v5; 只把 PRM per-step a_proc 从
 #   v5 的 (prm_base + tanh(R_step)) 换成「批级截尾标准化 + sigmoid」:

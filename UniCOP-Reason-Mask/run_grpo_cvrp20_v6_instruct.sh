@@ -44,12 +44,23 @@ export LR="${LR:-2e-5}"                          # 对齐 v5 (1e-6 训练不足)
 export EPOCHS="${EPOCHS:-1}"                     # 单 epoch
 export SAVE_STEPS="${SAVE_STEPS:-20}"           # 每 20 step 存档 (短跑存 step20/40 + final)
 export NUM_TRAIN="${NUM_TRAIN:-1000}"           # 一个 epoch 的训练实例数; 扫参可降到 500 提速
-export PROC_ALPHA_V6="${PROC_ALPHA_V6:-200}"    # v6 PRM 段注入权重 (扫参主轴); train.py 用此 env 覆盖 config
+export PROC_ALPHA_V6="${PROC_ALPHA_V6:-1000}"   # v6 PRM 段注入权重 (扫参主轴); 默认 1000 (用户决定 2026-06-15, 同 config.py 默认)
 
-# 输出目录带 instruct 标识 + 超参标注 → 与 thinking v6 (output_v6_*) 互不覆盖, 也避免误 resume 旧超参 ckpt
-export OUTPUT_DIR_BASE="${OUTPUT_DIR_BASE:-$_D/output_v6_instruct_lr${LR}_ep${EPOCHS}_pa${PROC_ALPHA_V6}_nt${NUM_TRAIN}}"
+# ── A_feas 权重对齐 FOARL 设计 (capacity 主导), 保 v5 总量 5.5 → PRM/A_outcome 标定无需变 ──
+#   FOARL CVRP R_f 比例 parse:depot:cov:cap = 0.2:0.1:0.1:0.6 (你的 FOARL/foarl_reward_cvrp.py:75-79)。
+#   Mask 无独立 depot 分量、但有 format → 把 depot 的 0.1 位给 format; 按 5.5 总量缩放:
+#     parse 0.2→1.1  coverage 0.1→0.55  capacity(=constraint) 0.6→3.3  format 0.1→0.55。
+#   train.py 经 W_*_V5 env 覆盖 config.w_*_v5 (v6 复用 v5 A_feas: _compute_a_out_v5)。
+export W_P_V5="${W_P_V5:-1.1}"                   # parse
+export W_COV_V5="${W_COV_V5:-0.55}"             # coverage (FOARL 让位给 capacity, 从 3.5 降到 0.55)
+export W_CONS_V5="${W_CONS_V5:-3.3}"           # constraint = CVRP 容量满足率 (FOARL 主导, 从 1.0 升到 3.3)
+export W_F_V5="${W_F_V5:-0.55}"                 # format
+
+# 输出目录带 instruct + FOARL 权重(fw) 标识 + 超参标注 → 与 thinking v6 / 默认权重 v6 互不覆盖, 避免误 resume
+export OUTPUT_DIR_BASE="${OUTPUT_DIR_BASE:-$_D/output_v6_instruct_fw_lr${LR}_ep${EPOCHS}_pa${PROC_ALPHA_V6}_nt${NUM_TRAIN}}"
 
 echo "[v6-instruct] BASE_MODEL_TYPE=$BASE_MODEL_TYPE REWARD_SCHEME=$REWARD_SCHEME LR=$LR EPOCHS=$EPOCHS PROC_ALPHA_V6=$PROC_ALPHA_V6 NUM_TRAIN=$NUM_TRAIN"
+echo "[v6-instruct] A_feas(FOARL对齐) parse=$W_P_V5 cov=$W_COV_V5 cap/cons=$W_CONS_V5 format=$W_F_V5 (总量 $(awk "BEGIN{print $W_P_V5+$W_COV_V5+$W_CONS_V5+$W_F_V5}"))"
 echo "[v6-instruct] OUTPUT_DIR_BASE=$OUTPUT_DIR_BASE"
 
 # run_grpo_cvrp20_v6.sh: 兜底设 REWARD_SCHEME=v6 + 沿用默认 vLLM 端口 8004, 再 exec run_grpo_cvrp20_v5.sh
