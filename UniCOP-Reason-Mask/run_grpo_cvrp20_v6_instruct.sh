@@ -63,5 +63,118 @@ echo "[v6-instruct] BASE_MODEL_TYPE=$BASE_MODEL_TYPE REWARD_SCHEME=$REWARD_SCHEM
 echo "[v6-instruct] A_feas(FOARL对齐) parse=$W_P_V5 cov=$W_COV_V5 cap/cons=$W_CONS_V5 format=$W_F_V5 (总量 $(awk "BEGIN{print $W_P_V5+$W_COV_V5+$W_CONS_V5+$W_F_V5}"))"
 echo "[v6-instruct] OUTPUT_DIR_BASE=$OUTPUT_DIR_BASE"
 
-# run_grpo_cvrp20_v6.sh: 兜底设 REWARD_SCHEME=v6 + 沿用默认 vLLM 端口 8004, 再 exec run_grpo_cvrp20_v5.sh
-exec bash "$_D/run_grpo_cvrp20_v6.sh"
+# ── eval 阶段参数 (可在运行前 export 覆盖) ───────────────────────────────────
+RUN_EVAL="${RUN_EVAL:-1}"                 # 0 = 只训练不 eval
+EVAL_NUM_TEST="${EVAL_NUM_TEST:-1000}"   # BO1 eval 实例数; 1000=与 optimal/PyVRP 冻结集 seed=9999 逐一对齐 (FOARL 受控对比口径); smoke 可 100
+EVAL_TP="${EVAL_TP:-1}"                   # eval tensor parallel 卡数 (BO1 贪心很轻, 1 张足够)
+EVAL_GPU="${EVAL_GPU:-}"                  # 留空 → 训练完自动挑空闲卡; 也可手动 "0" / "0,1"
+EVAL_GPU_MEM="${EVAL_GPU_MEM:-0.8}"      # vLLM 显存比例 (留余量给 CUDA graph)
+SCKEY="${SCKEY:-SCT340324Tlw20G3PAJQdqPPHtFAc2J7Qp}"
+_notify() { curl -s --max-time 10 "https://sctapi.ftqq.com/$SCKEY.send" \
+    --data-urlencode "title=${1:0:100}" --data-urlencode "desp=${2:0:500}" >/dev/null 2>&1 || true; }
+
+# ════════════════════════════════════════════════════════════════════════════
+echo "[v6-instruct] ========== [1/3] 训练 ==========  $(date '+%F %T')"
+# run_grpo_cvrp20_v6.sh: 兜底设 REWARD_SCHEME=v6 + vLLM 端口 8004, 再 exec run_grpo_cvrp20_v5.sh
+# 注意: 不用 exec, 训练返回后接 merge + BO1 eval。set -e 下用 set +e 包住以捕获退出码。
+set +e
+bash "$_D/run_grpo_cvrp20_v6.sh"
+TRAIN_EC=$?
+set -e
+
+if [ "$TRAIN_EC" -ne 0 ]; then
+    echo "[v6-instruct][FATAL] 训练失败 (exit=$TRAIN_EC), 跳过 merge+eval"
+    exit "$TRAIN_EC"
+fi
+if [ "$RUN_EVAL" != "1" ]; then
+    echo "[v6-instruct] RUN_EVAL=$RUN_EVAL → 训练已完成, 跳过 merge+BO1 eval"
+    exit 0
+fi
+
+# OUTPUT_DIR_BASE 是绝对路径 (本脚本上面已 export); run tag 目录 = cvrp_n20 (train.py)
+OUT_DIR="$OUTPUT_DIR_BASE/cvrp_n20"
+ADAPTER="$OUT_DIR/final_model"          # GRPO LoRA adapter
+MERGED="$OUT_DIR/merged_model"          # 合并后全量权重 (eval 吃这个)
+if [ ! -f "$ADAPTER/adapter_config.json" ]; then
+    echo "[v6-instruct][FATAL] 训练号称成功但缺 LoRA adapter: $ADAPTER/adapter_config.json"
+    _notify "❌ v6-instruct: 缺 adapter" "$ADAPTER"
+    exit 1
+fi
+
+# ════════════════════════════════════════════════════════════════════════════
+echo "[v6-instruct] ========== [2/3] merge LoRA → merged_model ==========  $(date '+%F %T')"
+# 显式 CPU 合并 (base 从 adapter_config 读 = instruct SFT 产物, 自动适配); 幂等 + 校验权重非空
+# (CLAUDE.md 代码自审: ZeRO-3+LoRA 须验证保存后权重非空)。
+if [ -d "$MERGED" ] && [ -f "$MERGED/config.json" ]; then
+    echo "[v6-instruct] merged_model 已存在, 跳过合并: $MERGED"
+elif ! ADAPTER="$ADAPTER" MERGED="$MERGED" python - <<'PY'
+import os, json, torch
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+adapter = os.environ["ADAPTER"]; merged = os.environ["MERGED"]
+base = json.load(open(os.path.join(adapter, "adapter_config.json")))["base_model_name_or_path"]
+print(f"[merge] base={base}\n[merge] adapter={adapter} -> {merged}")
+m  = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.bfloat16,
+                                          trust_remote_code=True, device_map="cpu")
+pm = PeftModel.from_pretrained(m, adapter)
+pm.merge_and_unload().save_pretrained(merged)
+AutoTokenizer.from_pretrained(adapter).save_pretrained(merged)
+print("[merge] done")
+PY
+then
+    echo "[v6-instruct][FATAL] merge 失败"
+    _notify "❌ v6-instruct: merge 失败" "$ADAPTER"
+    exit 1
+fi
+_W="$(find "$MERGED" -maxdepth 1 -name '*.safetensors' -size +0c 2>/dev/null | head -1)"
+if [ ! -f "$MERGED/config.json" ] || [ -z "$_W" ]; then
+    echo "[v6-instruct][FATAL] merged_model 校验失败 (缺 config.json 或权重为空): $MERGED"
+    ls -la "$MERGED" 2>/dev/null || true
+    _notify "❌ v6-instruct: merged 权重为空" "$MERGED"
+    exit 1
+fi
+echo "[v6-instruct] ✓ merge 完成且权重非空: $MERGED"
+
+# ════════════════════════════════════════════════════════════════════════════
+echo "[v6-instruct] ========== [3/3] BO1 eval (greedy, model_type=reasoning prompt_mode=think) ==========  $(date '+%F %T')"
+# 自动挑空闲卡 (训练刚释放); 留空时扫 nvidia-smi, 最多重试 ~30s 等 vLLM 完全退显存
+if [ -z "$EVAL_GPU" ]; then
+    for _try in 1 2 3 4 5 6; do
+        _free=$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits 2>/dev/null \
+            | awk -F',' '{gsub(/ /,"",$1);gsub(/ /,"",$2)} $2+0>=22528 {print $1}')
+        _arr=($_free)
+        [ "${#_arr[@]}" -ge "$EVAL_TP" ] && break
+        echo "[v6-instruct] 等空闲卡 ($_try/6): 当前 free≥22.5G 仅 ${#_arr[@]} 张, 需 $EVAL_TP ..."
+        sleep 5
+    done
+    if [ "${#_arr[@]}" -lt "$EVAL_TP" ]; then
+        echo "[v6-instruct][FATAL] eval 需 $EVAL_TP 张空闲卡, 仅 ${#_arr[@]} 张; 手动指定 EVAL_GPU=... 重跑 (训练已存档, 不必重训)"
+        exit 1
+    fi
+    EVAL_GPU="$(IFS=,; echo "${_arr[*]:0:$EVAL_TP}")"
+fi
+echo "[v6-instruct] eval GPU=$EVAL_GPU TP=$EVAL_TP NUM_TEST=$EVAL_NUM_TEST"
+
+# run_eval_matrix.sh: ONLY=RL + DO_BO1=1/DO_BO8WAVE=0 → 仅对 RL merged 跑 BO1
+#   它内部硬编码 --prompt_mode think --model_type reasoning (与 SFT bo1 一致, instruct 正确口径),
+#   --num_samples 1 = greedy。BO1-only 不需要 POMO ckpt。结果 → eval_results_matrix/v6_instruct_fw_RL_BO1.json
+set +e
+RL_MODEL="$MERGED" \
+ONLY=RL DO_BO1=1 DO_BO8WAVE=0 \
+NUM_TEST="$EVAL_NUM_TEST" \
+GPU="$EVAL_GPU" TP="$EVAL_TP" GPU_MEM="$EVAL_GPU_MEM" \
+MAXLEN_RL=6144 \
+RUN_PREFIX="v6_instruct_fw_" \
+    bash "$_D/run_eval_matrix.sh"
+EVAL_EC=$?
+set -e
+
+if [ "$EVAL_EC" -eq 0 ]; then
+    echo "[v6-instruct] ✅ 全流程完成 (train→merge→BO1)  $(date '+%F %T')"
+    echo "[v6-instruct] 结果: eval_results_matrix/v6_instruct_fw_RL_BO1.json  日志: eval_logs_matrix/v6_instruct_fw_RL_BO1.log"
+    _notify "✅ v6-instruct train+merge+BO1 完成" "结果 eval_results_matrix/v6_instruct_fw_RL_BO1.json"
+else
+    echo "[v6-instruct] ⚠️ BO1 eval 非零退出 (exit=$EVAL_EC), 详见 eval_logs_matrix/v6_instruct_fw_RL_BO1.log"
+    _notify "⚠️ v6-instruct BO1 非零退出" "exit=$EVAL_EC"
+fi
+exit "$EVAL_EC"
