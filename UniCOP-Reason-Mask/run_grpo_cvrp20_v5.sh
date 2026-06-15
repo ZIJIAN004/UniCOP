@@ -25,8 +25,9 @@ set -euo pipefail
 
 _SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 # BASE_MODEL_TYPE: 选哪条 SFT 产物作为 RL 起点 (不是加载原始基座!):
-#   qwen3_thinking (默认) → output_sft_qwen3_template_cvrp20/final_model (Qwen3-4B SFT)
-#   r1_distill            → output_sft_hybrid_cvrp20/final_model        (DeepSeek-R1-7B SFT)
+#   qwen3_thinking (默认) → output_sft_qwen3_template_cvrp20/final_model          (Qwen3-4B-Thinking SFT)
+#   qwen3_instruct        → output_sft_qwen3_instruct_template_cvrp20/final_model (Qwen3-4B-Instruct SFT, 对齐 FOARL instruct 范式)
+#   r1_distill            → output_sft_hybrid_cvrp20/final_model                  (DeepSeek-R1-7B SFT)
 # paths.sh 据此设采样参数 GEN_TEMPERATURE/TOP_P/TOP_K, trainer 自动读 env
 export BASE_MODEL_TYPE="${BASE_MODEL_TYPE:-qwen3_thinking}"
 source "$(dirname "$_SELF_DIR")/paths.sh"
@@ -79,6 +80,7 @@ SIZE=20
 case "$BASE_MODEL_TYPE" in
     r1_distill)     MODEL_BASE="$DISTILL_DIR/output_sft_hybrid_cvrp20/final_model" ;;
     qwen3_thinking) MODEL_BASE="$DISTILL_DIR/output_sft_qwen3_template_cvrp20/final_model" ;;
+    qwen3_instruct) MODEL_BASE="$DISTILL_DIR/output_sft_qwen3_instruct_template_cvrp20/final_model" ;;
     *) echo "❌ 未知 BASE_MODEL_TYPE='$BASE_MODEL_TYPE'"; exit 1 ;;
 esac
 if [ ! -d "$MODEL_BASE" ]; then
@@ -86,7 +88,7 @@ if [ ! -d "$MODEL_BASE" ]; then
     exit 1
 fi
 echo "[RL 起点] SFT 产物 (非原始基座): $MODEL_BASE"
-echo "[BASE_MODEL_TYPE=$BASE_MODEL_TYPE] qwen3_thinking→Qwen3-4B SFT | r1_distill→R1-7B SFT"
+echo "[BASE_MODEL_TYPE=$BASE_MODEL_TYPE] qwen3_thinking→Qwen3-4B-Thinking SFT | qwen3_instruct→Qwen3-4B-Instruct SFT | r1_distill→R1-7B SFT"
 
 # ── GPU 选择 ──────────────────────────────────────────────────────────
 # zhihan 默认动态挑卡: nvidia-smi 扫所有卡, 用 free 显存 ≥ GPU_MIN_FREE_MIB 的空闲卡,
