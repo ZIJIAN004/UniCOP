@@ -1063,6 +1063,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                     save_dir: str | None = None,
                     prompt_mode: str = "think",
                     model_type: str = "reasoning",
+                    stride: int = 1,
                     retry_until_feasible: bool = False,
                     max_retry_rounds: int = 3,
                     wave_cfg=None, prm=None, wave_tokenizer=None,
@@ -1117,6 +1118,10 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
             # structured 模式：替换 system prompt 和 user 末尾输出格式
             if prompt_mode == "structured":
                 prompt = _apply_structured_prompt(prompt, problem_type)
+            # stride>1: 用 SFT 训练同源的 stride 版 system 覆盖 (与训练数据逐字一致)
+            if stride > 1:
+                from stride_system import apply_stride_system
+                prompt = apply_stride_system(prompt, problem_type, stride)
         prompts.append(prompt)
 
     # 调用推理后端
@@ -1562,6 +1567,9 @@ def main():
                         choices=["think", "structured", "foarl"],
                         help="提示词模式：think=自由推理 | structured=结构化逐步输出 | "
                              "foarl=FOARL 原版(instruction+kNN, 答案 Routes:[[...]]; 用于 instruct 臂, 仅 CVRP)")
+    parser.add_argument("--stride", type=int, default=1,
+                        help="思维链决策粒度 (1=逐点, 5=每5点一决策)。必须与 SFT 训练数据 stride 一致 "
+                             "(think 模式生效; foarl 模式无关)。")
     parser.add_argument("--repetition_penalty", type=float, default=1.0,
                         help="重复惩罚系数，1.0=无惩罚，1.2-1.5=常用范围（仅 local 模式）")
     parser.add_argument("--save_dir", type=str, default=None,
@@ -1756,7 +1764,7 @@ def main():
             generate_fn, problem_type, args.num_test,
             problem_size, args.num_samples, args.temperature,
             max_completion_length, args.batch_size, args.save_dir,
-            prompt_mode, args.model_type,
+            prompt_mode, args.model_type, stride=args.stride,
             retry_until_feasible=args.retry_until_feasible,
             max_retry_rounds=args.max_retry_rounds,
             wave_cfg=wave_cfg, prm=wave_prm,
