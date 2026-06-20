@@ -166,7 +166,7 @@ CUDA_VISIBLE_DEVICES=${EVAL_GPU[0]} python evaluate.py \
     --backend local \
     --model_path "$DISTILL_DIR/$OUTPUT_DIR/final_model" \
     --problem $PROBLEM --problem_size $SIZE \
-    --model_type reasoning --prompt_mode think \
+    --model_type reasoning --prompt_mode think --stride 5 \
     --max_completion_length $EVAL_MAX_COMPLETION \
     --num_test $EVAL_NUM_TEST --num_samples $EVAL_NUM_SAMPLES \
     --batch_size $EVAL_BATCH_SIZE --temperature $EVAL_TEMPERATURE \

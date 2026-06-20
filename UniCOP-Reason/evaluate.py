@@ -465,6 +465,30 @@ def _apply_structured_prompt(prompt: list[dict], problem_type: str) -> list[dict
     return new_prompt
 
 
+# ── stride>1 思维链: 用与 build_think_chains 同源的 system (problems_prompt.get_system_prompt)
+#    覆盖 prob.build_prompt 的 stride=1 _SYSTEM, 保证 eval prompt 与 SFT 训练数据逐字一致。 ──
+_GET_SYS_PROMPT = None
+def _stride_system(problem_type: str, stride: int) -> str:
+    global _GET_SYS_PROMPT
+    if _GET_SYS_PROMPT is None:
+        import sys as _sys, os as _os
+        _d = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "UniCOP-Distill"))
+        if _d not in _sys.path:
+            _sys.path.insert(0, _d)
+        from problems_prompt import get_system_prompt as _g
+        _GET_SYS_PROMPT = _g
+    return _GET_SYS_PROMPT(problem_type, stride)
+
+
+def _apply_stride_system(prompt: list[dict], problem_type: str, stride: int) -> list[dict]:
+    """stride>1: 仅把 system 换成 SFT 训练同源的 stride 版 (问题描述/user 不变, 只改决策粒度说明)。"""
+    if stride <= 1:
+        return prompt
+    new_sys = _stride_system(problem_type, stride)
+    return [{"role": "system", "content": new_sys} if m["role"] == "system" else m
+            for m in prompt]
+
+
 # ── 推理后端：本地模型 ──────────────────────────────────────────────────────────
 
 def _load_local_model(model_path: str):
@@ -849,6 +873,7 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
                     save_dir: str | None = None,
                     prompt_mode: str = "think",
                     model_type: str = "reasoning",
+                    stride: int = 1,
                     retry_until_feasible: bool = False,
                     max_retry_rounds: int = 3,
                     wave_cfg=None, prm=None, wave_tokenizer=None,
@@ -895,6 +920,10 @@ def evaluate_single(generate_fn, problem_type: str, num_test: int,
         # structured 模式：替换 system prompt 和 user 末尾输出格式
         if prompt_mode == "structured":
             prompt = _apply_structured_prompt(prompt, problem_type)
+
+        # stride>1: 用 SFT 训练同源的 stride 版 system 覆盖 (与训练数据逐字一致)
+        if stride > 1:
+            prompt = _apply_stride_system(prompt, problem_type, stride)
 
         instances.append(instance)
         prompts.append(prompt)
@@ -1313,6 +1342,9 @@ def main():
     parser.add_argument("--prompt_mode",  type=str,   default="think",
                         choices=["think", "structured"],
                         help="提示词模式：think=自由推理 | structured=结构化逐步输出")
+    parser.add_argument("--stride", type=int, default=1,
+                        help="思维链决策粒度 (1=逐点, 5=每5点一决策)。必须与 SFT 训练数据的 stride 一致, "
+                             "否则 eval prompt 的 system 与训练数据不符 (train/eval 失配)。")
     parser.add_argument("--repetition_penalty", type=float, default=1.0,
                         help="重复惩罚系数，1.0=无惩罚，1.2-1.5=常用范围（仅 local 模式）")
     parser.add_argument("--no_repeat_ngram_size", type=int, default=0,
@@ -1540,7 +1572,7 @@ def main():
             generate_fn, problem_type, args.num_test,
             problem_size, args.num_samples, args.temperature,
             max_completion_length, args.batch_size, args.save_dir,
-            prompt_mode, args.model_type,
+            prompt_mode, args.model_type, stride=args.stride,
             retry_until_feasible=args.retry_until_feasible,
             max_retry_rounds=args.max_retry_rounds,
             wave_cfg=wave_cfg, prm=wave_prm,
