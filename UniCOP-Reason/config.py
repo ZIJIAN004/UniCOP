@@ -10,6 +10,7 @@ class Config:
     # TSPDL 暂未启用 (没有 POMO/PIP-D ckpt)
     problem_type: str  = "tsp"
     problem_size: int  = 10      # 客户节点数（不含 depot）
+    stride: int        = 1       # 思维链决策粒度 (1=逐点, 5=每5点一决策)。须与 SFT 训练数据 stride 一致。
 
     # ── 模型 ─────────────────────────────────────────────────────────
     model_name: str   = os.environ.get("BASE_MODEL", "")

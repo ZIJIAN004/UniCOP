@@ -20,6 +20,10 @@ def build_dataset(problem_type: str, num_samples: int, seed: int, n: int) -> Dat
     for _ in range(num_samples):
         instance  = prob.generate_instance(n, rng)
         prompt    = prob.build_prompt(instance)
+        # stride>1: 用 SFT 训练同源的 stride 版 system 覆盖 (与 build_think_chains 逐字一致)
+        if getattr(config, "stride", 1) > 1:
+            from stride_system import apply_stride_system
+            prompt = apply_stride_system(prompt, problem_type, config.stride)
         data_str  = prob.to_json(instance)
         prompts.append(prompt)
         problem_datas.append(data_str)
