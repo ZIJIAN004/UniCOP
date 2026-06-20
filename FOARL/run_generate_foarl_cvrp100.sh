@@ -70,6 +70,7 @@ WORKERS="${WORKERS:-48}"
 SEED="${SEED:-42}"
 K_NN="${K_NN:-2}"
 TIMEOUT="${TIMEOUT:-20}"
+SOLUTIONS_ONLY="${SOLUTIONS_ONLY:-0}"   # 1 = 只跑 Step1 生成 solver 解, 跳过 FOARL 格式转换
 SOL_OUT="$DISTILL_DIR/data/solutions_cvrp100.jsonl"
 FOARL_OUT="$FOARL_DIR/data/foarl_cvrp100.jsonl"
 
@@ -79,7 +80,11 @@ echo "  FOARL CVRP100 SFT 数据生成   $(date '+%F %T')   host=$HOST_ID"
 echo "  样本数=$NUM_SAMPLES  并行=$WORKERS core  seed=$SEED  k_nn=$K_NN"
 echo "  解器=PyVRP/HGS  timeout=${TIMEOUT}s/实例  →  预计 Step1 ≈ ${_eta_h} 小时(满量)"
 echo "  [1] solver 解 → $SOL_OUT"
-echo "  [2] FOARL 格式 → $FOARL_OUT"
+if [ "$SOLUTIONS_ONLY" = "1" ]; then
+    echo "  [2] FOARL 格式 → (SOLUTIONS_ONLY=1, 本次跳过)"
+else
+    echo "  [2] FOARL 格式 → $FOARL_OUT"
+fi
 echo "════════════════════════════════════════════════════════════"
 
 # ── Step 1: PyVRP/HGS 解 CVRP100 (断点续跑, 自带 Server酱完成通知) ──────────────
@@ -96,6 +101,17 @@ python stage1_solution/generate_solutions.py \
 
 _n_sol=$(wc -l < "$SOL_OUT" 2>/dev/null || echo 0)
 echo "[1/2] 完成: solutions 累计 $_n_sol 条"
+
+# ── SOLUTIONS_ONLY: 只生成 solver 解, 到此为止 ──────────────────────────────────
+if [ "$SOLUTIONS_ONLY" = "1" ]; then
+    echo "════════════════════════════════════════════════════════════"
+    echo "  ✅ Step1 完成 (SOLUTIONS_ONLY=1, 跳过 FOARL 转换)  $(date '+%F %T')"
+    echo "  solutions_cvrp100.jsonl : $_n_sol 条  →  $SOL_OUT"
+    echo "  转 FOARL 格式: bash run_generate_foarl_cvrp100.sh  (会复用已有 solutions, 仅跑 Step2)"
+    echo "════════════════════════════════════════════════════════════"
+    notify "CVRP100 solver 解生成完成 ✅" "solutions=$_n_sol 条。下一步可转 FOARL 格式(去掉 SOLUTIONS_ONLY 重跑即可)。"
+    exit 0
+fi
 
 # ── Step 2: 转 FOARL 原版格式 (内含可行性/距离/正则三重自检) ──────────────────────
 cd "$FOARL_DIR"
