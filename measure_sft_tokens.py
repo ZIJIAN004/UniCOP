@@ -19,7 +19,7 @@
       --foarl_data  FOARL/data/foarl_cvrp100.jsonl \
       --max_length 8192 --max_output_length 4096    # 传 cvrp20 旧默认, 看会丢多少
 
-  # 只测一个臂就只传对应 --xxx_data; --limit N 抽前 N 条加速
+  # 只测一个臂就只传对应 --xxx_data; 默认只测前 1000 条 (--limit 0 测全量)
 """
 import argparse
 import json
@@ -134,7 +134,7 @@ def main():
     ap.add_argument("--foarl_data", default=None, help="foarl_cvrp100.jsonl")
     ap.add_argument("--max_length", type=int, default=8192)
     ap.add_argument("--max_output_length", type=int, default=4096)
-    ap.add_argument("--limit", type=int, default=0, help="只测前 N 条 (0=全量)")
+    ap.add_argument("--limit", type=int, default=1000, help="只测前 N 条 (默认 1000; 0=全量)")
     args = ap.parse_args()
 
     if not args.unicop_data and not args.foarl_data:
