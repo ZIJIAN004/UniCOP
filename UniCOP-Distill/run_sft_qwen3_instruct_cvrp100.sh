@@ -150,6 +150,9 @@ fi
 if [ ! -f "$OUTPUT_DIR/final_model/config.json" ]; then
     echo "ERROR: merge 后无 config.json, 中止 eval"; exit 1
 fi
+# 权重非空校验 (踩坑#23: ZeRO-3+LoRA 可能存出空壳 adapter/权重, 见 CLAUDE.md 代码自审)
+_W=$(find "$OUTPUT_DIR/final_model" -maxdepth 1 -name '*.safetensors' -size +0c 2>/dev/null | head -1)
+[ -n "$_W" ] || { echo "ERROR: 合并权重为空 (无非空 safetensors)"; exit 1; }
 notify "Step2 完成: adapter 合并"
 
 # ── Step 3: bo1 评估 ──────────────────────────────────────────────────────────
