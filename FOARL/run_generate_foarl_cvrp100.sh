@@ -13,13 +13,14 @@
 #       bash run_generate_foarl_cvrp100.sh
 #       (Ctrl+b d 脱离; tmux attach -t gen100 重连)
 #
-# ⚠️ 耗时: n=100 的 HGS timeout=180s/实例 (generate_solutions.py:67, runs=1)。
-#       50000 条 ÷ 48 core × 180s ≈ 52 小时 (>2 天)。脚本可断点续跑 (按 id 去重),
-#       中途挂掉重跑会自动从断点继续, 不会重复解已完成实例。
-#       想缩短: 改小 NUM_SAMPLES, 或编辑 generate_solutions.py:67 的 cvrp100 timeout。
+# ⚠️ 耗时由 TIMEOUT 决定 (HGS 用 MaxRuntime, 即使早收敛也会空转到 timeout):
+#       均匀 CVRP100 HGS 通常几秒即近最优, 180s 是浪费 → 默认 TIMEOUT=10s。
+#       50000 ÷ 48 × 10s ≈ 2.9 小时 (TIMEOUT=180 则 ~52h, 不必要)。
+#       脚本可断点续跑 (按 id 去重), 中途挂掉重跑自动从断点继续, 不重复解已完成实例。
 #
 # 可覆盖环境变量:
 #   NUM_SAMPLES (默认 50000, 对齐 cvrp20)  WORKERS (默认 48)  SEED (默认 42)  K_NN (默认 2)
+#   TIMEOUT (默认 10, HGS 每实例秒数; 想更稳设 20, 想更快设 5)
 # 例: NUM_SAMPLES=50 bash run_generate_foarl_cvrp100.sh   # 先小批试跑验证管线
 # ═══════════════════════════════════════════════════════════════════════════════
 set -eo pipefail
@@ -68,14 +69,15 @@ NUM_SAMPLES="${NUM_SAMPLES:-50000}"
 WORKERS="${WORKERS:-48}"
 SEED="${SEED:-42}"
 K_NN="${K_NN:-2}"
+TIMEOUT="${TIMEOUT:-10}"
 SOL_OUT="$DISTILL_DIR/data/solutions_cvrp100.jsonl"
 FOARL_OUT="$FOARL_DIR/data/foarl_cvrp100.jsonl"
 
-_eta_h=$(python -c "print(f'{${NUM_SAMPLES}*180/${WORKERS}/3600:.0f}')" 2>/dev/null || echo "?")
+_eta_h=$(python -c "print(f'{${NUM_SAMPLES}*${TIMEOUT}/${WORKERS}/3600:.1f}')" 2>/dev/null || echo "?")
 echo "════════════════════════════════════════════════════════════"
 echo "  FOARL CVRP100 SFT 数据生成   $(date '+%F %T')   host=$HOST_ID"
 echo "  样本数=$NUM_SAMPLES  并行=$WORKERS core  seed=$SEED  k_nn=$K_NN"
-echo "  解器=PyVRP/HGS  timeout=180s/实例  →  预计 Step1 ≈ ${_eta_h} 小时(满量)"
+echo "  解器=PyVRP/HGS  timeout=${TIMEOUT}s/实例  →  预计 Step1 ≈ ${_eta_h} 小时(满量)"
 echo "  [1] solver 解 → $SOL_OUT"
 echo "  [2] FOARL 格式 → $FOARL_OUT"
 echo "════════════════════════════════════════════════════════════"
@@ -88,6 +90,7 @@ python stage1_solution/generate_solutions.py \
     --num_samples "$NUM_SAMPLES" \
     --workers "$WORKERS" \
     --seed "$SEED" \
+    --timeout "$TIMEOUT" \
     --lkh_bin "$LKH_BIN" \
     --output "$SOL_OUT"
 

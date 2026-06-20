@@ -120,7 +120,7 @@ def count_samples(output_path: str) -> dict:
 
 def _solve_one(args_tuple):
     """单条数据：生成实例 → 求解 → 构建 prompt → 返回 record (进程安全)。"""
-    pt, n, sample_idx, sample_id, seed, lkh_bin = args_tuple
+    pt, n, sample_idx, sample_id, seed, lkh_bin, timeout_override = args_tuple
 
     # 延迟 import，每个子进程独立加载
     sys.path.insert(0, os.path.abspath(_UNICOP_REASON_DIR))
@@ -133,8 +133,9 @@ def _solve_one(args_tuple):
     instance = problem.generate_instance(n, rng)
 
     params = _SOLVER_PARAMS.get((pt, n), _SOLVER_PARAMS_DEFAULT)
+    _timeout = timeout_override if timeout_override and timeout_override > 0 else params["timeout"]
     solution = lkh_solve(pt, instance, lkh_bin=lkh_bin,
-                         runs=params["runs"], seed=seed, timeout=params["timeout"])
+                         runs=params["runs"], seed=seed, timeout=_timeout)
     if solution is None:
         return None
 
@@ -170,6 +171,9 @@ def main():
     parser.add_argument("--lkh_bin", type=str, default=os.environ.get("LKH_BIN", LKH_BIN))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=str, default="data/solutions.jsonl")
+    parser.add_argument("--timeout", type=int, default=0,
+                        help="覆盖求解器 timeout(秒); 0=用 _SOLVER_PARAMS 内置值。"
+                             "均匀 CVRP100 用 HGS 时 ~10s 即近最优(180s 是空转浪费, 见文献)")
     parser.add_argument("--workers", type=int, default=32,
                         help="并行求解进程数")
     args = parser.parse_args()
@@ -206,8 +210,9 @@ def main():
         for pt, n, gap in combos_need:
             current = valid_counts.get((pt, n), 0)
             params = _SOLVER_PARAMS.get((pt, n), _SOLVER_PARAMS_DEFAULT)
+            _eff_timeout = args.timeout if args.timeout and args.timeout > 0 else params['timeout']
             print(f"[{pt}_n{n}] 已有 {current}/{args.num_samples}，需补充 {gap} 条"
-                  f"  (runs={params['runs']}, timeout={params['timeout']}s)")
+                  f"  (runs={params['runs']}, timeout={_eff_timeout}s)")
 
             start_idx = 0
             for eid in existing_ids:
@@ -223,7 +228,7 @@ def main():
                 sid = f"{pt}_n{n}_s{args.seed}_i{start_idx + i}"
                 if sid in existing_ids:
                     continue
-                tasks.append((pt, n, start_idx + i, sid, args.seed, args.lkh_bin))
+                tasks.append((pt, n, start_idx + i, sid, args.seed, args.lkh_bin, args.timeout))
 
             saved = 0
             failed = 0
