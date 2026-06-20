@@ -19,10 +19,11 @@
       --foarl_data  FOARL/data/foarl_cvrp100.jsonl \
       --max_length 8192 --max_output_length 4096    # 传 cvrp20 旧默认, 看会丢多少
 
-  # 只测一个臂就只传对应 --xxx_data; 默认只测前 1000 条 (--limit 0 测全量)
+  # 只测一个臂就只传对应 --xxx_data; 默认随机抽 100 条 (--limit 0 测全量)
 """
 import argparse
 import json
+import random
 import numpy as np
 from transformers import AutoTokenizer
 
@@ -65,7 +66,21 @@ def _report(name, P, C, T, max_length, max_output_length):
     print(f"  建议 (p99×1.05 取整128): --max_output_length {rec_o}  --max_length {rec_t}")
 
 
-def measure_unicop(path, tok, max_length, max_output_length, limit):
+def _load_records(path, limit):
+    """读全部记录, limit>0 时随机抽 limit 条 (固定 seed=42 可复现)。"""
+    recs = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                recs.append(json.loads(line))
+    if limit and len(recs) > limit:
+        random.seed(42)
+        recs = random.sample(recs, limit)
+    return recs
+
+
+def measure_unicop(records, tok, max_length, max_output_length):
     probe = tok.apply_chat_template(
         [{"role": "system", "content": "p"}, {"role": "user", "content": "p"}],
         tokenize=False, add_generation_prompt=True)
@@ -73,57 +88,43 @@ def measure_unicop(path, tok, max_length, max_output_length, limit):
     print(f"  [UniCOP] chat_template 末尾带<think>: {ends_think} "
           f"({'用模板自带' if ends_think else '手动补<think>\\n'})")
     P, C, T = [], [], []
-    with open(path, encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if limit and i >= limit:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            r = json.loads(line)
-            system = r["prompt"]["system"].split(_POSTHOC_SYS)[0]
-            user = r["prompt"]["user"].split(_POSTHOC_USR)[0]
-            output = r["output"]
-            if not output.strip():
-                continue
-            prompt = tok.apply_chat_template(
-                [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                tokenize=False, add_generation_prompt=True)
-            if not ends_think:
-                prompt += "<think>\n"
-            out = output.lstrip()
-            if out.startswith("<think>"):
-                out = out[len("<think>"):].lstrip("\n")
-            completion = out + tok.eos_token
-            pl = len(tok.encode(prompt))
-            cl = len(tok.encode(completion))
-            P.append(pl); C.append(cl); T.append(pl + cl)
+    for r in records:
+        system = r["prompt"]["system"].split(_POSTHOC_SYS)[0]
+        user = r["prompt"]["user"].split(_POSTHOC_USR)[0]
+        output = r["output"]
+        if not output.strip():
+            continue
+        prompt = tok.apply_chat_template(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            tokenize=False, add_generation_prompt=True)
+        if not ends_think:
+            prompt += "<think>\n"
+        out = output.lstrip()
+        if out.startswith("<think>"):
+            out = out[len("<think>"):].lstrip("\n")
+        completion = out + tok.eos_token
+        pl = len(tok.encode(prompt))
+        cl = len(tok.encode(completion))
+        P.append(pl); C.append(cl); T.append(pl + cl)
     _report("UniCOP 思维臂 (stride=5)", P, C, T, max_length, max_output_length)
 
 
-def measure_foarl(path, tok, max_length, max_output_length, limit):
+def measure_foarl(records, tok, max_length, max_output_length):
     P, C, T = [], [], []
-    with open(path, encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if limit and i >= limit:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            r = json.loads(line)
-            instruction = r.get("instruction", "")
-            inp = r.get("input", "")
-            output = r.get("output", "")
-            if not output.strip():
-                continue
-            prompt = tok.apply_chat_template(
-                [{"role": "system", "content": FOARL_PREAMBLE},
-                 {"role": "user", "content": f"{instruction}\n\n{inp}"}],
-                tokenize=False, add_generation_prompt=True)
-            completion = output + tok.eos_token
-            pl = len(tok.encode(prompt))
-            cl = len(tok.encode(completion))
-            P.append(pl); C.append(cl); T.append(pl + cl)
+    for r in records:
+        instruction = r.get("instruction", "")
+        inp = r.get("input", "")
+        output = r.get("output", "")
+        if not output.strip():
+            continue
+        prompt = tok.apply_chat_template(
+            [{"role": "system", "content": FOARL_PREAMBLE},
+             {"role": "user", "content": f"{instruction}\n\n{inp}"}],
+            tokenize=False, add_generation_prompt=True)
+        completion = output + tok.eos_token
+        pl = len(tok.encode(prompt))
+        cl = len(tok.encode(completion))
+        P.append(pl); C.append(cl); T.append(pl + cl)
     _report("FOARL 无推理臂", P, C, T, max_length, max_output_length)
 
 
@@ -132,9 +133,10 @@ def main():
     ap.add_argument("--model", required=True, help="tokenizer 路径 (=Qwen3-4B-Instruct-2507)")
     ap.add_argument("--unicop_data", default=None, help="chains_template_cvrp100.jsonl")
     ap.add_argument("--foarl_data", default=None, help="foarl_cvrp100.jsonl")
-    ap.add_argument("--max_length", type=int, default=8192)
-    ap.add_argument("--max_output_length", type=int, default=4096)
-    ap.add_argument("--limit", type=int, default=1000, help="只测前 N 条 (默认 1000; 0=全量)")
+    ap.add_argument("--max_length", type=int, default=16384)
+    ap.add_argument("--max_output_length", type=int, default=12288)
+    ap.add_argument("--limit", type=int, default=100,
+                    help="随机抽 N 条测 (默认 100, 固定 seed=42 可复现; 0=全量)")
     args = ap.parse_args()
 
     if not args.unicop_data and not args.foarl_data:
@@ -147,9 +149,11 @@ def main():
     print(f"  eos={tok.eos_token!r} (id={tok.eos_token_id})")
 
     if args.unicop_data:
-        measure_unicop(args.unicop_data, tok, args.max_length, args.max_output_length, args.limit)
+        measure_unicop(_load_records(args.unicop_data, args.limit), tok,
+                       args.max_length, args.max_output_length)
     if args.foarl_data:
-        measure_foarl(args.foarl_data, tok, args.max_length, args.max_output_length, args.limit)
+        measure_foarl(_load_records(args.foarl_data, args.limit), tok,
+                      args.max_length, args.max_output_length)
 
 
 if __name__ == "__main__":
