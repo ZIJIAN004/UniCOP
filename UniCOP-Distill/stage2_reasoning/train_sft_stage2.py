@@ -414,10 +414,15 @@ def main():
 
     # ── 加载模型 ─────────────────────────────────────────────────────────
     print("\n加载模型...")
+    # attn_implementation 默认 flash_attention_2: O(n²) attention 激活不再 materialize,
+    # 长序列 (cvrp100 ~13.5k token) 省大量显存 + 提速。transformers 4.57 默认走 sdpa,
+    # 不会自动用 flash-attn,必须显式指定。可用 SFT_ATTN_IMPL 覆盖 (如 sdpa/eager 调试)。
+    _attn_impl = os.environ.get("SFT_ATTN_IMPL", "flash_attention_2")
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
+        attn_implementation=_attn_impl,
     )
 
     # 如果 pad_token 阶段我们新加了 token,embedding 必须 resize
@@ -470,6 +475,15 @@ def main():
         # 会报 "Recomputed values shape [0]"。社区 workaround 是强制 use_reentrant=True
         # (trl#2514, peft#1142)。与 UniCOP-Reason/train.py 保持一致。
         gradient_checkpointing_kwargs={"use_reentrant": args.zero_stage == 3},
+        # Liger fused linear CE: 不 materialize logits (vocab 151936 × seq 13.5k × bf16
+        # ≈ 4GB,CE 内部 fp32 upcast 再翻倍,ZeRO-3 不分片这块,gc 也救不了),
+        # 直接 hidden→loss 融合,峰值显存大降。与 LoRA/PEFT/DeepSpeed ZeRO-3 兼容
+        # (layer 级 patch,不碰 adapter 权重)。注意: 我们的 completion-only 走
+        # DataCollatorForCompletionOnlyLM (collator 内 label=-100),非 TRL 的
+        # assistant_only_loss 路径,liger 的 fused CE 尊重 ignore_index=-100,mask 保留
+        # (trl#3781 的静默丢 mask 坑只影响 assistant_only_loss,不影响我们)。
+        # 可用 SFT_USE_LIGER=0 关闭。
+        use_liger_kernel=os.environ.get("SFT_USE_LIGER", "1") != "0",
         eval_strategy="steps" if eval_dataset else "no",
         eval_steps=args.save_steps if eval_dataset else None,
         lr_scheduler_type="cosine",
