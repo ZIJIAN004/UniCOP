@@ -243,7 +243,6 @@ def train_hlr(cfg: HLRConfig):
     # (不能在这里 inline 做: ZeRO-3 init context 已经 partition embedding.weight 成
     # 1D, model.forward 会 'weight' must be 2-D 报错).
     # 见 submit_train_eval_hlr.sh / submit_smoke_hlr.sh 的 Step 0 模板.
-    import os
     if not os.path.exists(cfg.data_path):
         raise FileNotFoundError(
             f"profiled jsonl 不存在: {cfg.data_path}\n"
