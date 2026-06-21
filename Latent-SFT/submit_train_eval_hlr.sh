@@ -72,8 +72,8 @@ source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop
 
-set -euo pipefail  # 必须在 conda activate 之后 (参照 Reason-Mask)
 echo "[train_eval_hlr] 启动 $(date '+%F %T') host=$(hostname) job=${SLURM_JOB_ID:-none}"
+set -uo pipefail   # 必须在 conda activate 之后, 不加 -e (参照 Reason-Mask)
 
 cd /homes/zhuoyi/zijianliu/UniCOP
 export BASE_MODEL_TYPE="${BASE_MODEL_TYPE:-qwen3_thinking}"
