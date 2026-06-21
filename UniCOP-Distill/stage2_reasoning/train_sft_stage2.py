@@ -18,12 +18,13 @@ Stage 2 SFT：在 Stage 1 ckpt 上用 Gemini 推理链教 <think>...</think> 推
 """
 
 import argparse
+import hashlib
 import json
 import os
 
 import torch
 
-from datasets import Dataset
+from datasets import Dataset, load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 from trl import DataCollatorForCompletionOnlyLM, SFTConfig, SFTTrainer
 from peft import LoraConfig
@@ -135,6 +136,30 @@ def _detect_response_template(tokenizer) -> str:
     return gen_prompt
 
 
+def _dataset_cache_key(data_path, tokenizer_name, max_length, max_output_length,
+                       filter_problems, filter_sizes) -> str:
+    """处理后数据集的缓存 key: 数据文件 mtime/size + 所有影响产物的参数 + tokenizer。
+
+    任一数据文件被重新生成 (mtime/size 变) 或参数变更 → key 变 → 自动失效重建,
+    不会用到过期缓存。
+    """
+    paths = [data_path] if isinstance(data_path, str) else list(data_path)
+    parts = []
+    for p in sorted(paths):
+        try:
+            st = os.stat(p)
+            parts.append(f"{os.path.abspath(p)}:{st.st_size}:{int(st.st_mtime)}")
+        except OSError:
+            parts.append(f"{os.path.abspath(p)}:MISSING")
+    blob = "|".join(parts) + (
+        f"||ml={max_length}|mol={max_output_length}"
+        f"|fp={sorted(filter_problems) if filter_problems else None}"
+        f"|fs={sorted(filter_sizes) if filter_sizes else None}"
+        f"|tok={tokenizer_name}"
+    )
+    return hashlib.md5(blob.encode("utf-8")).hexdigest()[:16]
+
+
 def load_sft_dataset(data_path, tokenizer, max_length: int,
                      max_output_length: int = 4096,
                      filter_problems=None, filter_sizes=None) -> Dataset:
@@ -232,11 +257,17 @@ def load_sft_dataset(data_path, tokenizer, max_length: int,
                     skipped_too_long += 1
                     continue
 
+                # prompt 长度此处一次编码并缓存,供后面 max_length 过滤复用,
+                # 避免 line 270 再把 prompt+completion 重复编码一遍 (原本每条编码 3 次)。
+                prompt_token_len = len(tokenizer.encode(prompt_text))
+
                 records.append({
                     "prompt":     prompt_text,
                     "completion": completion_text,
                     "problem_type": r.get("problem_type", "unknown"),
                     "n": r.get("n", 0),
+                    "_plen":      prompt_token_len,
+                    "_clen":      completion_token_len,
                 })
                 per_file_loaded += 1
         print(f"  [{path}] 加载 {per_file_loaded} 条")
@@ -266,8 +297,8 @@ def load_sft_dataset(data_path, tokenizer, max_length: int,
     print(f"  规模分布:     {dict(sorted(size_counts.items()))}")
 
     before_filter = len(records)
-    records = [r for r in records
-               if len(tokenizer.encode(r["prompt"])) + len(tokenizer.encode(r["completion"])) <= max_length]
+    # 复用循环中已算好的 token 长度,不再二次编码 (原本 O(2N) 次 encode)
+    records = [r for r in records if r["_plen"] + r["_clen"] <= max_length]
     skipped_total_len = before_filter - len(records)
     if skipped_total_len:
         print(f"  过滤 {skipped_total_len} 条 prompt+completion 超过 max_length={max_length} 的样本")
@@ -309,6 +340,15 @@ def main():
                         help="验证集比例（默认 0 不验证）")
     parser.add_argument("--max_samples",  type=int,   default=0,
                         help="只取前 N 条样本(sanity test 用), 0=全量")
+    parser.add_argument("--dataset_num_proc", type=int, default=0,
+                        help="TRL 内部 tokenize 的并行进程数(0=自动取 min(8,CPU))。"
+                             "大数据集长序列时单核 tokenize 极慢, 多核可线性加速。"
+                             "也可用环境变量 SFT_NUM_PROC 覆盖。")
+    parser.add_argument("--no_data_cache", action="store_true",
+                        help="禁用处理后数据集的磁盘缓存(默认开启)。缓存按数据文件"
+                             "mtime/size + 长度/filter/tokenizer 做 key, 命中则跳过"
+                             "整个加载+编码循环, 重跑从 ~30min 降到秒级。"
+                             "也可用环境变量 SFT_DATA_CACHE=0 关闭。")
 
     # 训练
     parser.add_argument("--seed",         type=int,   default=42,
@@ -392,9 +432,36 @@ def main():
 
     # ── 加载数据 ─────────────────────────────────────────────────────────
     print("加载训练数据...")
-    dataset = load_sft_dataset(args.data, tokenizer, args.max_length, args.max_output_length,
-                              filter_problems=args.filter_problems,
-                              filter_sizes=args.filter_sizes)
+    _use_cache = (not args.no_data_cache) and os.environ.get("SFT_DATA_CACHE", "1") != "0"
+
+    def _build_dataset():
+        return load_sft_dataset(args.data, tokenizer, args.max_length, args.max_output_length,
+                                filter_problems=args.filter_problems,
+                                filter_sizes=args.filter_sizes)
+
+    if _use_cache:
+        # 多 rank 协调: main_process_first 让 rank0 先构建并落盘, 其余 rank 等待后
+        # 直接 load_from_disk, 避免 N 个进程各跑一遍 30min 的加载+编码循环。
+        from accelerate import PartialState
+        _state = PartialState()
+        _key = _dataset_cache_key(args.data, args.model, args.max_length,
+                                  args.max_output_length, args.filter_problems, args.filter_sizes)
+        _cache_root = os.environ.get(
+            "SFT_CACHE_DIR",
+            os.path.join(os.path.dirname(os.path.abspath(
+                args.data[0] if isinstance(args.data, list) else args.data)), ".sft_cache"))
+        _cache_path = os.path.join(_cache_root, f"sft_{_key}")
+        with _state.main_process_first():
+            if os.path.isdir(_cache_path):
+                print(f"  [cache] 命中处理后数据集, 跳过加载+编码: {_cache_path}")
+                dataset = load_from_disk(_cache_path)
+            else:
+                dataset = _build_dataset()
+                os.makedirs(_cache_root, exist_ok=True)
+                dataset.save_to_disk(_cache_path)
+                print(f"  [cache] 已落盘处理后数据集: {_cache_path}")
+    else:
+        dataset = _build_dataset()
 
     # sanity 模式: 只取前 N 条
     if args.max_samples > 0 and len(dataset) > args.max_samples:
@@ -455,9 +522,15 @@ def main():
     # ── SFT 配置 ─────────────────────────────────────────────────────────
     ds_config = make_deepspeed_config(args.zero_stage)
 
+    # TRL 内部 tokenize 的并行度: 优先级 CLI --dataset_num_proc > 环境变量 SFT_NUM_PROC
+    # > 自动 min(8, CPU)。单核 tokenize 50k×13k token 极慢, 多核近线性加速。
+    _num_proc = args.dataset_num_proc or int(os.environ.get("SFT_NUM_PROC", "0")) \
+        or min(8, os.cpu_count() or 1)
+
     sft_config = SFTConfig(
         output_dir=args.output_dir,
         max_length=args.max_length,
+        dataset_num_proc=_num_proc,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
