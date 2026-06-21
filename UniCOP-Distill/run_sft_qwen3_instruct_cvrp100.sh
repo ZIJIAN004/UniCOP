@@ -130,7 +130,7 @@ CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
     --output_dir "$OUTPUT_DIR" \
     --zero_stage 2 --gradient_checkpointing \
     --resume_from_checkpoint auto \
-    --epochs $SFT_EPOCHS --batch_size 2 --grad_accum 4 \
+    --epochs $SFT_EPOCHS --batch_size 1 --grad_accum 8 \
     --lr $SFT_LR --save_steps 200
 
 if [ ! -f "$OUTPUT_DIR/final_model/adapter_config.json" ] && \
