@@ -225,7 +225,7 @@ echo ">>> Step 1: HLR 训练 ($(date))"
 echo "    epochs=${HLR_EPOCHS:-3}  batch=1 grad_accum=8 × 4 GPU = effective 32"
 echo "    main_lr=2e-5 (LoRA)  latent_reasoner_lr=5e-5"
 echo "    LoRA r=64 alpha=128  scheduler=cosine warmup=0.05 wd=0.01"
-echo "    Loss: α=1.0 (student CE) β=1.0 (align L1) γ=1.0 (teacher CE)"
+echo "    Loss: α=${HLR_ALPHA} (student CE) β=${HLR_BETA} (align L1) γ=${HLR_GAMMA} (teacher CE)"
 echo "    Latent trigger: window=3 quantile=0.5 min=3 max=8 cooldown=24"
 echo "    profiled data: $PROFILED_DATA"
 echo ""
@@ -235,11 +235,17 @@ if [ -n "${HLR_EPOCHS:-}" ]; then
     EXTRA_EPOCHS_FLAG="--epochs $HLR_EPOCHS"
 fi
 
+HLR_ALPHA="${HLR_ALPHA:-1.0}"
+HLR_BETA="${HLR_BETA:-1.0}"
+HLR_GAMMA="${HLR_GAMMA:-1.0}"
+LOSS_FLAGS="--alpha $HLR_ALPHA --beta $HLR_BETA --gamma $HLR_GAMMA"
+
 accelerate launch --num_processes 4 --main_process_port 29700 \
     Latent-SFT/train.py \
     --model "$MODEL_PATH" \
     --data "$PROFILED_DATA" \
     $EXTRA_EPOCHS_FLAG \
+    $LOSS_FLAGS \
     --zero_stage 3 \
     --gradient_checkpointing \
     --output_dir "$OUTPUT_DIR" \
