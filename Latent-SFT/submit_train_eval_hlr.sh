@@ -156,8 +156,8 @@ echo "============================================================"
 # 报 'weight' must be 2-D (embedding.weight 已被 partition 成 1D 切片).
 # 改为 sbatch 这里 4 卡并行不带 DeepSpeed 跑, 训练时传 --data 跳过.
 # 每条样本独立 forward, embarrassingly parallel.
-RAW_DATA="${RAW_DATA:-UniCOP-Distill/data/chains_template_cvrp20.jsonl}"
-PROFILED_DATA="${HLR_DATA:-Latent-SFT/data/profiled_${BASE_MODEL_TYPE}_cvrp20.jsonl}"
+RAW_DATA="${RAW_DATA:-UniCOP-Distill/data/chains_template_cvrp20_10k.jsonl}"
+PROFILED_DATA="${HLR_DATA:-Latent-SFT/data/profiled_${BASE_MODEL_TYPE}_cvrp20_10k.jsonl}"
 
 echo ""
 echo ">>> Step 0: entropy_profile (4 卡并行) ($(date))"
