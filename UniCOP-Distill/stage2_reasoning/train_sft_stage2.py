@@ -251,26 +251,41 @@ def load_sft_dataset(data_path, tokenizer, max_length: int,
                 #    (eos_token 显式加, 让模型学会"完整答案结束就停止")
                 completion_text = output_stripped + tokenizer.eos_token
 
-                # output token 超长过滤
-                completion_token_len = len(tokenizer.encode(completion_text))
-                if completion_token_len > max_output_length:
-                    skipped_too_long += 1
-                    continue
-
-                # prompt 长度此处一次编码并缓存,供后面 max_length 过滤复用,
-                # 避免 line 270 再把 prompt+completion 重复编码一遍 (原本每条编码 3 次)。
-                prompt_token_len = len(tokenizer.encode(prompt_text))
-
+                # 长度过滤推迟到循环外批量编码 (见下方),
+                # 单条 tokenizer.encode 是串行的且有 per-call 开销,
+                # 批量 tokenizer(list) 能用上 fast tokenizer 的 Rust 多线程。
                 records.append({
                     "prompt":     prompt_text,
                     "completion": completion_text,
                     "problem_type": r.get("problem_type", "unknown"),
                     "n": r.get("n", 0),
-                    "_plen":      prompt_token_len,
-                    "_clen":      completion_token_len,
                 })
                 per_file_loaded += 1
         print(f"  [{path}] 加载 {per_file_loaded} 条")
+
+    # ── 批量编码算 token 长度 (fast tokenizer Rust 多线程, 远快于循环里逐条 encode) ──
+    #    分块 1000 条只取 len, 避免一次性持有 5 万条 input_ids 的内存。
+    #    语义与单条 tokenizer.encode 一致 (都默认 add_special_tokens=True)。
+    def _batch_token_lens(texts, chunk=1000):
+        lens = []
+        for i in range(0, len(texts), chunk):
+            enc = tokenizer(texts[i:i + chunk], add_special_tokens=True)["input_ids"]
+            lens.extend(len(x) for x in enc)
+        return lens
+
+    if records:
+        clens = _batch_token_lens([r["completion"] for r in records])
+        plens = _batch_token_lens([r["prompt"] for r in records])
+        kept = []
+        for r, cl, pl in zip(records, clens, plens):
+            # 阶段 1: completion (output) 超长过滤
+            if cl > max_output_length:
+                skipped_too_long += 1
+                continue
+            r["_clen"] = cl
+            r["_plen"] = pl
+            kept.append(r)
+        records = kept
 
     # ── 抽样打印第 1 条的 prompt 末尾 + completion 开头, 人眼验证结构 ──
     if records:
@@ -297,7 +312,7 @@ def load_sft_dataset(data_path, tokenizer, max_length: int,
     print(f"  规模分布:     {dict(sorted(size_counts.items()))}")
 
     before_filter = len(records)
-    # 复用循环中已算好的 token 长度,不再二次编码 (原本 O(2N) 次 encode)
+    # 阶段 2: prompt+completion 总长过滤, 复用上面批量算好的 token 长度, 不再二次编码
     records = [r for r in records if r["_plen"] + r["_clen"] <= max_length]
     skipped_total_len = before_filter - len(records)
     if skipped_total_len:
