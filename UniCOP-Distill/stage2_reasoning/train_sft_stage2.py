@@ -440,8 +440,13 @@ def main():
                                 filter_sizes=args.filter_sizes)
 
     if _use_cache:
-        # 多 rank 协调: main_process_first 让 rank0 先构建并落盘, 其余 rank 等待后
-        # 直接 load_from_disk, 避免 N 个进程各跑一遍 30min 的加载+编码循环。
+        # 多 rank 协调: 用文件系统而非 NCCL barrier。
+        # ⚠️ 不能用 accelerate main_process_first(): 它在入口 torch.distributed.barrier()
+        #    阻塞非主进程等 rank0 跑完 body(=30min 构建), 而 barrier 是首个 collective,
+        #    NCCL 默认超时仅 600s → rank0 构建超 10min 时非主进程在 NCCL 初始化处超时崩溃
+        #    (DistBackendError: wait timeout after 600000ms / broadcastUniqueNCCLID)。
+        # 改为: rank0 构建+落盘+写 .done 标记; 其余 rank 轮询文件系统(无 collective)等标记,
+        #    NCCL 初始化自然推迟到 SFTTrainer (所有 rank 到齐时), 不再被构建阻塞。
         from accelerate import PartialState
         _state = PartialState()
         _key = _dataset_cache_key(args.data, args.model, args.max_length,
@@ -451,15 +456,36 @@ def main():
             os.path.join(os.path.dirname(os.path.abspath(
                 args.data[0] if isinstance(args.data, list) else args.data)), ".sft_cache"))
         _cache_path = os.path.join(_cache_root, f"sft_{_key}")
-        with _state.main_process_first():
+        _done_marker = _cache_path + ".done"   # 完整性标记(落盘成功后才写), sibling 不污染 dataset 目录
+
+        if os.path.isfile(_done_marker):
+            # 已有完整缓存: 所有 rank 直接 load, 无需任何协调
+            print(f"  [cache] 命中处理后数据集, 跳过加载+编码: {_cache_path}")
+            dataset = load_from_disk(_cache_path)
+        elif _state.is_main_process:
+            # 仅主进程构建; 先清理上次未完成的残留(有目录但无 .done), 避免 save_to_disk 撞已存在目录
+            import shutil
             if os.path.isdir(_cache_path):
-                print(f"  [cache] 命中处理后数据集, 跳过加载+编码: {_cache_path}")
-                dataset = load_from_disk(_cache_path)
-            else:
-                dataset = _build_dataset()
-                os.makedirs(_cache_root, exist_ok=True)
-                dataset.save_to_disk(_cache_path)
-                print(f"  [cache] 已落盘处理后数据集: {_cache_path}")
+                shutil.rmtree(_cache_path, ignore_errors=True)
+            dataset = _build_dataset()
+            os.makedirs(_cache_root, exist_ok=True)
+            dataset.save_to_disk(_cache_path)
+            with open(_done_marker, "w") as _f:
+                _f.write("ok")
+            print(f"  [cache] 已落盘处理后数据集: {_cache_path}")
+        else:
+            # 非主进程: 轮询文件系统等 rank0 写出 .done (不走 NCCL), 带超时防 rank0 崩溃后死等
+            import time
+            _t0 = time.time()
+            _timeout_s = int(os.environ.get("SFT_CACHE_BUILD_TIMEOUT", "7200"))
+            while not os.path.isfile(_done_marker):
+                if time.time() - _t0 > _timeout_s:
+                    raise TimeoutError(
+                        f"等待 rank0 构建数据集缓存超时 ({_timeout_s}s): {_done_marker}。"
+                        f" rank0 可能已崩溃, 请检查 rank0 日志。")
+                time.sleep(10)
+            print(f"  [cache] rank{_state.process_index}: rank0 已完成构建, 加载 {_cache_path}")
+            dataset = load_from_disk(_cache_path)
     else:
         dataset = _build_dataset()
 

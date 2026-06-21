@@ -293,23 +293,41 @@ def train_hlr(cfg: HLRConfig):
     _limit = getattr(cfg, "dataset_limit", 0)
     _stamp(f"before HLRDataset() (limit={_limit if _limit else 'full'})")
     # 处理后样本磁盘缓存: 重跑跳过 tokenize 循环 (16min→秒级)。HLR_DATA_CACHE=0 关。
-    # main_process_first: rank0 先构建+落盘, 其余 rank 等待后直接 load, 消除 ×N rank 冗余。
+    # ⚠️ 不能用 accelerator.main_process_first(): 它在入口 torch.distributed.barrier()
+    #    阻塞非主进程等 rank0 跑完构建(16min), 而 barrier 是首个 collective(prepare 还没调),
+    #    NCCL 默认超时仅 600s → 构建超 10min 时非主进程在 NCCL 初始化处超时崩溃。
+    # 改为: rank0 构建(HLRDataset 内 build+save+写 .done); 非主进程轮询文件系统(无 collective)
+    #    等 .done 再构建(命中 load)。NCCL 初始化自然推迟到 accelerator.prepare (所有 rank 到齐)。
     _hlr_cache_dir = (
         None if os.environ.get("HLR_DATA_CACHE", "1") == "0"
         else os.environ.get(
             "HLR_CACHE_DIR",
             os.path.join(os.path.dirname(os.path.abspath(cfg.data_path)), ".hlr_cache"))
     )
-    with accelerator.main_process_first():
-        dataset = HLRDataset(
-            cfg.data_path, tokenizer,
-            max_length=cfg.max_length,
-            latent_compression_ratio=cfg.latent_compression_ratio,
-            filter_problems=cfg.filter_problems,
-            filter_sizes=cfg.filter_sizes,
-            limit=_limit,
-            cache_dir=_hlr_cache_dir,
-        )
+    if _hlr_cache_dir and _limit <= 0 and not accelerator.is_main_process:
+        # 非主进程: 先等 rank0 写出 .done 标记再构建(届时命中缓存直接 load)
+        from data_utils import hlr_cache_file
+        _done = hlr_cache_file(
+            _hlr_cache_dir, cfg.data_path, tokenizer, cfg.max_length,
+            cfg.latent_compression_ratio, cfg.filter_problems, cfg.filter_sizes) + ".done"
+        if not os.path.isfile(_done):
+            _t0 = time.time()
+            _to = int(os.environ.get("HLR_CACHE_BUILD_TIMEOUT", "7200"))
+            while not os.path.isfile(_done):
+                if time.time() - _t0 > _to:
+                    raise TimeoutError(
+                        f"等待 rank0 构建 HLR 缓存超时 ({_to}s): {_done}。rank0 可能已崩溃,"
+                        f" 请检查 rank0 日志。")
+                time.sleep(10)
+    dataset = HLRDataset(
+        cfg.data_path, tokenizer,
+        max_length=cfg.max_length,
+        latent_compression_ratio=cfg.latent_compression_ratio,
+        filter_problems=cfg.filter_problems,
+        filter_sizes=cfg.filter_sizes,
+        limit=_limit,
+        cache_dir=_hlr_cache_dir,
+    )
     _stamp(f"after HLRDataset()  n={len(dataset)}")
 
     collate_fn = partial(collate_hlr, pad_token_id=tokenizer.pad_token_id)

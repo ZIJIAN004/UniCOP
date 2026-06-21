@@ -40,6 +40,16 @@ def _hlr_cache_key(data_path, tokenizer_name, max_length, compression_ratio,
     )
     return hashlib.md5(blob.encode("utf-8")).hexdigest()[:16]
 
+
+def hlr_cache_file(cache_dir, data_path, tokenizer, max_length, compression_ratio,
+                   filter_problems, filter_sizes) -> str:
+    """返回 HLR 处理后样本的缓存 .pt 路径 (train.py 多 rank 协调时复用同一 key)。
+    完整性标记为 <此路径>.done, 仅在 torch.save 成功后写, 避免读到半成品。
+    """
+    key = _hlr_cache_key(data_path, getattr(tokenizer, "name_or_path", "tok"),
+                         max_length, compression_ratio, filter_problems, filter_sizes)
+    return os.path.join(cache_dir, f"hlr_{key}.pt")
+
 _POSTHOC_SYSTEM_MARKER = "\n\nYour output MUST start with <think>"
 _POSTHOC_USER_MARKER = "\n\nTarget solution ("
 
@@ -113,11 +123,11 @@ class HLRDataset(Dataset):
         self._cache_file = None
         if cache_dir and limit <= 0:
             os.makedirs(cache_dir, exist_ok=True)
-            _key = _hlr_cache_key(data_path, getattr(tokenizer, "name_or_path", "tok"),
-                                  max_length, latent_compression_ratio,
-                                  filter_problems, filter_sizes)
-            self._cache_file = os.path.join(cache_dir, f"hlr_{_key}.pt")
-            if os.path.isfile(self._cache_file):
+            self._cache_file = hlr_cache_file(
+                cache_dir, data_path, tokenizer, max_length, latent_compression_ratio,
+                filter_problems, filter_sizes)
+            # 仅当 .done 标记存在(torch.save 已成功)才算命中, 防止读到半成品 .pt
+            if os.path.isfile(self._cache_file + ".done"):
                 try:
                     self.samples = torch.load(self._cache_file, weights_only=False)
                 except TypeError:  # 老版本 torch 无 weights_only 参数
@@ -200,6 +210,8 @@ class HLRDataset(Dataset):
         # ── 落盘缓存 (仅全量构建路径; 命中 load 时已提前 return, 不会到这里) ──
         if self._cache_file is not None:
             torch.save(self.samples, self._cache_file)
+            with open(self._cache_file + ".done", "w") as _f:   # 落盘成功后才写完整性标记
+                _f.write("ok")
             print(f"  [cache] 已落盘 HLRDataset: {self._cache_file} (n={len(self.samples)})")
 
     def _build_sample_with_reason(self, record):
