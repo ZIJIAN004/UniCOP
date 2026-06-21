@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --qos large
 #SBATCH --gpus=4
+#SBATCH --exclude=canele3                 # canele3 节点坏了(作业落上去 batch 秒崩无日志), 静态排除
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/Latent-SFT/train_hlr_%j.log
 #SBATCH --error=/homes/zhuoyi/zijianliu/UniCOP/Latent-SFT/train_hlr_%j.err
 
@@ -119,10 +120,11 @@ if [ -n "$_min_free" ] && [ "$_min_free" -lt 20000 ]; then
     echo "❌ 某张卡 free memory 只剩 ${_min_free} MiB (<20 GiB), 别人在占!"
     _bad_node="$SLURM_NODELIST"
     _self_path="$(realpath "$0")"
+    # 基线带上 canele3 (坏节点), 否则 CLI --exclude 会覆盖 #SBATCH --exclude 把 canele3 放回来
     if [ -n "${BAD_NODES:-}" ]; then
         _new_bad="$BAD_NODES,$_bad_node"
     else
-        _new_bad="$_bad_node"
+        _new_bad="canele3,$_bad_node"
     fi
     echo "  当前脏节点: $_bad_node, 累计 exclude: $_new_bad"
     sbatch --exclude="$_new_bad" --export=ALL,BAD_NODES="$_new_bad" "$_self_path"

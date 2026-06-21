@@ -21,6 +21,7 @@
 
 #SBATCH --qos=large
 #SBATCH --gpus=4
+#SBATCH --exclude=canele3                 # canele3 节点坏了(作业落上去 batch 秒崩无日志), 静态排除
 #SBATCH --job-name=zijia_hlr_sweep_eval
 #SBATCH --comment="zijianliu, HLR β sweep BO1 eval (4 pa parallel), do not cancel"
 #SBATCH --no-requeue
