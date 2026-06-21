@@ -209,8 +209,10 @@ else
         exit 1
     fi
 
-    # 合并
-    cat "$PROFILE_TMP/shard_"*.jsonl > "$PROFILED_DATA"
+    # 先写 .tmp 再原子 mv: 若 cat 中途被 kill, .tmp 残留但 $PROFILED_DATA 不存在,
+    # 下次重跑会重新 profile, 不会读到半成品。
+    cat "$PROFILE_TMP/shard_"*.jsonl > "${PROFILED_DATA}.tmp"
+    mv "${PROFILED_DATA}.tmp" "$PROFILED_DATA"
     rm -rf "$PROFILE_TMP"
     echo "    ✓ 合并完成: $(wc -l < "$PROFILED_DATA") 行 → $PROFILED_DATA"
 fi
