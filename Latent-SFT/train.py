@@ -209,6 +209,32 @@ def train_hlr(cfg: HLRConfig):
         print(f"  attn_implementation = {_attn_impl}")
     _stamp("after from_pretrained (main model)")
 
+    # ── Liger Kernel (省显存 + 加速) ──────────────────────────────────────
+    # 自定义训练循环不走 SFTTrainer, SFTConfig.use_liger_kernel 那套不生效,
+    # 这里手动 patch。FusedLinearCrossEntropy 不 materialize 全 logits
+    # (vocab 151936 × seq ~8192, +CE 内部 fp32 upcast 再翻倍), teacher(620) +
+    # student(789) 两次 model(labels=) forward 都受益; rms_norm/swiglu/rope 融合
+    # 算子额外提速。必须在 accelerator.prepare (ZeRO-3 init) 之前 patch (liger 官方要求)。
+    # FLCE 给 labels 时把 logits 置 None — 本循环只用 .loss / .hidden_states,
+    # 从不读 .logits, 安全。lm_head.weight 在 model.__call__ 内被 FLCE 访问,
+    # DeepSpeed ZeRO-3 forward 上下文激活会自动 gather (区别于 embedding 在
+    # model forward 外被访问需手动 GatheredParameters)。LATENT_USE_LIGER=0 可关。
+    if os.environ.get("LATENT_USE_LIGER", "1") != "0":
+        try:
+            from liger_kernel.transformers import apply_liger_kernel_to_qwen3
+            # model 已 from_pretrained: 传 model= 确保已实例化的子模块 (RMSNorm/SwiGLU 等)
+            # 被原地替换 (不只 patch 类), 否则对已加载实例可能不完全生效。
+            apply_liger_kernel_to_qwen3(
+                rope=True, rms_norm=True, swiglu=True,
+                fused_linear_cross_entropy=True, cross_entropy=False,
+                model=model,
+            )
+            if accelerator.is_main_process:
+                print("  ✓ Liger Kernel 已启用 (qwen3: FLCE + rmsnorm + swiglu + rope)")
+        except Exception as e:
+            if accelerator.is_main_process:
+                print(f"  ⚠ Liger Kernel 启用失败, 回退标准实现: {e}")
+
     if len(tokenizer) > model.get_input_embeddings().num_embeddings:
         model.resize_token_embeddings(len(tokenizer))
 
