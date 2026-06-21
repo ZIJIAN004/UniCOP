@@ -2,6 +2,7 @@
 #SBATCH --qos large
 #SBATCH --gpus=4
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/Latent-SFT/train_eval_hlr_%j.log
+#SBATCH --error=/homes/zhuoyi/zijianliu/UniCOP/Latent-SFT/train_eval_hlr_%j.err
 
 # HLR 一体化 Pipeline (single sbatch): 训练 → merge → baseline eval → HLR eval → 对比
 #
@@ -66,6 +67,11 @@ export PYTHONFAULTHANDLER=1
 export TORCH_NCCL_TRACE_BUFFER_SIZE=20480
 export TORCH_NCCL_DUMP_ON_TIMEOUT=1
 export NCCL_DEBUG=WARN
+
+# ── 早期诊断: 确保任何失败都有迹可查 ──
+exec 2>&1
+set -euo pipefail
+echo "[train_eval_hlr] 脚本启动 $(date '+%F %T') host=$(hostname) job=${SLURM_JOB_ID:-none}"
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"

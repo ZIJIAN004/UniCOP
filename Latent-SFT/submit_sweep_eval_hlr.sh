@@ -35,11 +35,15 @@ export XDG_CACHE_HOME=/homes/zhuoyi/.cache
 export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# ── 早期诊断: 确保任何失败都有迹可查 ──
+exec 2>&1
+set -euo pipefail
+echo "[sweep_eval_hlr] 脚本启动 $(date '+%F %T') host=$(hostname) job=${SLURM_JOB_ID:-none}"
+
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop
 cd /homes/zhuoyi/zijianliu/UniCOP
-set -uo pipefail
 
 # ── 参数 ──────────────────────────────────────────────────────────
 DIRS="${DIRS:?必须设 DIRS (checkpoint 目录列表, 空格分隔)}"

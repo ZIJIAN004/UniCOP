@@ -2,6 +2,7 @@
 #SBATCH --qos large
 #SBATCH --gpus=4
 #SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/Latent-SFT/train_hlr_%j.log
+#SBATCH --error=/homes/zhuoyi/zijianliu/UniCOP/Latent-SFT/train_hlr_%j.err
 
 # HLR Stage 3 训练 — Qwen3-4B-Thinking 基座 (默认)
 #
@@ -39,6 +40,11 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 # 纯 CUDA allocator 行为, 不改 collective/loss/B=1 假设. 首次上线先在 smoke 跑 1 步确认 PyTorch/NCCL 不报错.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1   # log 实时刷新, 避免 ZeRO-3 init 静默期 log "假卡住"
+
+# ── 早期诊断: 确保任何失败都有迹可查 ──
+exec 2>&1                    # stderr → stdout, 防止错误无声丢失
+set -euo pipefail            # 任何命令失败立即退出 + 未定义变量报错
+echo "[train_hlr] 脚本启动 $(date '+%F %T') host=$(hostname) job=${SLURM_JOB_ID:-none}"
 
 # ── zhuoyi 多卡 NCCL 拓扑必加 (无 NVLink, 走 socket transport) ──
 export NCCL_P2P_DISABLE=1
