@@ -21,7 +21,7 @@
 #   - large QOS (≤24 GPU/job); 4 GPU 足够, 用 normal 也行
 #
 # 流程:
-#   - HLR_DATA 未设 → 训练前自动从 chains_template_cvrp20.jsonl 跑 entropy_profile (~1-2 hr)
+#   - HLR_DATA 未设 → 训练前自动从 chains_template_cvrp20_10k.jsonl 跑 entropy_profile (~5-10 min)
 #   - HLR_DATA 已设 → 跳过 entropy_profile, 直接训练
 #
 # 用法:
@@ -129,9 +129,9 @@ fi
 # ── Step 0: entropy_profile (4 卡并行, 与 ZeRO-3 init 隔离) ──
 # 不能在 train.py 内 inline 跑: ZeRO-3 init 把 embedding.weight partition 成 1D,
 # 后续 forward 会 'weight' must be 2-D 报错.
-# 4 卡并行: 50000 条 / 4 = 12500 条/卡, ~20-30 min.
-RAW_DATA="UniCOP-Distill/data/chains_template_cvrp20.jsonl"
-PROFILED_DATA="${HLR_DATA:-Latent-SFT/data/profiled_${BASE_MODEL_TYPE}_cvrp20.jsonl}"
+# 4 卡并行: 10000 条 / 4 = 2500 条/卡, ~5-10 min.
+RAW_DATA="${RAW_DATA:-UniCOP-Distill/data/chains_template_cvrp20_10k.jsonl}"
+PROFILED_DATA="${HLR_DATA:-Latent-SFT/data/profiled_${BASE_MODEL_TYPE}_cvrp20_10k.jsonl}"
 
 echo ""
 echo ">>> Step 0: entropy_profile (4 卡并行) ($(date))"
@@ -178,14 +178,12 @@ else
 fi
 
 # ── 训练参数 (sbatch 默认尊重 hlr_config.py, 仅个别字段允许 env 覆盖) ──
-EXTRA_EPOCHS_FLAG=""
-if [ -n "${HLR_EPOCHS:-}" ]; then
-    EXTRA_EPOCHS_FLAG="--epochs $HLR_EPOCHS"
-fi
+HLR_EPOCHS="${HLR_EPOCHS:-1}"
+EXTRA_EPOCHS_FLAG="--epochs $HLR_EPOCHS"
 
 echo ""
 echo ">>> Step 1: HLR 训练 ($(date))"
-echo "    epochs=${HLR_EPOCHS:-3} (default 3)  batch=1 grad_accum=8 × 4 GPU = effective 32"
+echo "    epochs=${HLR_EPOCHS}  batch=1 grad_accum=8 × 4 GPU = effective 32"
 echo "    main_lr=2e-5 (LoRA)  latent_reasoner_lr=5e-5 (随机初始化, lr 稍高)"
 echo "    LoRA r=64 alpha=128  scheduler=cosine warmup=0.05  wd=0.01"
 echo "    Loss: α=1.0 (student CE) β=1.0 (align L1) γ=1.0 (teacher CE)"

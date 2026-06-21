@@ -44,7 +44,7 @@ cd /homes/zhuoyi/zijianliu/UniCOP
 source paths.sh
 
 MODEL_PATH="${HLR_MODEL:-$BASE_MODEL}"
-RAW_DATA="UniCOP-Distill/data/chains_template_cvrp20.jsonl"
+RAW_DATA="${RAW_DATA:-UniCOP-Distill/data/chains_template_cvrp20.jsonl}"
 PROFILED_DATA="Latent-SFT/data/profiled_smoke_${BASE_MODEL_TYPE}_cvrp20.jsonl"
 PROFILE_LIMIT="${SMOKE_PROFILE_LIMIT:-200}"
 FORCE_REPROFILE="${SMOKE_FORCE_REPROFILE:-0}"

@@ -51,7 +51,7 @@ export BASE_MODEL_TYPE="${BASE_MODEL_TYPE:-qwen3_thinking}"
 source paths.sh
 
 MODEL_PATH="${HLR_MODEL:-$BASE_MODEL}"
-RAW_DATA="UniCOP-Distill/data/chains_template_cvrp20.jsonl"
+RAW_DATA="${RAW_DATA:-UniCOP-Distill/data/chains_template_cvrp20.jsonl}"
 PROFILED_DATA="Latent-SFT/data/profiled_smoke_${BASE_MODEL_TYPE}_cvrp20.jsonl"
 PROFILE_LIMIT="${SMOKE_PROFILE_LIMIT:-256}"   # ≥ MEM_LIMIT, 且 ÷4 整除
 MEM_LIMIT="${MEM_LIMIT:-256}"                  # 训练用样本数 (÷4 整除!)
