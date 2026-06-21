@@ -266,14 +266,24 @@ def train_hlr(cfg: HLRConfig):
     # Smoke: limit > 0 时 HLRDataset 读到 N 条就停, 16min → 30sec 大幅缩短诊断 cycle
     _limit = getattr(cfg, "dataset_limit", 0)
     _stamp(f"before HLRDataset() (limit={_limit if _limit else 'full'})")
-    dataset = HLRDataset(
-        cfg.data_path, tokenizer,
-        max_length=cfg.max_length,
-        latent_compression_ratio=cfg.latent_compression_ratio,
-        filter_problems=cfg.filter_problems,
-        filter_sizes=cfg.filter_sizes,
-        limit=_limit,
+    # 处理后样本磁盘缓存: 重跑跳过 tokenize 循环 (16min→秒级)。HLR_DATA_CACHE=0 关。
+    # main_process_first: rank0 先构建+落盘, 其余 rank 等待后直接 load, 消除 ×N rank 冗余。
+    _hlr_cache_dir = (
+        None if os.environ.get("HLR_DATA_CACHE", "1") == "0"
+        else os.environ.get(
+            "HLR_CACHE_DIR",
+            os.path.join(os.path.dirname(os.path.abspath(cfg.data_path)), ".hlr_cache"))
     )
+    with accelerator.main_process_first():
+        dataset = HLRDataset(
+            cfg.data_path, tokenizer,
+            max_length=cfg.max_length,
+            latent_compression_ratio=cfg.latent_compression_ratio,
+            filter_problems=cfg.filter_problems,
+            filter_sizes=cfg.filter_sizes,
+            limit=_limit,
+            cache_dir=_hlr_cache_dir,
+        )
     _stamp(f"after HLRDataset()  n={len(dataset)}")
 
     collate_fn = partial(collate_hlr, pad_token_id=tokenizer.pad_token_id)

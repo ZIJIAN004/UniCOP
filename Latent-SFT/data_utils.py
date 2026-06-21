@@ -10,12 +10,35 @@ HLR 训练数据加载: 从 profiled jsonl 构建分段训练样本.
 Phase 1 限制: collate 强制 batch_size=1, 不做跨样本 padding.
 """
 
+import hashlib
 import json
 import math
+import os
 from dataclasses import dataclass
 
 import torch
 from torch.utils.data import Dataset
+
+
+def _hlr_cache_key(data_path, tokenizer_name, max_length, compression_ratio,
+                   filter_problems, filter_sizes) -> str:
+    """处理后 HLR 样本的缓存 key: 数据文件 mtime/size + 所有影响产物的参数 + tokenizer。
+
+    数据文件被重新生成 (mtime/size 变) 或任一参数变更 → key 变 → 自动失效重建,
+    与 train_sft_stage2 的缓存策略一致。
+    """
+    try:
+        st = os.stat(data_path)
+        sig = f"{os.path.abspath(data_path)}:{st.st_size}:{int(st.st_mtime)}"
+    except OSError:
+        sig = f"{os.path.abspath(data_path)}:MISSING"
+    blob = sig + (
+        f"||ml={max_length}|cr={compression_ratio}"
+        f"|fp={sorted(filter_problems) if filter_problems else None}"
+        f"|fs={sorted(filter_sizes) if filter_sizes else None}"
+        f"|tok={tokenizer_name}"
+    )
+    return hashlib.md5(blob.encode("utf-8")).hexdigest()[:16]
 
 _POSTHOC_SYSTEM_MARKER = "\n\nYour output MUST start with <think>"
 _POSTHOC_USER_MARKER = "\n\nTarget solution ("
@@ -68,12 +91,16 @@ class HLRDataset(Dataset):
                  max_length: int = 8192,
                  latent_compression_ratio: int = 4,
                  filter_problems=None, filter_sizes=None,
-                 limit: int = 0):
+                 limit: int = 0, cache_dir: str = None):
         """
         Args:
             limit: 只读前 N 条 record (0=全量, smoke 用 50-100 加速 cycle)
                    注意是"接受 N 条"而非"读 N 行" — limit 满了立刻停, 避免
                    读完 50000 行再丢弃, 是 50000 行 tokenize ×4 rank = 16 min 的根因。
+            cache_dir: 非空且 limit<=0 时, 处理后样本 (self.samples) 落盘缓存;
+                   命中则 torch.load 跳过整个 tokenize 循环 (16min→秒级)。
+                   多 rank 协调由调用方用 accelerator.main_process_first() 包裹。
+                   limit>0 (smoke) 不缓存, 避免把子集污染成全量缓存。
         """
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -81,6 +108,23 @@ class HLRDataset(Dataset):
         self.samples = []
         # 收集被成功 build 的 record 子集做覆盖率统计 (与 entropy_profile 端共用 schema)
         accepted_records = []
+
+        # ── 缓存命中: 直接 load 处理好的样本, 跳过 tokenize ──
+        self._cache_file = None
+        if cache_dir and limit <= 0:
+            os.makedirs(cache_dir, exist_ok=True)
+            _key = _hlr_cache_key(data_path, getattr(tokenizer, "name_or_path", "tok"),
+                                  max_length, latent_compression_ratio,
+                                  filter_problems, filter_sizes)
+            self._cache_file = os.path.join(cache_dir, f"hlr_{_key}.pt")
+            if os.path.isfile(self._cache_file):
+                try:
+                    self.samples = torch.load(self._cache_file, weights_only=False)
+                except TypeError:  # 老版本 torch 无 weights_only 参数
+                    self.samples = torch.load(self._cache_file)
+                print(f"  [cache] 命中 HLRDataset, 跳过 tokenize: "
+                      f"{self._cache_file} (n={len(self.samples)})")
+                return
 
         n_invalid = 0          # 跳过 (json 解析失败 / output 空 / </think> 缺失)
         n_truncated = 0        # 因 teacher_ids > max_length 而 drop
@@ -152,6 +196,11 @@ class HLRDataset(Dataset):
                 print("  ⚠ 训练样本里没有 cot_token_count 字段 (旧版 profiled jsonl?), 跳过覆盖率报送")
         except ImportError:
             pass
+
+        # ── 落盘缓存 (仅全量构建路径; 命中 load 时已提前 return, 不会到这里) ──
+        if self._cache_file is not None:
+            torch.save(self.samples, self._cache_file)
+            print(f"  [cache] 已落盘 HLRDataset: {self._cache_file} (n={len(self.samples)})")
 
     def _build_sample_with_reason(self, record):
         """包装 _build_sample, 返回 (sample, reason) 以区分截断 vs 其它无效."""
