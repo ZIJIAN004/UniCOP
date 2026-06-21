@@ -41,11 +41,6 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1   # log 实时刷新, 避免 ZeRO-3 init 静默期 log "假卡住"
 
-# ── 早期诊断: 确保任何失败都有迹可查 ──
-exec 2>&1                    # stderr → stdout, 防止错误无声丢失
-set -euo pipefail            # 任何命令失败立即退出 + 未定义变量报错
-echo "[train_hlr] 脚本启动 $(date '+%F %T') host=$(hostname) job=${SLURM_JOB_ID:-none}"
-
 # ── zhuoyi 多卡 NCCL 拓扑必加 (无 NVLink, 走 socket transport) ──
 export NCCL_P2P_DISABLE=1
 export NCCL_SHM_DISABLE=1
@@ -80,6 +75,9 @@ fi
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop
+
+set -euo pipefail  # 必须在 conda activate 之后 (参照 Reason-Mask submit_sweep_eval_bo1_v6.sh:51)
+echo "[train_hlr] 启动 $(date '+%F %T') host=$(hostname) job=${SLURM_JOB_ID:-none}"
 
 cd /homes/zhuoyi/zijianliu/UniCOP
 export BASE_MODEL_TYPE="${BASE_MODEL_TYPE:-qwen3_thinking}"

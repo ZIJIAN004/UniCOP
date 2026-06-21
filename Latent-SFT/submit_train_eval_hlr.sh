@@ -68,14 +68,12 @@ export TORCH_NCCL_TRACE_BUFFER_SIZE=20480
 export TORCH_NCCL_DUMP_ON_TIMEOUT=1
 export NCCL_DEBUG=WARN
 
-# ── 早期诊断: 确保任何失败都有迹可查 ──
-exec 2>&1
-set -euo pipefail
-echo "[train_eval_hlr] 脚本启动 $(date '+%F %T') host=$(hostname) job=${SLURM_JOB_ID:-none}"
-
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
 conda activate unicop
+
+set -euo pipefail  # 必须在 conda activate 之后 (参照 Reason-Mask)
+echo "[train_eval_hlr] 启动 $(date '+%F %T') host=$(hostname) job=${SLURM_JOB_ID:-none}"
 
 cd /homes/zhuoyi/zijianliu/UniCOP
 export BASE_MODEL_TYPE="${BASE_MODEL_TYPE:-qwen3_thinking}"
