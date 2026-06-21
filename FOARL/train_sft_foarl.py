@@ -60,8 +60,11 @@ def make_deepspeed_config(zero_stage: int):
                                  "warmup_num_steps": "auto", "total_num_steps": "auto"}},
     }
     if zero_stage == 2:
-        base["zero_optimization"] = {"stage": 2, "overlap_comm": True, "contiguous_gradients": True,
-                                     "reduce_bucket_size": 5e8, "reduce_scatter": True}
+        base["zero_optimization"] = {
+            "stage": 2, "overlap_comm": True, "contiguous_gradients": True,
+            "reduce_bucket_size": 5e7, "allgather_bucket_size": 5e7,
+            "reduce_scatter": True, "round_robin_gradients": True,
+        }
     elif zero_stage == 3:
         base["zero_optimization"] = {
             "stage": 3, "overlap_comm": True, "contiguous_gradients": True,
@@ -187,6 +190,11 @@ def main():
     args = ap.parse_args()
 
     set_seed(args.seed)
+
+    # TF32: Ampere+ GPU 上 matmul 加速 ~1.3×，精度损失可忽略
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
     print("=" * 60)
     print("  FOARL CVRP Stage-1 SFT (Instruct + chat template, 无 think)")
     print(f"  模型: {args.model}")
@@ -227,8 +235,10 @@ def main():
         print(f"  [sanity] 截取前 {args.max_samples} 条")
 
     # ── 模型 ─────────────────────────────────────────────────────────────
+    _attn_impl = os.environ.get("SFT_ATTN_IMPL", "flash_attention_2")
     model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.bfloat16,
-                                                 trust_remote_code=True)
+                                                 trust_remote_code=True,
+                                                 attn_implementation=_attn_impl)
     if len(tokenizer) > model.get_input_embeddings().num_embeddings:
         print(f"  resize embedding → {len(tokenizer)}")
         model.resize_token_embeddings(len(tokenizer))
@@ -252,6 +262,7 @@ def main():
         deepspeed=make_deepspeed_config(args.zero_stage),
         gradient_checkpointing=args.gradient_checkpointing,
         gradient_checkpointing_kwargs={"use_reentrant": args.zero_stage == 3},
+        use_liger_kernel=os.environ.get("SFT_USE_LIGER", "1") != "0",
         lr_scheduler_type="cosine", weight_decay=0.01,
     )
 

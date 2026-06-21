@@ -2,7 +2,7 @@
 # run_sft_foarl_cvrp100.sh
 # ──────────────────────────────────────────────────────────────────────────────
 # FOARL 无推理臂 SFT @ Qwen3-4B-Instruct-2507, CVRP100, zhihan 一体化:
-#   Step 1: Stage-1 SFT (FOARL 原版格式, 无 think, 4 GPU ZeRO-3)
+#   Step 1: Stage-1 SFT (FOARL 原版格式, 无 think, 4 GPU ZeRO-2)
 #   Step 2: merge LoRA adapter → 完整权重
 #   Step 3: bo1 eval (best-of-1 贪心, vLLM TP=1, prompt_mode foarl)
 #
@@ -15,6 +15,8 @@
 #   bash run_sft_foarl_cvrp100.sh
 #   (Ctrl-b d 脱离; tmux attach -t sft100_foarl 回看)
 #
+# ⚠️ 显存: ZeRO-2 每卡存完整 4B 参数(~8GB), 较 ZeRO-3 多 ~6GB。FOARL 序列仅 6400 tokens,
+#    显存压力远小于 UniCOP 思维臂(13568), 基本无 OOM 风险。
 # ⚠️ FOARL eval 用 vLLM TP=1: vLLM 0.7.3 无 Qwen3 原生实现→回退 Transformers backend,
 #    TP>1 多 worker 生成期崩溃 (见 submit_eval_bo1_foarl_compare.sh)。TP=1 规避, 对贪心结果零影响。
 # ──────────────────────────────────────────────────────────────────────────────
@@ -117,9 +119,9 @@ CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
     --output_dir "$OUTPUT_DIR" \
     --lora_rank $SFT_LORA_RANK --lora_alpha $SFT_LORA_ALPHA \
     --lr $SFT_LR --epochs $SFT_EPOCHS \
-    --batch_size 1 --grad_accum 8 --warmup_ratio 0.05 \
+    --batch_size 2 --grad_accum 4 --warmup_ratio 0.05 \
     --max_length $SFT_MAX_LENGTH --max_output_length $SFT_MAX_OUTPUT \
-    --zero_stage 3 --gradient_checkpointing \
+    --zero_stage 2 --gradient_checkpointing \
     --resume_from_checkpoint auto \
     --save_steps 200 --logging_steps 10
 
