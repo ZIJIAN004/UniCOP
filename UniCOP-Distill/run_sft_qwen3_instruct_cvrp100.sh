@@ -3,7 +3,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # UniCOP 思维臂 SFT @ Qwen3-4B-Instruct-2507 (非 thinking), CVRP100, 一体化:
 #   Step 0: think mask preflight (CPU)
-#   Step 1: Stage2 SFT (stride=5 块决策思维链, 4 GPU ZeRO-3)
+#   Step 1: Stage2 SFT (stride=5 块决策思维链, 4 GPU ZeRO-2)
 #   Step 2: merge LoRA adapter → 完整权重
 #   Step 3: bo1 eval (best-of-1 贪心), 与同基座 FOARL 臂跑同一 eval 集 (seed=9999)
 #
@@ -18,8 +18,8 @@
 #   bash run_sft_qwen3_instruct_cvrp100.sh
 #   (Ctrl-b d 脱离; tmux attach -t sft100_uni 回看)
 #
-# ⚠️ 显存: 13568 序列长是 cvrp20(8192) 的 ~1.65×, attention 显存吃紧。若 4 卡 OOM:
-#     NUM_GPUS=6 bash run_sft_qwen3_instruct_cvrp100.sh   (加卡); ZeRO-3 已开 optimizer offload。
+# ⚠️ 显存: ZeRO-2 每卡存完整 4B 参数(~8GB), 较 ZeRO-3 多 ~6GB。
+#     若 4 卡 OOM: NUM_GPUS=6 bash run_sft_qwen3_instruct_cvrp100.sh (加卡降单卡显存)。
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -128,7 +128,7 @@ CUDA_VISIBLE_DEVICES=$SFT_CUDA_DEVICES accelerate launch \
     --max_length $SFT_MAX_LENGTH \
     --max_output_length $SFT_MAX_OUTPUT \
     --output_dir "$OUTPUT_DIR" \
-    --zero_stage 3 --gradient_checkpointing \
+    --zero_stage 2 --gradient_checkpointing \
     --resume_from_checkpoint auto \
     --epochs $SFT_EPOCHS --batch_size 1 --grad_accum 8 \
     --lr $SFT_LR --save_steps 200

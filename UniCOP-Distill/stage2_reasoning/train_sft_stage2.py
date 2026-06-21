@@ -79,8 +79,10 @@ def make_deepspeed_config(zero_stage: int) -> dict | None:
             "stage":                2,
             "overlap_comm":         True,
             "contiguous_gradients": True,
-            "reduce_bucket_size":   5e8,
+            "reduce_bucket_size":   5e7,      # LoRA 梯度仅 ~5MB, 小 bucket 最大化通信-计算 overlap
+            "allgather_bucket_size": 5e7,
             "reduce_scatter":       True,
+            "round_robin_gradients": True,   # 梯度分片负载均衡
         }
     elif zero_stage == 3:
         base["zero_optimization"] = {
@@ -393,6 +395,10 @@ def main():
     args = parser.parse_args()
 
     set_seed(args.seed)
+
+    # TF32: Ampere+ GPU 上 matmul 加速 ~1.3×，精度损失可忽略
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     print(f"{'='*60}")
     print(f"  SFT 蒸馏训练")
