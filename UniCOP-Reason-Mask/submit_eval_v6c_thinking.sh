@@ -1,25 +1,23 @@
 #!/bin/bash
-# submit_eval_v6c_vs_foarl.sh — 训练后 instruct(FOARL) vs thinking(v6_complete) 能力对比 (zhuoyi SLURM)
-#   两个模型都在 Qwen3-4B-Instruct 基座上训练, 区别在训练目标范式:
-#     instruct 臂: FOARL GRPO 产物 + --prompt_mode foarl, 直接解(无 think_budget)
-#       /homes/zhuoyi/zijianliu/UniCOP/FOARL/output_grpo_foarl_cvrp20/merged_model
-#     thinking 臂: v6_complete merged + --prompt_mode think + budget forcing(--think_budget 10000,
-#       治循环截断, 不惩罚重复)
-#       /homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/v6_complete/merged_model
-#   同一批 seed=9999 的 NUM_TEST 个 CVRP20 实例 (evaluate.py 硬编码 9999, 与历史 eval 逐实例一致),
-#   各用各 SFT prompt。两臂并行(instruct=GPU0-3, thinking=GPU4-7), 每臂内 BO1→BO8 顺序,
-#   各 4 shard 数据并行(TP=1), 跑完自动 merge_shards 合并。结果在 eval_v6c_vs_foarl/<tag>/MERGED.json。
-#   注: wave 是思维步 PRM 剪枝, 仅 thinking 臂加 --wave; instruct 直接答案无 wave 意义。
-#   提交: sbatch submit_eval_v6c_vs_foarl.sh   (8 卡需 large QOS)
+# submit_eval_v6c_thinking.sh — v6_complete thinking 臂 CVRP20 eval (zhuoyi SLURM, 4 卡 normal QOS)
+#   两个 4 卡 job 之一 (另一个: submit_eval_v6c_instruct.sh)。各自独立 sbatch, 可同时排。
+#   模型: v6_complete merged (Qwen3-4B-Instruct 基座训成 think 范式), --prompt_mode think +
+#     budget forcing(--think_budget 10000, 治循环截断, 不惩罚重复)
+#     /homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/v6_complete/merged_model
+#   同一批 seed=9999 的 NUM_TEST 个 CVRP20 实例 (evaluate.py 硬编码 9999, 与 instruct job 逐实例一致),
+#   BO1→BO8(+WAVE) 顺序, 4 shard 数据并行(GPU0-3, TP=1), 跑完 merge_shards 合并。
+#   结果: eval_v6c_vs_foarl/{thinking_bo1,thinking_bo8wave}/MERGED.json
+#   注: wave 是思维步 PRM 剪枝, 本 job 需要 POMO CVRP n20 ckpt (paths.sh 注入)。
+#   提交: sbatch submit_eval_v6c_thinking.sh
 
-#SBATCH --qos=large
-#SBATCH --gpus=8
-#SBATCH --job-name=zijia_eval_v6c
-#SBATCH --comment="zijianliu, FOARL instruct vs v6_complete thinking eval, do not cancel"
+#SBATCH --qos=normal
+#SBATCH --gpus=4
+#SBATCH --job-name=zijia_eval_v6c_think
+#SBATCH --comment="zijianliu, v6_complete thinking eval, do not cancel"
 #SBATCH --no-requeue
 #SBATCH --open-mode=append
-#SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/eval_v6c_%j.log
-#SBATCH --error=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/eval_v6c_%j.err
+#SBATCH --output=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/eval_v6c_think_%j.log
+#SBATCH --error=/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/eval_v6c_think_%j.err
 
 export HOME=/homes/zhuoyi
 export PIP_CACHE_DIR=/homes/zhuoyi/.pip_cache
@@ -27,11 +25,10 @@ export TMPDIR=/homes/zhuoyi/tmp
 export XDG_CACHE_HOME=/homes/zhuoyi/.cache
 export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 
-INSTRUCT_MODEL="${INSTRUCT_MODEL:-/homes/zhuoyi/zijianliu/UniCOP/FOARL/output_grpo_foarl_cvrp20/merged_model}"
 THINKING_MODEL="${THINKING_MODEL:-/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/v6_complete/merged_model}"
 NUM_TEST="${NUM_TEST:-1000}"      # 与 optimal 对齐的冻结集; 勿改小
 TEMP="${TEMP:-0.6}"               # BO8 采样温度
-THINK_BUDGET="${THINK_BUDGET:-10000}"   # thinking 臂 budget forcing 预算 (确保推理充分)
+THINK_BUDGET="${THINK_BUDGET:-10000}"   # budget forcing 预算 (确保推理充分)
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
@@ -51,13 +48,10 @@ if [ -z "$POMO_CVRP_DIR" ] || { [ ! -f "$POMO_CVRP_DIR/MODEL_BEST.pt" ] && [ ! -
 fi
 WAVE_ARGS=(--wave --bestofn --pomo_ckpt_dir "$POMO_CKPT_DIR" --pomo_baseline_dir "$POMO_BASELINE_DIR")
 
-for m in "$INSTRUCT_MODEL" "$THINKING_MODEL"; do
-    [ -d "$m" ] || { echo "❌ 模型不存在: $m"; exit 1; }
-done
+[ -d "$THINKING_MODEL" ] || { echo "❌ 模型不存在: $THINKING_MODEL"; exit 1; }
 
-# ── GPU 占用预检 (8 卡全检): 分到的卡被占 → exclude 本节点重投本 job ──
-#    无默认 exclude (用户决定: 不预排任何节点), 完全靠预检动态排除被占的坏节点。
-export SUBMIT_SCRIPT="$(pwd)/submit_eval_v6c_vs_foarl.sh"
+# ── GPU 占用预检 (4 卡): 分到的卡被占 → exclude 本节点重投本 job ──
+export SUBMIT_SCRIPT="$(pwd)/submit_eval_v6c_thinking.sh"
 export BASE_EXCLUDE=""
 source "$(pwd)/preflight_gpu.sh"
 preflight_gpu_or_resubmit
@@ -104,26 +98,15 @@ run_sharded() {
         || echo "[$(date '+%T')] ⚠️ $tag 合并失败, 详见 $LOG_DIR/${tag}_merge.log"
 }
 
-echo "############## FOARL instruct vs v6_complete thinking 能力对比 ##############  $(date '+%F %T')"
-echo "  INSTRUCT_MODEL=$INSTRUCT_MODEL"
+echo "############## v6_complete thinking 臂 eval ##############  $(date '+%F %T')"
 echo "  THINKING_MODEL=$THINKING_MODEL"
 echo "  NUM_TEST=$NUM_TEST TEMP=$TEMP THINK_BUDGET=$THINK_BUDGET"
 
-# 两臂并行: instruct(GPU0-3, foarl, 无budget) | thinking(GPU4-7, think, budget forcing)
-(
-    run_sharded instruct_bo1     "$INSTRUCT_MODEL" 0,1,2,3 instruct foarl 2048 0 --num_samples 1
-    run_sharded instruct_bo8     "$INSTRUCT_MODEL" 0,1,2,3 instruct foarl 2048 0 --num_samples 8 --temperature "$TEMP" --bestofn
-) &
-PI=$!
-(
-    run_sharded thinking_bo1     "$THINKING_MODEL" 4,5,6,7 reasoning think "$THINK_BUDGET" "$THINK_BUDGET" --num_samples 1
-    run_sharded thinking_bo8wave "$THINKING_MODEL" 4,5,6,7 reasoning think "$THINK_BUDGET" "$THINK_BUDGET" --num_samples 8 --temperature "$TEMP" "${WAVE_ARGS[@]}"
-) &
-PT=$!
-wait "$PI"; wait "$PT"
+run_sharded thinking_bo1     "$THINKING_MODEL" 0,1,2,3 reasoning think "$THINK_BUDGET" "$THINK_BUDGET" --num_samples 1
+run_sharded thinking_bo8wave "$THINKING_MODEL" 0,1,2,3 reasoning think "$THINK_BUDGET" "$THINK_BUDGET" --num_samples 8 --temperature "$TEMP" "${WAVE_ARGS[@]}"
 
 echo "============================================================"
-echo "  ✅ 全部完成  $(date '+%F %T')"
-echo "  结果: $SAVE_BASE/{instruct_bo1,instruct_bo8,thinking_bo1,thinking_bo8wave}/MERGED.json"
+echo "  ✅ thinking 臂完成  $(date '+%F %T')"
+echo "  结果: $SAVE_BASE/{thinking_bo1,thinking_bo8wave}/MERGED.json"
 echo "  日志: $LOG_DIR/"
 echo "============================================================"
