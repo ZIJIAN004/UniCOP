@@ -1,5 +1,5 @@
 #!/bin/bash
-# submit_eval_v6c_instruct.sh — FOARL instruct 臂 CVRP20 eval (zhuoyi SLURM, 4 卡 normal QOS)
+# submit_eval_v6c_instruct.sh — FOARL instruct 臂 CVRP20 eval (zhuoyi SLURM, 4 卡 large QOS)
 #   两个 4 卡 job 之一 (另一个: submit_eval_v6c_thinking.sh)。各自独立 sbatch, 可同时排。
 #   模型: FOARL GRPO 产物 (Qwen3-4B-Instruct 基座), --prompt_mode foarl 直接解(无 think_budget)
 #     /homes/zhuoyi/zijianliu/UniCOP/FOARL/output_grpo_foarl_cvrp20/merged_model
@@ -9,7 +9,7 @@
 #   注: instruct 直接答案无 wave 意义, 本 job 不需要 POMO ckpt。
 #   提交: sbatch submit_eval_v6c_instruct.sh
 
-#SBATCH --qos=normal
+#SBATCH --qos=large
 #SBATCH --gpus=4
 #SBATCH --job-name=zijia_eval_v6c_inst
 #SBATCH --comment="zijianliu, FOARL instruct eval, do not cancel"

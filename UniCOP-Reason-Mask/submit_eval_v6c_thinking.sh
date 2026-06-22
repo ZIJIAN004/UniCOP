@@ -1,5 +1,5 @@
 #!/bin/bash
-# submit_eval_v6c_thinking.sh — v6_complete thinking 臂 CVRP20 eval (zhuoyi SLURM, 4 卡 normal QOS)
+# submit_eval_v6c_thinking.sh — v6_complete thinking 臂 CVRP20 eval (zhuoyi SLURM, 4 卡 large QOS)
 #   两个 4 卡 job 之一 (另一个: submit_eval_v6c_instruct.sh)。各自独立 sbatch, 可同时排。
 #   模型: v6_complete merged (Qwen3-4B-Instruct 基座训成 think 范式), --prompt_mode think +
 #     budget forcing(--think_budget 10000, 治循环截断, 不惩罚重复)
@@ -10,7 +10,7 @@
 #   注: wave 是思维步 PRM 剪枝, 本 job 需要 POMO CVRP n20 ckpt (paths.sh 注入)。
 #   提交: sbatch submit_eval_v6c_thinking.sh
 
-#SBATCH --qos=normal
+#SBATCH --qos=large
 #SBATCH --gpus=4
 #SBATCH --job-name=zijia_eval_v6c_think
 #SBATCH --comment="zijianliu, v6_complete thinking eval, do not cancel"
