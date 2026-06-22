@@ -2,7 +2,9 @@
 # submit_eval_v6c_thinking.sh — v6_complete thinking 臂 CVRP20 eval (zhuoyi SLURM, 4 卡 large QOS)
 #   两个 4 卡 job 之一 (另一个: submit_eval_v6c_instruct.sh)。各自独立 sbatch, 可同时排。
 #   模型: v6_complete merged (Qwen3-4B-Instruct 基座训成 think 范式), --prompt_mode think +
-#     budget forcing(--think_budget 10000, 治循环截断, 不惩罚重复)
+#     budget forcing(--think_budget 6400, 治循环截断, 不惩罚重复)
+#   注: vLLM 0.7.3 无 Qwen3 原生实现 → 回退 Transformers backend → 必须 --enforce_eager
+#       (CUDA graph capture 阶段会 OOM, 见 job 17:35 OOM), 且 max_seq_len 不宜过长。
 #     /homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/v6_complete/merged_model
 #   同一批 seed=9999 的 NUM_TEST 个 CVRP20 实例 (evaluate.py 硬编码 9999, 与 instruct job 逐实例一致),
 #   BO1→BO8(+WAVE) 顺序, 4 shard 数据并行(GPU0-3, TP=1), 跑完 merge_shards 合并。
@@ -28,7 +30,7 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 THINKING_MODEL="${THINKING_MODEL:-/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/v6_complete/merged_model}"
 NUM_TEST="${NUM_TEST:-1000}"      # 与 optimal 对齐的冻结集; 勿改小
 SAMPLE_TEMP="${SAMPLE_TEMP:-0.6}"  # BO8 采样温度 (勿用 TEMP: 系统环境变量名, 会拿到旧值/tmp路径)
-THINK_BUDGET="${THINK_BUDGET:-10000}"   # budget forcing 预算 (确保推理充分)
+THINK_BUDGET="${THINK_BUDGET:-6400}"    # budget forcing 预算 (6400 足够, 不需 10000; max_seq_len=6400+1024+1536=8960, 省 KV cache)
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
@@ -80,7 +82,7 @@ run_sharded() {
             --num_shards "$nsh" --shard_id "$s" --run_tag "$tag" \
             --problem cvrp --problem_size 20 --num_test "$NUM_TEST" \
             --prompt_mode "$pmode" --model_type "$mtype" \
-            --max_completion_length "$maxlen" --vllm_gpu_mem_util 0.8 \
+            --max_completion_length "$maxlen" --vllm_gpu_mem_util 0.8 --enforce_eager \
             --save_dir "$sd" $tb_flag "$@" \
             > "$LOG_DIR/${tag}_shard${s}.log" 2>&1 &
         pids+=($!)
