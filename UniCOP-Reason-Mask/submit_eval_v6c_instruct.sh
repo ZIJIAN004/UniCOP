@@ -69,7 +69,7 @@ run_sharded() {
             --num_shards "$nsh" --shard_id "$s" --run_tag "$tag" \
             --problem cvrp --problem_size 20 --num_test "$NUM_TEST" \
             --prompt_mode "$pmode" --model_type "$mtype" \
-            --max_completion_length "$maxlen" --vllm_gpu_mem_util 0.8 \
+            --max_completion_length "$maxlen" --vllm_gpu_mem_util 0.8 --enforce_eager \
             --save_dir "$sd" $tb_flag "$@" \
             > "$LOG_DIR/${tag}_shard${s}.log" 2>&1 &
         pids+=($!)
