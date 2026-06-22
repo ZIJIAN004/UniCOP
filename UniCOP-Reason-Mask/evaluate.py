@@ -661,7 +661,7 @@ def _generate_local(model, tokenizer, prompts: list[list[dict]],
 
 def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
                      gpu_mem_util: float = 0.9, max_model_len: int = 8192,
-                     enforce_eager: bool = False):
+                     enforce_eager: bool = False, max_num_seqs: int = None):
     """
     加载 vLLM 模型。
     如果 model_path 是 LoRA adapter 目录（含 adapter_config.json 但无 config.json），
@@ -712,7 +712,7 @@ def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
         actual_path = merged_path
 
     print(f"加载 vLLM 模型: {actual_path}  (tp={tensor_parallel_size})")
-    model = LLM(
+    llm_kwargs = dict(
         model=actual_path,
         tensor_parallel_size=tensor_parallel_size,
         trust_remote_code=True,
@@ -721,6 +721,11 @@ def _load_vllm_model(model_path: str, tensor_parallel_size: int = 1,
         max_model_len=max_model_len,
         enforce_eager=enforce_eager,   # 默认 False: CUDA graph + async output 开 (对齐训练端, 快很多)
     )
+    if max_num_seqs is not None:
+        # 限并发到 KV cache 容量: 防 250 prompt 一次涌入超订 KV → RECOMPUTE 抢占风暴
+        # (前期吞吐被重算浪费拖死 + 抢占重调度引入输出非确定性抖动)。
+        llm_kwargs["max_num_seqs"] = max_num_seqs
+    model = LLM(**llm_kwargs)
     tokenizer = model.get_tokenizer()
     return model, tokenizer
 
@@ -1563,6 +1568,9 @@ def main():
     parser.add_argument("--enforce_eager", action="store_true",
                         help="vLLM 强制 eager（关 CUDA graph）。默认 False=开 CUDA graph+async output(对齐训练端,快)。"
                              "仅当 graph capture 报错时才加此 flag 回退。")
+    parser.add_argument("--max_num_seqs", type=int, default=None,
+                        help="vLLM 最大并发序列数。KV cache 不足触发 RECOMPUTE 抢占时设此值"
+                             "(≈KV容量, 如24G卡think长序列设8)消除前期抢占风暴+输出抖动。默认None=引擎默认(256)。")
     parser.add_argument("--prompt_mode",  type=str,   default="think",
                         choices=["think", "structured", "foarl"],
                         help="提示词模式：think=自由推理 | structured=结构化逐步输出 | "
@@ -1673,7 +1681,8 @@ def main():
         model, tokenizer = _load_vllm_model(args.model_path, args.tp_size,
                                             gpu_mem_util=args.vllm_gpu_mem_util,
                                             max_model_len=_vllm_max_len,
-                                            enforce_eager=args.enforce_eager)
+                                            enforce_eager=args.enforce_eager,
+                                            max_num_seqs=args.max_num_seqs)
 
         def generate_fn(prompts, num_samples, temperature, max_length, batch_size):
             return _generate_vllm(

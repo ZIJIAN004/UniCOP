@@ -31,6 +31,7 @@ THINKING_MODEL="${THINKING_MODEL:-/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-M
 NUM_TEST="${NUM_TEST:-1000}"      # 与 optimal 对齐的冻结集; 勿改小
 SAMPLE_TEMP="${SAMPLE_TEMP:-0.6}"  # BO8 采样温度 (勿用 TEMP: 系统环境变量名, 会拿到旧值/tmp路径)
 THINK_BUDGET="${THINK_BUDGET:-6400}"    # budget forcing 预算 (6400 足够, 不需 10000; max_seq_len=6400+1024+1536=8960, 省 KV cache)
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"       # 限并发到 0.8 mem_util 下 KV 容量(~8), 消除 RECOMPUTE 抢占风暴+输出抖动
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
@@ -83,6 +84,7 @@ run_sharded() {
             --problem cvrp --problem_size 20 --num_test "$NUM_TEST" \
             --prompt_mode "$pmode" --model_type "$mtype" \
             --max_completion_length "$maxlen" --vllm_gpu_mem_util 0.8 --enforce_eager \
+            --max_num_seqs "$MAX_NUM_SEQS" \
             --save_dir "$sd" $tb_flag "$@" \
             > "$LOG_DIR/${tag}_shard${s}.log" 2>&1 &
         pids+=($!)
