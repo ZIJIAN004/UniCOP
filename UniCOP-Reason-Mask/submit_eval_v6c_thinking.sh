@@ -27,7 +27,7 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 
 THINKING_MODEL="${THINKING_MODEL:-/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/v6_complete/merged_model}"
 NUM_TEST="${NUM_TEST:-1000}"      # 与 optimal 对齐的冻结集; 勿改小
-TEMP="${TEMP:-0.6}"               # BO8 采样温度
+SAMPLE_TEMP="${SAMPLE_TEMP:-0.6}"  # BO8 采样温度 (勿用 TEMP: 系统环境变量名, 会拿到旧值/tmp路径)
 THINK_BUDGET="${THINK_BUDGET:-10000}"   # budget forcing 预算 (确保推理充分)
 
 source /homes/zhuoyi/.bashrc
@@ -100,10 +100,10 @@ run_sharded() {
 
 echo "############## v6_complete thinking 臂 eval ##############  $(date '+%F %T')"
 echo "  THINKING_MODEL=$THINKING_MODEL"
-echo "  NUM_TEST=$NUM_TEST TEMP=$TEMP THINK_BUDGET=$THINK_BUDGET"
+echo "  NUM_TEST=$NUM_TEST SAMPLE_TEMP=$SAMPLE_TEMP THINK_BUDGET=$THINK_BUDGET"
 
 run_sharded thinking_bo1     "$THINKING_MODEL" 0,1,2,3 reasoning think "$THINK_BUDGET" "$THINK_BUDGET" --num_samples 1
-run_sharded thinking_bo8wave "$THINKING_MODEL" 0,1,2,3 reasoning think "$THINK_BUDGET" "$THINK_BUDGET" --num_samples 8 --temperature "$TEMP" "${WAVE_ARGS[@]}"
+run_sharded thinking_bo8wave "$THINKING_MODEL" 0,1,2,3 reasoning think "$THINK_BUDGET" "$THINK_BUDGET" --num_samples 8 --temperature "$SAMPLE_TEMP" "${WAVE_ARGS[@]}"
 
 echo "============================================================"
 echo "  ✅ thinking 臂完成  $(date '+%F %T')"

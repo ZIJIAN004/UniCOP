@@ -26,7 +26,7 @@ export TRITON_CACHE_DIR=/homes/zhuoyi/.triton
 
 INSTRUCT_MODEL="${INSTRUCT_MODEL:-/homes/zhuoyi/zijianliu/UniCOP/FOARL/output_grpo_foarl_cvrp20/merged_model}"
 NUM_TEST="${NUM_TEST:-1000}"      # 与 optimal 对齐的冻结集; 勿改小
-TEMP="${TEMP:-0.6}"               # BO8 采样温度
+SAMPLE_TEMP="${SAMPLE_TEMP:-0.6}"  # BO8 采样温度 (勿用 TEMP: 系统环境变量名, 会拿到旧值/tmp路径)
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"
@@ -89,10 +89,10 @@ run_sharded() {
 
 echo "############## FOARL instruct 臂 eval ##############  $(date '+%F %T')"
 echo "  INSTRUCT_MODEL=$INSTRUCT_MODEL"
-echo "  NUM_TEST=$NUM_TEST TEMP=$TEMP"
+echo "  NUM_TEST=$NUM_TEST SAMPLE_TEMP=$SAMPLE_TEMP"
 
 run_sharded instruct_bo1  "$INSTRUCT_MODEL" 0,1,2,3 instruct foarl 2048 0 --num_samples 1
-run_sharded instruct_bo8  "$INSTRUCT_MODEL" 0,1,2,3 instruct foarl 2048 0 --num_samples 8 --temperature "$TEMP" --bestofn
+run_sharded instruct_bo8  "$INSTRUCT_MODEL" 0,1,2,3 instruct foarl 2048 0 --num_samples 8 --temperature "$SAMPLE_TEMP" --bestofn
 
 echo "============================================================"
 echo "  ✅ instruct 臂完成  $(date '+%F %T')"
