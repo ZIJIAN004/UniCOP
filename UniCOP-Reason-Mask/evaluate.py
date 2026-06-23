@@ -1649,6 +1649,11 @@ def main():
     if args.backend == "local":
         model, tokenizer = _load_local_model(args.model_path)
 
+        # think 模式补 <think> (对齐 SFT/GRPO); foarl 等直接解模式绝不补
+        if prompt_mode == "think":
+            from prompt_think_patch import patch_chat_template_for_think
+            patch_chat_template_for_think(tokenizer)
+
         rep_penalty = args.repetition_penalty
         no_repeat_ngram = args.no_repeat_ngram_size
 
@@ -1683,6 +1688,11 @@ def main():
                                             max_model_len=_vllm_max_len,
                                             enforce_eager=args.enforce_eager,
                                             max_num_seqs=args.max_num_seqs)
+
+        # think 模式补 <think> (对齐 SFT/GRPO); foarl 等直接解模式绝不补
+        if prompt_mode == "think":
+            from prompt_think_patch import patch_chat_template_for_think
+            patch_chat_template_for_think(tokenizer)
 
         def generate_fn(prompts, num_samples, temperature, max_length, batch_size):
             return _generate_vllm(

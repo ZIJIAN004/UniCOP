@@ -536,6 +536,14 @@ def main():
             tokenizer.add_special_tokens({"pad_token": "<|pad|>"})
     print(f"  pad_token_id={tokenizer.pad_token_id}, eos_token_id={tokenizer.eos_token_id}")
 
+    # ── chat_template 补 <think>: 对齐 SFT stage2, 修 instruct 基座 GRPO 分布断裂 ──
+    # instruct 基座 chat_template 末尾无 <think>, SFT 手动补了但 GRPO 没补 → rollout
+    # prompt 与 SFT 分布断裂 (parse_rate 起点偏低 + 累积 off-policy 发散塌缩)。
+    # 此处 patch processing_class 的 chat_template, TRL 主进程据此文本化 prompt 再发
+    # vLLM server → rollout 与 loss 前向同源。thinking 基座探针 True, 自动跳过。
+    from prompt_think_patch import patch_chat_template_for_think
+    patch_chat_template_for_think(tokenizer)
+
     # ⚠️ 不要用 tokenizer.model_max_length 限制长度。
     # 原配置 `tokenizer.model_max_length = config.max_prompt_length (=768)` 会触发
     # "Token indices sequence length is longer than the specified maximum sequence length"
