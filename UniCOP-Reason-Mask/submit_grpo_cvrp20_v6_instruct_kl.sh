@@ -46,12 +46,14 @@ export PROC_ALPHA_V6="${PROC_ALPHA_V6:-1000}"
 # 输出目录带 kl 标识 → 两个 KL 值 + 与之前崩掉那次 (无 kl 标识) 物理隔离, 避免误 resume
 export OUTPUT_DIR_BASE="/homes/zhuoyi/zijianliu/UniCOP/UniCOP-Reason-Mask/output_v6_instruct_fw_kl${KL_COEF}_lr${LR}_ep${EPOCHS}_pa${PROC_ALPHA_V6}_nt${NUM_TRAIN}"
 
-# sweep 阶段只训练, 不接 BO1 eval (launcher 的 RUN_PREFIX 硬编码会让两个 job 的 eval json 撞名);
-# 训练验证完崩没崩后, 再用 eval 脚本对 merged_model 单独评估。
-export RUN_EVAL=0
+# 全流程 train→merge→BO1 eval (launcher 已支持)。RUN_PREFIX 带 kl 标识 → 两个 job 的
+# eval json/log 不撞名 (launcher 已改为 ${RUN_PREFIX:-...} 可覆盖)。merge 走 merge_lora.py
+# 落盘 $OUT_DIR/merge.log, 不再"失败无 log"。
+export RUN_EVAL=1
+export RUN_PREFIX="v6_instruct_kl${KL_COEF}_"
 
 echo "[submit-kl] KL_COEF=$KL_COEF  BASE=$BASE_MODEL_TYPE  LR=$LR  EPOCHS=$EPOCHS  PROC_ALPHA_V6=$PROC_ALPHA_V6  NUM_TRAIN=$NUM_TRAIN"
-echo "[submit-kl] OUTPUT_DIR_BASE=$OUTPUT_DIR_BASE  RUN_EVAL=$RUN_EVAL"
+echo "[submit-kl] OUTPUT_DIR_BASE=$OUTPUT_DIR_BASE  RUN_EVAL=$RUN_EVAL  RUN_PREFIX=$RUN_PREFIX"
 
 source /homes/zhuoyi/.bashrc
 eval "$(conda shell.bash hook)"

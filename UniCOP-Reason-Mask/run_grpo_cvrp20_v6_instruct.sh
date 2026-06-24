@@ -116,37 +116,24 @@ fi
 
 # ════════════════════════════════════════════════════════════════════════════
 echo "[v6-instruct] ========== [2/3] merge LoRA → merged_model ==========  $(date '+%F %T')"
-# 显式 CPU 合并 (base 从 adapter_config 读 = instruct SFT 产物, 自动适配); 幂等 + 校验权重非空
-# (CLAUDE.md 代码自审: ZeRO-3+LoRA 须验证保存后权重非空)。
+# merge_lora.py: 独立脚本 (base 从 adapter_config 读 = instruct SFT 产物, 自动适配),
+# low_cpu_mem_usage 降 CPU 峰值防 OOM kill, 内置权重非空校验 (CLAUDE.md 代码自审)。
+# ⚠️ 历史 bug: 旧内联 heredoc 不落盘 → zhihan 无 SLURM, tmux 滚屏/断连后"merge 失败且无 log";
+#    且 CPU OOM 时 SIGKILL(exit 137 无 traceback)是哑崩。现全部输出 tee 到 merge.log 可复盘。
+MERGE_LOG="$OUT_DIR/merge.log"
 if [ -d "$MERGED" ] && [ -f "$MERGED/config.json" ]; then
     echo "[v6-instruct] merged_model 已存在, 跳过合并: $MERGED"
-elif ! ADAPTER="$ADAPTER" MERGED="$MERGED" python - <<'PY'
-import os, json, torch
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
-adapter = os.environ["ADAPTER"]; merged = os.environ["MERGED"]
-base = json.load(open(os.path.join(adapter, "adapter_config.json")))["base_model_name_or_path"]
-print(f"[merge] base={base}\n[merge] adapter={adapter} -> {merged}")
-m  = AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch.bfloat16,
-                                          trust_remote_code=True, device_map="cpu")
-pm = PeftModel.from_pretrained(m, adapter)
-pm.merge_and_unload().save_pretrained(merged)
-AutoTokenizer.from_pretrained(adapter).save_pretrained(merged)
-print("[merge] done")
-PY
-then
-    echo "[v6-instruct][FATAL] merge 失败"
-    _notify "❌ v6-instruct: merge 失败" "$ADAPTER"
-    exit 1
+else
+    python "$_D/merge_lora.py" --adapter "$ADAPTER" --merged "$MERGED" 2>&1 | tee "$MERGE_LOG"
+    MERGE_EC=${PIPESTATUS[0]}
+    if [ "$MERGE_EC" -ne 0 ]; then
+        echo "[v6-instruct][FATAL] merge 失败 (exit=$MERGE_EC, 137=CPU OOM被kill), 详见 $MERGE_LOG"
+        tail -n 20 "$MERGE_LOG" 2>/dev/null || true
+        _notify "❌ v6-instruct: merge 失败 exit=$MERGE_EC" "log: $MERGE_LOG"
+        exit 1
+    fi
 fi
-_W="$(find "$MERGED" -maxdepth 1 -name '*.safetensors' -size +0c 2>/dev/null | head -1)"
-if [ ! -f "$MERGED/config.json" ] || [ -z "$_W" ]; then
-    echo "[v6-instruct][FATAL] merged_model 校验失败 (缺 config.json 或权重为空): $MERGED"
-    ls -la "$MERGED" 2>/dev/null || true
-    _notify "❌ v6-instruct: merged 权重为空" "$MERGED"
-    exit 1
-fi
-echo "[v6-instruct] ✓ merge 完成且权重非空: $MERGED"
+echo "[v6-instruct] ✓ merge 完成 (校验见 $MERGE_LOG): $MERGED"
 
 # ════════════════════════════════════════════════════════════════════════════
 echo "[v6-instruct] ========== [3/3] BO1 eval (greedy, model_type=reasoning prompt_mode=think) ==========  $(date '+%F %T')"
@@ -177,17 +164,18 @@ ONLY=RL DO_BO1=1 DO_BO8WAVE=0 \
 NUM_TEST="$EVAL_NUM_TEST" \
 GPU="$EVAL_GPU" TP="$EVAL_TP" GPU_MEM="$EVAL_GPU_MEM" \
 MAXLEN_RL=6144 \
-RUN_PREFIX="v6_instruct_fw_" \
+RUN_PREFIX="${RUN_PREFIX:-v6_instruct_fw_}" \
     bash "$_D/run_eval_matrix.sh"
 EVAL_EC=$?
 set -e
 
+_RP="${RUN_PREFIX:-v6_instruct_fw_}"
 if [ "$EVAL_EC" -eq 0 ]; then
     echo "[v6-instruct] ✅ 全流程完成 (train→merge→BO1)  $(date '+%F %T')"
-    echo "[v6-instruct] 结果: eval_results_matrix/v6_instruct_fw_RL_BO1.json  日志: eval_logs_matrix/v6_instruct_fw_RL_BO1.log"
-    _notify "✅ v6-instruct train+merge+BO1 完成" "结果 eval_results_matrix/v6_instruct_fw_RL_BO1.json"
+    echo "[v6-instruct] 结果: eval_results_matrix/${_RP}RL_BO1.json  日志: eval_logs_matrix/${_RP}RL_BO1.log"
+    _notify "✅ v6-instruct train+merge+BO1 完成" "结果 eval_results_matrix/${_RP}RL_BO1.json"
 else
-    echo "[v6-instruct] ⚠️ BO1 eval 非零退出 (exit=$EVAL_EC), 详见 eval_logs_matrix/v6_instruct_fw_RL_BO1.log"
+    echo "[v6-instruct] ⚠️ BO1 eval 非零退出 (exit=$EVAL_EC), 详见 eval_logs_matrix/${_RP}RL_BO1.log"
     _notify "⚠️ v6-instruct BO1 非零退出" "exit=$EVAL_EC"
 fi
 exit "$EVAL_EC"
