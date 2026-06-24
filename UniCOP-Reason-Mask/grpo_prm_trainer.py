@@ -2508,6 +2508,11 @@ class GRPOPRMTrainer(GRPOTrainer):
                      - (ref_logps - per_token_logps) - 1
                 per_token_loss = per_token_loss + beta_kl * kl
                 kl_term_for_diag = kl
+                # 正向盖章: 首次确认 ref 真到位 + KL 真加进 loss (配 verify_kl.py, 不用反推 metric)
+                if not getattr(self, '_kl_live_confirmed', False):
+                    print(f"✅ KL LIVE: ref_per_token_logps 到位 (shape={tuple(ref_logps.shape)}), "
+                          f"beta={beta_kl} → KL 已真正接入 per-token loss", flush=True)
+                    self._kl_live_confirmed = True
             elif not getattr(self, '_kl_warning_emitted', False):
                 print(
                     f"⚠️ WARNING: kl_coef={beta_kl} > 0 但 inputs 里找不到 "
