@@ -173,6 +173,14 @@ if os.environ.get("LR") is not None:
     config.learning_rate = float(os.environ.get("LR"))
 if os.environ.get("EPOCHS") is not None:
     config.num_train_epochs = int(os.environ.get("EPOCHS"))
+# KL_COEF: 覆盖 KL anchor 系数 (默认 config.py=0.0, DAPO 标准移除 KL)。
+# instruct 弱先验 + Clip-Higher + 无 KL → 后期策略漂出 SFT 流形 (内容+长度双崩,
+# 见 2026-06-23 v6_instruct log: step28 健康→step37 全截断/parse=0, clip_high_hit_rate
+# 全程 0 拦不住慢漂)。补回小 KL 锚回 SFT 即可止崩。经验值 1e-3~5e-3
+# (DeepSeek-R1=1e-3, HH-RLHF=1e-2, 推理模型常省略); 取最小止崩剂量。thinking 基座自带
+# 强收尾先验, 故 KL=0 也不崩, 无需此覆盖。
+if os.environ.get("KL_COEF") is not None:
+    config.kl_coef = float(os.environ.get("KL_COEF"))
 # MAX_COMPLETION / MAX_PROMPT: 覆盖序列长度上限 (默认 config 3584 / 1280)。
 # instruct 基座 think 更长, 3584(为 thinking 调)会截断 → 看到 stats/truncation_rate 高 +
 # completion/p95≈max 顶格时调大。⚠️ 调大 MAX_COMPLETION 必须同步 launcher 的
